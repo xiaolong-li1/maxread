@@ -816,26 +816,41 @@ def _render_asset(path: Path, output_dir: Path) -> Optional[Path]:
     if out_png.exists() and out_png.stat().st_size > 0:
         return out_png
     qlmanage = shutil.which("qlmanage")
-    if not qlmanage:
-        return None
-    tmp_dir = output_dir / f"{path.stem}_thumb"
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        [qlmanage, "-t", "-s", "1400", "-o", str(tmp_dir), str(path)],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        return None
-    generated = list(tmp_dir.glob("*.png"))
-    if not generated:
-        return None
-    shutil.copyfile(generated[0], out_png)
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-    return out_png
+    if qlmanage:
+        tmp_dir = output_dir / f"{path.stem}_thumb"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            [qlmanage, "-t", "-s", "1400", "-o", str(tmp_dir), str(path)],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        generated = list(tmp_dir.glob("*.png")) if result.returncode == 0 else []
+        if generated:
+            shutil.copyfile(generated[0], out_png)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return out_png
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    pdftoppm = shutil.which("pdftoppm")
+    if pdftoppm:
+        prefix = output_dir / f"{path.stem}__pdftoppm"
+        result = subprocess.run(
+            [pdftoppm, "-png", "-r", "200", "-f", "1", "-l", "1", "-singlefile", str(path), str(prefix)],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            generated_png = output_dir / f"{path.stem}__pdftoppm.png"
+            if generated_png.exists() and generated_png.stat().st_size > 0:
+                shutil.move(str(generated_png), str(out_png))
+                return out_png
+
+    return None
 
 
 def _caption_for_asset(path: Path, figures: List[PaperFigure], captions: List[str], source_dir: Optional[Path] = None) -> str:

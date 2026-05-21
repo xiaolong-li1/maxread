@@ -10,6 +10,14 @@ dependencies = [
 [project.scripts]
 maxread = "maxread.cli:main"
 
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["maxread*"]
+exclude = ["tests*", "deploy*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
