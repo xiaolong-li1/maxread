@@ -29,6 +29,8 @@ class Settings:
     feishu_as: str
     lark_cli: str
     arxiv_timeout: int
+    arxiv_parallel_streams: int
+    arxiv_parallel_min_bytes: int
     openai_timeout: int
     require_source: bool
     batch_workers: int
@@ -60,6 +62,8 @@ class Settings:
             feishu_as=os.environ.get("MAXREAD_FEISHU_AS", "bot"),
             lark_cli=os.environ.get("MAXREAD_LARK_CLI", "lark-cli"),
             arxiv_timeout=int(os.environ.get("MAXREAD_ARXIV_TIMEOUT", "45")),
+            arxiv_parallel_streams=int(os.environ.get("MAXREAD_ARXIV_PARALLEL_STREAMS", "4")),
+            arxiv_parallel_min_bytes=int(os.environ.get("MAXREAD_ARXIV_PARALLEL_MIN_BYTES", "1048576")),
             openai_timeout=int(os.environ.get("MAXREAD_OPENAI_TIMEOUT", "180")),
             require_source=os.environ.get("MAXREAD_REQUIRE_SOURCE", "true").lower() in {"1", "true", "yes", "on"},
             batch_workers=int(os.environ.get("MAXREAD_BATCH_WORKERS", "3")),

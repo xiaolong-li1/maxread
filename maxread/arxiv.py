@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import shutil
 from typing import Iterable, List, Optional, Tuple
@@ -36,9 +37,11 @@ def extract_arxiv_refs(text: str) -> List[PaperRef]:
 
 
 class ArxivClient:
-    def __init__(self, workdir: Path, timeout: int = 45):
+    def __init__(self, workdir: Path, timeout: int = 45, parallel_streams: int = 4, parallel_min_bytes: int = 1_048_576):
         self.workdir = workdir
         self.timeout = timeout
+        self.parallel_streams = max(1, int(parallel_streams or 1))
+        self.parallel_min_bytes = max(0, int(parallel_min_bytes or 0))
         self._last_request_at = 0.0
 
     def fetch(self, paper_id: str) -> PaperBundle:
@@ -154,7 +157,7 @@ class ArxivClient:
         pdf_path = paper_dir / f"{paper_id}.pdf"
         if not pdf_path.exists() or pdf_path.stat().st_size == 0:
             try:
-                pdf_path.write_bytes(self._get(f"https://arxiv.org/pdf/{paper_id}.pdf"))
+                self._download_to_path(f"https://arxiv.org/pdf/{paper_id}.pdf", pdf_path)
             except Exception as exc:
                 return None, "", [f"PDF download failed: {exc}"]
         text = ""
@@ -182,7 +185,7 @@ class ArxivClient:
         source_path = paper_dir / f"{paper_id}.source"
         if not source_path.exists() or source_path.stat().st_size == 0:
             try:
-                source_path.write_bytes(self._get(f"https://arxiv.org/e-print/{paper_id}"))
+                self._download_to_path(f"https://arxiv.org/e-print/{paper_id}", source_path)
             except urllib.error.HTTPError as exc:
                 return None, None, "", "", [], [], [], [], [f"TeX source unavailable: HTTP {exc.code}"]
             except Exception as exc:
@@ -206,6 +209,9 @@ class ArxivClient:
 
     def _get(self, url: str) -> bytes:
         self._pace_requests()
+        return self._get_once(url)
+
+    def _get_once(self, url: str, range_header: str = "") -> bytes:
         req = urllib.request.Request(
             url,
             headers={
@@ -214,6 +220,8 @@ class ArxivClient:
                 "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
             },
         )
+        if range_header:
+            req.add_header("Range", range_header)
         last_exc: Exception | None = None
         for attempt in range(2):
             try:
@@ -234,10 +242,84 @@ class ArxivClient:
         assert last_exc is not None
         raise last_exc
 
+    def _download_to_path(self, url: str, output_path: Path) -> None:
+        data = self._get_parallel(url)
+        output_path.write_bytes(data)
+
+    def _get_parallel(self, url: str) -> bytes:
+        streams = self.parallel_streams
+        if streams <= 1:
+            return self._get(url)
+        self._pace_requests()
+        probe_req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "MaxRead/0.1 (local research assistant; contact: local-user)",
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+                "Range": "bytes=0-0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(probe_req, timeout=self.timeout) as response:
+                status = getattr(response, "status", response.getcode())
+                if status == 200:
+                    self._last_request_at = time.monotonic()
+                    return response.read()
+                if status != 206:
+                    self._last_request_at = time.monotonic()
+                    return response.read()
+                total_size = _parse_content_range_total(response.headers.get("Content-Range", ""))
+                response.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code != 416:
+                raise
+            total_size = 0
+        if total_size <= 0 or total_size < self.parallel_min_bytes:
+            return self._get_once(url)
+        chunks = _split_ranges(total_size, streams)
+        parts: list[tuple[int, bytes]] = []
+        try:
+            with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+                futures = {
+                    executor.submit(self._get_once, url, f"bytes={start}-{end}"): (index, start, end)
+                    for index, (start, end) in enumerate(chunks)
+                }
+                for future in as_completed(futures):
+                    index, start, end = futures[future]
+                    data = future.result()
+                    expected = end - start + 1
+                    if len(data) != expected:
+                        raise RuntimeError(f"Range download returned {len(data)} bytes, expected {expected}")
+                    parts.append((index, data))
+        except Exception:
+            return self._get_once(url)
+        self._last_request_at = time.monotonic()
+        return b"".join(data for _index, data in sorted(parts))
+
     def _pace_requests(self) -> None:
         elapsed = time.monotonic() - self._last_request_at
         if elapsed < 3.0:
             time.sleep(3.0 - elapsed)
+
+
+def _parse_content_range_total(value: str) -> int:
+    match = re.search(r"/([0-9]+)\s*$", value or "")
+    if not match:
+        return 0
+    return int(match.group(1))
+
+
+def _split_ranges(total_size: int, streams: int) -> List[Tuple[int, int]]:
+    streams = max(1, min(int(streams or 1), total_size))
+    chunk_size = (total_size + streams - 1) // streams
+    ranges: List[Tuple[int, int]] = []
+    start = 0
+    while start < total_size:
+        end = min(total_size - 1, start + chunk_size - 1)
+        ranges.append((start, end))
+        start = end + 1
+    return ranges
 
 
 def _extract_source_texts(blob: bytes) -> Iterable[str]:

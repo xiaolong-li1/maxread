@@ -87,7 +87,12 @@ def main(argv: List[str] | None = None) -> int:
     settings = Settings.load(Path.cwd())
     settings.workdir.mkdir(parents=True, exist_ok=True)
     store = Store(settings.db_path)
-    arxiv = ArxivClient(settings.workdir, timeout=settings.arxiv_timeout)
+    arxiv = ArxivClient(
+        settings.workdir,
+        timeout=settings.arxiv_timeout,
+        parallel_streams=settings.arxiv_parallel_streams,
+        parallel_min_bytes=settings.arxiv_parallel_min_bytes,
+    )
     web = WebArticleClient(settings.workdir, timeout=settings.arxiv_timeout)
     feishu = FeishuClient(settings.lark_cli, settings.feishu_as)
     llm = None if getattr(args, "no_openai", False) else _maybe_llm(settings)

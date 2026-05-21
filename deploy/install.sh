@@ -72,6 +72,8 @@ ensure_env_defaults() {
   grep -q '^MAXREAD_LARK_CLI=' "$env_file" || printf 'MAXREAD_LARK_CLI=lark-cli\n' >> "$env_file"
   grep -q '^MAXREAD_FEISHU_AS=' "$env_file" || printf 'MAXREAD_FEISHU_AS=bot\n' >> "$env_file"
   grep -q '^MAXREAD_REQUIRE_SOURCE=' "$env_file" || printf 'MAXREAD_REQUIRE_SOURCE=true\n' >> "$env_file"
+  grep -q '^MAXREAD_ARXIV_PARALLEL_STREAMS=' "$env_file" || printf 'MAXREAD_ARXIV_PARALLEL_STREAMS=4\n' >> "$env_file"
+  grep -q '^MAXREAD_ARXIV_PARALLEL_MIN_BYTES=' "$env_file" || printf 'MAXREAD_ARXIV_PARALLEL_MIN_BYTES=1048576\n' >> "$env_file"
   grep -q '^MAXREAD_QUEUE_WORKERS=' "$env_file" || printf 'MAXREAD_QUEUE_WORKERS=5\n' >> "$env_file"
   grep -q '^MAXREAD_LLM_CONCURRENCY=' "$env_file" || printf 'MAXREAD_LLM_CONCURRENCY=5\n' >> "$env_file"
   grep -q '^MAXREAD_FEISHU_CONCURRENCY=' "$env_file" || printf 'MAXREAD_FEISHU_CONCURRENCY=3\n' >> "$env_file"

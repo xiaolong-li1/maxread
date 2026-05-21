@@ -128,7 +128,12 @@ class QueueManager:
             if source_kind == "paper":
                 pipeline = MaxReadPipeline(
                     store,
-                    ArxivClient(self.settings.workdir, timeout=self.settings.arxiv_timeout),
+                    ArxivClient(
+                        self.settings.workdir,
+                        timeout=self.settings.arxiv_timeout,
+                        parallel_streams=self.settings.arxiv_parallel_streams,
+                        parallel_min_bytes=self.settings.arxiv_parallel_min_bytes,
+                    ),
                     feishu,
                     llm,
                     require_source=self.settings.require_source,

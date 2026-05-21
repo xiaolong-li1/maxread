@@ -1,7 +1,7 @@
 import io
 import tarfile
 
-from maxread.arxiv import ArxivClient, extract_arxiv_refs
+from maxread.arxiv import ArxivClient, _parse_content_range_total, _split_ranges, extract_arxiv_refs
 
 
 def test_extract_plain_id():
@@ -21,6 +21,13 @@ def test_extract_multiple_with_noise():
         "Minimax 之前的文章 https://arxiv.org/pdf/2506.13585.pdf，公式看 2511.19416"
     )
     assert [r.paper_id for r in refs] == ["2506.13585", "2511.19416"]
+
+
+def test_range_helpers_parse_and_split():
+    assert _parse_content_range_total("bytes 0-0/10485760") == 10485760
+    assert _parse_content_range_total("bytes */0") == 0
+    assert _split_ranges(10, 4) == [(0, 2), (3, 5), (6, 8), (9, 9)]
+    assert _split_ranges(3, 8) == [(0, 0), (1, 1), (2, 2)]
 
 
 def test_fetch_source_text_extracts_to_source_dir(tmp_path):

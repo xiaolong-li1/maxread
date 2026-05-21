@@ -69,6 +69,8 @@ python3 -m maxread.cli process 'https://nrehiew.github.io/blog/sft_rl_opd/'
 Use `--no-openai` to test the Feishu document flow with fallback content.
 If arXiv returns HTTP 429, wait a few minutes before retrying. MaxRead stores failed attempts in SQLite but only treats `done` papers as cache hits.
 
+Large arXiv PDF/source downloads use conservative Range parallelism by default: `MAXREAD_ARXIV_PARALLEL_STREAMS=4` for files at least `MAXREAD_ARXIV_PARALLEL_MIN_BYTES=1048576`. On a stable proxy this can be raised to `8`; avoid `16` unless the proxy is known to tolerate many parallel Range requests.
+
 By default `MAXREAD_REQUIRE_SOURCE=true`, so MaxRead will not generate a full document unless TeX source is available. This keeps formula/image/table alignment reliable.
 
 If you can download source from the arXiv web page manually, import it first:
