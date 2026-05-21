@@ -97,6 +97,19 @@ def test_ensure_priority_figure_markers_does_not_treat_main_categories_as_method
     assert "MaxReadFigure" not in out
 
 
+def test_ensure_priority_figure_markers_uses_visual_description_over_filename():
+    inserts = figure_placeholders([(Path("unknown.png"), "A model diagram.")])
+    visual = {"[MaxReadFigure:1:unknown]": "图中有输入、两个处理模块和输出箭头，展示整体架构。"}
+    out = ensure_priority_figure_markers("# T\n\n## 3. 方法框架\n方法正文。\n", inserts, max_missing=1, visual_descriptions=visual)
+    assert "[MaxReadFigure:1:unknown]" in out
+
+
+def test_ensure_priority_figure_markers_ignores_priority_filename_when_caption_is_metric_plot():
+    inserts = figure_placeholders([(Path("overview.png"), "Training loss and validation perplexity over time.")])
+    out = ensure_priority_figure_markers("# T\n\n## 2. 核心观察\n正文。\n", inserts, max_missing=1)
+    assert "MaxReadFigure" not in out
+
+
 def test_prepare_key_figures_prefers_main_text_figures_over_appendix(tmp_path):
     from PIL import Image
 

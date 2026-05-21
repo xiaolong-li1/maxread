@@ -8,10 +8,15 @@ from maxread.job_queue import _LimitedLLM, _notify_watchers_progress, _queue_eta
 class _DummyLLM:
     def __init__(self):
         self.calls = []
+        self.image_calls = []
 
     def responses_text(self, system, user):
         self.calls.append((system, user))
         return "ok"
+
+    def responses_image_text(self, system, user, image_path):
+        self.image_calls.append((system, user, image_path))
+        return "image ok"
 
 
 def test_limited_llm_announces_reading_then_reviewing():
@@ -28,6 +33,17 @@ def test_limited_llm_announces_reading_then_reviewing():
     assert llm.responses_text("你是 MaxRead 的发布前质量检查员。", "") == "ok"
 
     assert events == ["reading", "reviewing"]
+
+
+def test_limited_llm_proxies_image_text_under_semaphore():
+    events = []
+    inner = _DummyLLM()
+    llm = _LimitedLLM(inner, BoundedSemaphore(1), on_call=lambda: events.append("reading"))
+
+    assert llm.responses_image_text("vision", "describe", "a.png") == "image ok"
+
+    assert events == ["reading"]
+    assert inner.image_calls == [("vision", "describe", "a.png")]
 
 
 class _ReactionFeishu:

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict
 
 
@@ -40,6 +43,27 @@ class OpenAIClient:
         text = _extract_output_text(data)
         if not text:
             raise RuntimeError(f"OpenAI response had no output text: {data}")
+        return text
+
+    def responses_image_text(self, system: str, user: str, image_path: str | Path) -> str:
+        image_url = _image_data_url(Path(image_path))
+        payload = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": system}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user},
+                        {"type": "input_image", "image_url": image_url},
+                    ],
+                },
+            ],
+        }
+        data = self._post("/responses", payload)
+        text = _extract_output_text(data)
+        if not text:
+            raise RuntimeError(f"OpenAI image response had no output text: {data}")
         return text
 
     def chat_completions_text(self, system: str, user: str) -> str:
@@ -86,3 +110,10 @@ def _extract_output_text(data: Dict[str, Any]) -> str:
             if content.get("type") in {"output_text", "text"} and isinstance(content.get("text"), str):
                 chunks.append(content["text"])
     return "\n".join(chunks).strip()
+
+
+def _image_data_url(path: Path) -> str:
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
+    data = path.read_bytes()
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"

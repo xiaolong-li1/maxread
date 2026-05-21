@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from .models import PaperBundle
 from .render import figure_prompt_lines
@@ -25,7 +25,11 @@ FINAL_SYSTEM_PROMPT = """你是“读不动了 / MaxRead”的论文解读编辑
 """
 
 
-def build_final_user_prompt(bundle: PaperBundle, figure_inserts: List[Tuple[str, Path, str]] | None = None) -> str:
+def build_final_user_prompt(
+    bundle: PaperBundle,
+    figure_inserts: List[Tuple[str, Path, str]] | None = None,
+    figure_visuals: Dict[str, str] | None = None,
+) -> str:
     metadata = bundle.metadata
     authors = ", ".join(metadata.authors[:20])
     warnings = "\n".join(f"- {item}" for item in bundle.parse_warnings) or "- 无"
@@ -36,7 +40,7 @@ def build_final_user_prompt(bundle: PaperBundle, figure_inserts: List[Tuple[str,
     source_assets = "\n".join(f"- {item}" for item in bundle.source_assets) or "- 无"
     source_captions = "\n".join(f"- {item}" for item in bundle.source_captions) or "- 无"
     source_tables = "\n\n".join(f"[Table {i}]\n{item}" for i, item in enumerate(bundle.source_tables, start=1)) or "- 无"
-    figure_markers = _figure_marker_text(figure_inserts or [])
+    figure_markers = _figure_marker_text(figure_inserts or [], figure_visuals or {})
     figure_pairs = _figure_pair_text(bundle)
     figure_refs = _figure_reference_text(bundle)
     return f"""请根据下面材料生成最终飞书文档 Markdown。
@@ -79,7 +83,7 @@ def build_final_user_prompt(bundle: PaperBundle, figure_inserts: List[Tuple[str,
 - 关键公式逐条解释：变量含义、计算顺序、它解决哪个问题。
 - 如果有算法/训练流程/推理流程，按原文步骤复述，不要省略条件、阈值、采样策略、损失项。
 - 如果方法依赖图，图必须贴在正文引用它的位置附近：优先放在出现 `Fig./Figure/图` 引用、`\ref{{label}}` 或对应模块描述之后，而不是按 TeX figure 环境出现顺序放。
-- 图解必须使用同一 figure pair 的 caption；不要用 A 图解释 B 图。
+- 图解必须结合同一 figure pair 的 caption 和 visual 描述；不要只按文件名猜图，也不要用 A 图解释 B 图。
 - 如果某个细节 source 里没有，写“原文未展开”，不要自行补全。
 
 ## 4. 实验结果
@@ -150,7 +154,7 @@ TeX tables（优先用于实验结果；如果这里有主表，不要说实验�
 {source_tables}
 ```
 
-可插入图片锚点（每个 marker 必须逐字保留，独立成行，插在相关图解段落之前；marker 后紧跟 `**图：...**` 图解；不要修改 marker 内任何字符）：
+可插入图片锚点（每个 marker 必须逐字保留，独立成行，插在相关图解段落之前；marker 后紧跟 `**图：...**` 图解；不要修改 marker 内任何字符；如果有 visual 字段，图解必须同时参考 caption 与 visual，不要只参考文件名）：
 {figure_markers}
 
 TeX/source excerpt：
@@ -165,10 +169,10 @@ PDF text excerpt：
 """
 
 
-def _figure_marker_text(figure_inserts: List[Tuple[str, Path, str]]) -> str:
+def _figure_marker_text(figure_inserts: List[Tuple[str, Path, str]], figure_visuals: Dict[str, str] | None = None) -> str:
     if not figure_inserts:
         return "- 无"
-    return "\n".join(figure_prompt_lines(figure_inserts))
+    return "\n".join(figure_prompt_lines(figure_inserts, figure_visuals or {}))
 
 
 def _figure_pair_text(bundle: PaperBundle) -> str:

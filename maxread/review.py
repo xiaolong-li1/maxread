@@ -48,7 +48,13 @@ def review_markdown(llm: OpenAIClient, markdown: str, markers: Iterable[str], ki
 
 def review_markdown_with_report(llm: OpenAIClient, markdown: str, markers: Iterable[str], kind: str = "paper") -> ReviewResult:
     raw = llm.responses_text(REVIEW_SYSTEM_PROMPT, build_review_user_prompt(markdown, markers, kind))
-    return parse_review_response(raw)
+    result = parse_review_response(raw)
+    if _has_non_json_review_issue(result):
+        issues = list(result.issues)
+        if _looks_like_model_refusal(result.markdown):
+            issues.append(ReviewIssue("other", "medium", "review returned refusal; kept original markdown"))
+        return ReviewResult(markdown=markdown.strip() + "\n", issues=issues, raw=raw)
+    return result
 
 
 def build_review_user_prompt(markdown: str, markers: Iterable[str], kind: str = "paper") -> str:
@@ -97,6 +103,24 @@ def parse_review_response(text: str) -> ReviewResult:
         if detail and is_unresolved_review_issue(issue):
             issues.append(issue)
     return ReviewResult(markdown=_strip_fences(markdown).strip() + "\n", issues=issues, raw=raw)
+
+
+def _has_non_json_review_issue(result: ReviewResult) -> bool:
+    return any(issue.category == "other" and "non-json" in issue.detail for issue in result.issues)
+
+
+def _looks_like_model_refusal(markdown: str) -> bool:
+    text = " ".join(str(markdown or "").lower().split())
+    refusals = (
+        "i'm sorry, but i cannot assist",
+        "i’m sorry, but i cannot assist",
+        "i cannot assist with that request",
+        "i can't assist with that request",
+        "sorry, i can’t help",
+        "抱歉，我无法",
+        "不能协助",
+    )
+    return any(item in text for item in refusals)
 
 
 def visible_review_issues(rows):

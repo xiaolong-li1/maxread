@@ -3,6 +3,7 @@ from __future__ import annotations
 import traceback
 from dataclasses import dataclass
 from hashlib import sha256
+from pathlib import Path
 from typing import Optional
 
 from .arxiv import ArxivClient
@@ -83,12 +84,13 @@ class MaxReadPipeline:
                     raise RuntimeError("OPENAI_API_KEY not configured or --no-openai was used")
                 figures = prepare_key_figures(bundle)
                 figure_inserts = figure_placeholders(figures)
-                markdown = self.llm.responses_text(FINAL_SYSTEM_PROMPT, build_final_user_prompt(bundle, figure_inserts))
+                figure_visuals, figure_visual_warnings = _describe_figures_for_prompt(self.llm, figure_inserts)
+                markdown = self.llm.responses_text(FINAL_SYSTEM_PROMPT, build_final_user_prompt(bundle, figure_inserts, figure_visuals))
                 markdown = polish_markdown(markdown)
                 markdown = remove_false_material_warning(markdown, bundle)
-                markdown = ensure_priority_figure_markers(markdown, figure_inserts)
+                markdown = ensure_priority_figure_markers(markdown, figure_inserts, visual_descriptions=figure_visuals)
                 markers = [marker for marker, _path, _caption in figure_inserts]
-                review_warnings = []
+                review_warnings = list(figure_visual_warnings)
                 if event and send_progress:
                     self._reply(event, f"[审阅中] 正在审阅/修订：{ref.paper_id}", "reviewing", ref.paper_id)
                 try:
@@ -101,7 +103,7 @@ class MaxReadPipeline:
                     review_warnings.append(f"Review pass failed: {review_exc}")
                 markdown = polish_markdown(markdown)
                 markdown = remove_false_material_warning(markdown, bundle)
-                markdown = ensure_priority_figure_markers(markdown, figure_inserts)
+                markdown = ensure_priority_figure_markers(markdown, figure_inserts, visual_descriptions=figure_visuals)
                 missing_markers = [marker for marker in markers if marker not in markdown]
                 publish_warnings = review_warnings + [f"missing-marker:{marker}" for marker in missing_markers]
                 xml = markdown_to_docx_xml(markdown)
@@ -203,3 +205,31 @@ def _clip_reply(text: str, max_chars: int = 900) -> str:
 
 def _short_error(exc: Exception, max_chars: int = 500) -> str:
     return _clip_reply(str(exc), max_chars)
+
+
+FIGURE_VISION_SYSTEM_PROMPT = """你是论文图像审阅员。只描述图片中看得见的结构、图表类型、坐标/模块/箭头/子图关系；结合用户给的 caption，但不要凭文件名猜测。输出中文一句话，60 字以内。"""
+
+
+def _describe_figures_for_prompt(llm, figure_inserts):
+    if not hasattr(llm, "responses_image_text"):
+        return {}, []
+    descriptions = {}
+    warnings = []
+    for marker, path, caption in figure_inserts[:8]:
+        image_path = Path(path)
+        if not image_path.exists():
+            warnings.append(f"figure-vision-missing:{image_path.name}")
+            continue
+        try:
+            prompt = (
+                f"marker: {marker}\n"
+                f"caption: {caption or '[无 caption]'}\n"
+                "请读图并说明这张图实际展示什么；如果 caption 与图像不一致，优先指出图像内容。"
+            )
+            text = llm.responses_image_text(FIGURE_VISION_SYSTEM_PROMPT, prompt, image_path)
+            text = " ".join(str(text or "").split())[:240]
+            if text:
+                descriptions[marker] = text
+        except Exception as exc:
+            warnings.append(f"figure-vision-failed:{image_path.name}:{_short_error(exc, 180)}")
+    return descriptions, warnings

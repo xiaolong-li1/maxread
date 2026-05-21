@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from collections import defaultdict
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .models import PaperBundle, PaperFigure
 
@@ -75,10 +75,13 @@ def figure_placeholders(figures: List[Tuple[Path, str]]) -> List[Tuple[str, Path
     return inserts
 
 
-def figure_prompt_lines(inserts: List[Tuple[str, Path, str]]) -> List[str]:
+def figure_prompt_lines(inserts: List[Tuple[str, Path, str]], visual_descriptions: Optional[Dict[str, str]] = None) -> List[str]:
     lines = []
+    visual_descriptions = visual_descriptions or {}
     for marker, path, caption in inserts:
-        lines.append(f"- {marker} 文件：{path.as_posix()} caption：{caption or path.stem}")
+        visual = visual_descriptions.get(marker, "").strip()
+        suffix = f" visual：{visual}" if visual else ""
+        lines.append(f"- {marker} 文件：{path.as_posix()} caption：{caption or path.stem}{suffix}")
     return lines
 
 
@@ -158,11 +161,21 @@ def ensure_figure_markers(markdown: str, inserts: List[Tuple[str, Path, str]], m
     return "\n".join(lines).rstrip() + "\n"
 
 
-def ensure_priority_figure_markers(markdown: str, inserts: List[Tuple[str, Path, str]], max_missing: int = 2) -> str:
+def ensure_priority_figure_markers(
+    markdown: str,
+    inserts: List[Tuple[str, Path, str]],
+    max_missing: int = 2,
+    visual_descriptions: Optional[Dict[str, str]] = None,
+) -> str:
     """Insert missing high-value overview/method figures near method text before review."""
     if not inserts or max_missing <= 0:
         return markdown
-    missing = [(marker, path, caption) for marker, path, caption in inserts if marker not in markdown and _is_priority_figure(path, caption)]
+    visual_descriptions = visual_descriptions or {}
+    missing = [
+        (marker, path, caption)
+        for marker, path, caption in inserts
+        if marker not in markdown and _is_priority_figure(path, caption, visual_descriptions.get(marker, ""))
+    ]
     if not missing:
         return markdown
     lines = markdown.rstrip().splitlines()
@@ -190,9 +203,11 @@ def _priority_figure_insert_index(lines: List[str]) -> int:
     return min(len(lines), 8)
 
 
-def _is_priority_figure(path: Path, caption: str = "") -> bool:
+def _is_priority_figure(path: Path, caption: str = "", visual_description: str = "") -> bool:
     path_text = path.stem.lower()
     caption_text = str(caption or "").lower()
+    visual_text = str(visual_description or "").lower()
+    evidence_text = f"{caption_text} {visual_text}".strip()
     path_tokens = set(re.split(r"[^a-z0-9]+", path_text.replace("_", "-")))
     priority_path_tokens = {
         "introfig", "fig1", "arch", "architecture", "overview", "pipeline",
@@ -201,13 +216,16 @@ def _is_priority_figure(path: Path, caption: str = "") -> bool:
     priority_path_phrases = ("model_arch", "model-arch", "method_overview", "method-overview")
     has_priority_path = bool(path_tokens & priority_path_tokens) or any(phrase in path_text for phrase in priority_path_phrases)
     metric_words = ("training", "pretrain", "loss", "perplexity", "ppl", "benchmark", "accuracy")
-    if any(word in caption_text for word in metric_words) and not has_priority_path:
+    if any(word in evidence_text for word in metric_words):
         return False
-    caption_keywords = (
+    evidence_keywords = (
         "architecture", "overview", "pipeline", "workflow", "framework",
-        "model architecture", "method overview", "overall design",
+        "model architecture", "method overview", "overall design", "block diagram",
+        "流程", "架构", "框架", "模块", "箭头", "输入", "输出",
     )
-    return has_priority_path or any(keyword in caption_text for keyword in caption_keywords)
+    if any(keyword in evidence_text for keyword in evidence_keywords):
+        return True
+    return has_priority_path and not evidence_text
 
 
 def _short_caption(caption: str, max_chars: int = 180) -> str:

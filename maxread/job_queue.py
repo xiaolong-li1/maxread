@@ -204,6 +204,13 @@ class _LimitedLLM:
         with self.sem:
             return self.inner.responses_text(system, user)
 
+    def responses_image_text(self, system: str, user: str, image_path) -> str:
+        if self.on_call and not self._announced:
+            self._announced = True
+            self.on_call()
+        with self.sem:
+            return self.inner.responses_image_text(system, user, image_path)
+
 
 def _is_review_prompt(system: str) -> bool:
     return "发布前质量检查员" in str(system) or "待检查 Markdown" in str(system)

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from maxread.models import ArxivMetadata, PaperBundle
 from maxread.prompts import FINAL_SYSTEM_PROMPT, build_final_user_prompt
-from maxread.review import REVIEW_SYSTEM_PROMPT, build_review_user_prompt, parse_review_response, review_markdown, visible_review_issues
+from maxread.review import REVIEW_SYSTEM_PROMPT, build_review_user_prompt, parse_review_response, review_markdown, review_markdown_with_report, visible_review_issues
 
 
 def _bundle():
@@ -33,6 +33,17 @@ def test_paper_prompt_requires_method_fidelity():
     assert "输入是什么、输出是什么" in prompt
     assert "变量含义、计算顺序" in prompt
     assert "原文未展开" in prompt
+
+
+def test_paper_prompt_includes_visual_figure_description():
+    marker = "[MaxReadFigure:1:plot]"
+    prompt = build_final_user_prompt(
+        _bundle(),
+        [(marker, Path("plot.png"), "Caption says loss curve.")],
+        {marker: "图中有两张折线图，左侧是训练 loss，右侧是 perplexity。"},
+    )
+    assert "visual：图中有两张折线图" in prompt
+    assert "不要只参考文件名" in prompt
 
 
 def test_paper_prompt_requires_readable_h1_title():
@@ -68,6 +79,19 @@ def test_review_markdown_strips_code_fence():
     out = review_markdown(_FenceLLM(), "# T", ["[MaxReadFigure:1:a]"])
     assert out.startswith("# T")
     assert "```" not in out
+
+
+class _RefusalLLM:
+    def responses_text(self, system, user):
+        return "I'm sorry, but I cannot assist with that request."
+
+
+def test_review_markdown_keeps_original_when_reviewer_returns_refusal():
+    original = "# 原文标题\n\n正文。"
+    result = review_markdown_with_report(_RefusalLLM(), original, [])
+    assert result.markdown == original + "\n"
+    assert any("non-json" in issue.detail for issue in result.issues)
+    assert any("kept original" in issue.detail for issue in result.issues)
 
 
 def test_parse_review_response_collects_issues():

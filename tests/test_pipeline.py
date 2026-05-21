@@ -2,7 +2,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperRef
-from maxread.pipeline import MaxReadPipeline
+from maxread.pipeline import MaxReadPipeline, _describe_figures_for_prompt
 
 
 class FakeArxiv:
@@ -62,6 +62,13 @@ class FakeLLM:
         return "# Fake Paper\n\n一句话总结：A fake abstract."
 
 
+class FakeVisionLLM(FakeLLM):
+    def responses_image_text(self, system, user, image_path):
+        assert "caption:" in user
+        assert str(image_path).endswith("figure.png")
+        return "图中显示两个相连模块和一条从输入到输出的箭头。"
+
+
 class FakeArxivNoSource(FakeArxiv):
     def fetch(self, paper_id):
         bundle = super().fetch(paper_id)
@@ -100,3 +107,14 @@ def test_pipeline_requires_source(tmp_path):
     record = store.get_paper("2604.12946")
     assert record.status == "needs_source"
     store.close()
+
+
+def test_describe_figures_for_prompt_uses_image_reader(tmp_path):
+    image = tmp_path / "figure.png"
+    image.write_bytes(b"not inspected by fake llm")
+    marker = "[MaxReadFigure:1:ambiguous_name]"
+
+    descriptions, warnings = _describe_figures_for_prompt(FakeVisionLLM(), [(marker, image, "Architecture caption")])
+
+    assert warnings == []
+    assert descriptions[marker] == "图中显示两个相连模块和一条从输入到输出的箭头。"
