@@ -397,6 +397,7 @@ def _normalize_inline_math(markdown: str) -> str:
 
 def _normalize_latex_body(body: str) -> str:
     body = re.sub(r"\\quad([A-Za-z])", r"\\quad \1", body)
+    body = re.sub(r"\\(le|leq|ge|geq|approx|sim|to|in|notin)([A-Za-z])", r"\\\1 \2", body)
     body = re.sub(r"(\d+)\\mathrm\{e\}\{(-?\d+)\}", r"\1\\times10^{\2}", body)
     body = re.sub(r"(\d+)\\mathrm\{e\}\s*([+-]\d+)", r"\1\\times10^{\2}", body)
     return body

@@ -14,10 +14,13 @@ def test_polish_markdown_converts_math():
 
 
 def test_polish_markdown_repairs_common_latex_join_errors():
-    text = r"$$\tau\sim N,\quadr\sim P$$ eta $5\mathrm{e}{-4}$"
+    text = r"$$\tau\sim N,\quadr\sim P, a\leL_{\mathrm{sm}}, b\geC$$ eta $5\mathrm{e}{-4}$"
     out = polish_markdown(text)
     assert "\\quadr" not in out
     assert "\\quad r" in out
+    assert "\\leL" not in out
+    assert "\\le L_{\\mathrm{sm}}" in out
+    assert "\\ge C" in out
     assert "5\\times10^{-4}" in out
 
 
