@@ -2,6 +2,51 @@
 
 Local MVP: send an arXiv ID/link, HuggingFace Papers link, or supported web article URL to the Feishu bot, and MaxRead creates a public-readable Feishu docx summary.
 
+
+## Deploy / Migrate to Another Machine
+
+The GitHub repo contains code and deployment automation only. Real keys stay in a local env file that is never committed.
+
+1. On the target machine, create a local key file, for example `~/maxread.env`:
+
+```bash
+OPENAI_API_KEY=<openai-api-key>
+OPENAI_BASE_URL=https://api.openai.com/v1
+MAXREAD_MODEL=gpt-5.5
+MAXREAD_FEISHU_AS=bot
+MAXREAD_LARK_CLI=lark-cli
+MAXREAD_QUEUE_WORKERS=5
+MAXREAD_LLM_CONCURRENCY=5
+MAXREAD_FEISHU_CONCURRENCY=3
+
+# Only needed when bootstrapping from the private GitHub repo over HTTPS.
+MAXREAD_GITHUB_TOKEN=<github-token-with-private-repo-read-access>
+```
+
+2. Install from an existing checkout:
+
+```bash
+bash deploy/install.sh
+```
+
+The script asks for the deploy directory and local key file path, then creates `.env`, a Python venv, runtime directories, and user services when available.
+
+3. For a fresh Linux/macOS machine with no checkout yet, copy or download `deploy/bootstrap.sh` and run:
+
+```bash
+bash bootstrap.sh
+```
+
+`bootstrap.sh` reads `MAXREAD_GITHUB_TOKEN` from the environment or from the local key file, clones the private repo without storing the token in `git remote`, then runs `deploy/install.sh`.
+
+After deployment, verify Feishu auth on that machine:
+
+```bash
+lark-cli doctor
+```
+
+If Feishu auth is missing, run the normal `lark-cli auth login` flow once on the target machine.
+
 ## Setup
 
 1. Make sure `lark-cli doctor` is `ok: true`.

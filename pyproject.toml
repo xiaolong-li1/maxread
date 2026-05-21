@@ -3,7 +3,9 @@ name = "maxread"
 version = "0.1.0"
 description = "Local MVP for 读不动了 / MaxRead: arXiv to Feishu docx summaries."
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+    "Pillow>=10",
+]
 
 [project.scripts]
 maxread = "maxread.cli:main"

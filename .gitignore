@@ -5,3 +5,15 @@ __pycache__/
 *.sqlite3
 var/
 
+# Local deployment/runtime artifacts
+*.env
+.env.*
+!.env.example
+!.env.*.example
+*.log
+*.pid
+.DS_Store
+.venv/
+dist/
+build/
+*.egg-info/
