@@ -191,12 +191,23 @@ def _priority_figure_insert_index(lines: List[str]) -> int:
 
 
 def _is_priority_figure(path: Path, caption: str = "") -> bool:
-    text = f"{path.stem} {caption}".lower()
-    keywords = (
-        "introfig", "fig1", "main", "overview", "pipeline", "workflow",
-        "framework", "architecture", "model", "method", "teaser", "overall",
+    path_text = path.stem.lower()
+    caption_text = str(caption or "").lower()
+    path_tokens = set(re.split(r"[^a-z0-9]+", path_text.replace("_", "-")))
+    priority_path_tokens = {
+        "introfig", "fig1", "arch", "architecture", "overview", "pipeline",
+        "workflow", "framework", "teaser", "overall", "method",
+    }
+    priority_path_phrases = ("model_arch", "model-arch", "method_overview", "method-overview")
+    has_priority_path = bool(path_tokens & priority_path_tokens) or any(phrase in path_text for phrase in priority_path_phrases)
+    metric_words = ("training", "pretrain", "loss", "perplexity", "ppl", "benchmark", "accuracy")
+    if any(word in caption_text for word in metric_words) and not has_priority_path:
+        return False
+    caption_keywords = (
+        "architecture", "overview", "pipeline", "workflow", "framework",
+        "model architecture", "method overview", "overall design",
     )
-    return any(keyword in text for keyword in keywords)
+    return has_priority_path or any(keyword in caption_text for keyword in caption_keywords)
 
 
 def _short_caption(caption: str, max_chars: int = 180) -> str:
@@ -272,7 +283,7 @@ def _strip_common_text_macros(text: str) -> str:
 
 def _normalize_display_math(markdown: str) -> str:
     def repl(match: re.Match[str]) -> str:
-        body = re.sub(r"\s+", " ", match.group(1).strip())
+        body = _normalize_latex_body(re.sub(r"\s+", " ", match.group(1).strip()))
         body = body.replace("\\\\", r"\\")
         return f"\n<latex>{body}</latex>\n"
 
@@ -358,12 +369,19 @@ def _inline_xml(text: str) -> str:
 
 def _normalize_inline_math(markdown: str) -> str:
     def repl(match: re.Match[str]) -> str:
-        body = match.group(1).strip()
+        body = _normalize_latex_body(match.group(1).strip())
         if not body:
             return match.group(0)
         return f"<latex>{body}</latex>"
 
     return re.sub(r"(?<!\$)\$([^\n$]{1,240})\$(?!\$)", repl, markdown)
+
+
+def _normalize_latex_body(body: str) -> str:
+    body = re.sub(r"\\quad([A-Za-z])", r"\\quad \1", body)
+    body = re.sub(r"(\d+)\\mathrm\{e\}\{(-?\d+)\}", r"\1\\times10^{\2}", body)
+    body = re.sub(r"(\d+)\\mathrm\{e\}\s*([+-]\d+)", r"\1\\times10^{\2}", body)
+    return body
 
 
 def prepare_key_figures(bundle: PaperBundle, max_figures: int = 8) -> List[Tuple[Path, str]]:

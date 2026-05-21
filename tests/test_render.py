@@ -13,6 +13,14 @@ def test_polish_markdown_converts_math():
     assert "<latex>x+y</latex>" in out
 
 
+def test_polish_markdown_repairs_common_latex_join_errors():
+    text = r"$$\tau\sim N,\quadr\sim P$$ eta $5\mathrm{e}{-4}$"
+    out = polish_markdown(text)
+    assert "\\quadr" not in out
+    assert "\\quad r" in out
+    assert "5\\times10^{-4}" in out
+
+
 def test_markdown_to_docx_xml_preserves_latex_and_tables():
     md = """# 标题
 
@@ -75,6 +83,18 @@ def test_ensure_priority_figure_markers_inserts_missing_main_near_method():
     assert "[MaxReadFigure:1:introfig]" in out
     assert "[MaxReadFigure:2:ablation]" not in out
     assert out.index("[MaxReadFigure:1:introfig]") < out.index("方法正文")
+
+
+def test_ensure_priority_figure_markers_does_not_treat_training_run_as_method_overview():
+    inserts = figure_placeholders([(Path("fig_training_run.png"), "Left: Plot of pretrain loss over the 800B tokens on the main run. Right: Plot of val ppl.")])
+    out = ensure_priority_figure_markers("# T\n\n## 2. 核心观察\n正文。\n", inserts, max_missing=1)
+    assert "MaxReadFigure" not in out
+
+
+def test_ensure_priority_figure_markers_does_not_treat_main_categories_as_method_overview():
+    inserts = figure_placeholders([(Path("main_categories.png"), "Histograms of zero-shot adaptive exits for MMLU categories.")])
+    out = ensure_priority_figure_markers("# T\n\n## 2. 核心观察\n正文。\n", inserts, max_missing=1)
+    assert "MaxReadFigure" not in out
 
 
 def test_prepare_key_figures_prefers_main_text_figures_over_appendix(tmp_path):
