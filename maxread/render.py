@@ -420,8 +420,11 @@ def _grouped_figure_items(bundle: PaperBundle, output_dir: Path) -> dict[str, li
         items: List[Tuple[Path, PaperFigure]] = []
         for figure in sorted(group, key=lambda item: (item.row, item.col, item.asset_index)):
             path = bundle.source_dir / figure.asset
-            if path.exists() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
-                items.append((path, figure))
+            if not path.exists() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".pdf"}:
+                continue
+            rendered = _render_asset(path, output_dir)
+            if rendered:
+                items.append((rendered, figure))
         if len(items) < 2 or len(items) > 16:
             continue
         output_path = output_dir / f"{_safe_stem(label)}.png"
@@ -433,7 +436,7 @@ def _grouped_figure_items(bundle: PaperBundle, output_dir: Path) -> dict[str, li
             ranks = [_figure_rank(path, figure) for path, figure in items]
             rank = min(ranks) if ranks else (20, 0, str(composed))
             figures.append((composed, caption, rank))
-            skip.extend((path, caption) for path, _figure in items)
+            skip.extend((bundle.source_dir / figure.asset, caption) for _path, figure in items)
     return {"figures": figures, "skip": skip}
 
 def _compose_horizontal_figure(paths: List[Path], output_path: Path, caption: str = "") -> Optional[Path]:
@@ -674,7 +677,7 @@ def _draw_centered_text(draw, label: str, x: int, y: int, width: int, height: in
 def _side_labels_from_caption(caption: str, count: int) -> List[str]:
     if count != 2:
         return []
-    matches = re.findall(r"\((?:left|right|a|b)\)\s*([^.;。；]+)", caption or "", flags=re.I)
+    matches = re.findall(r"(?:\((?:left|right|a|b)\)|\b(?:left|right)\b)\s*[:：]?\s*([^.;。；]+)", caption or "", flags=re.I)
     labels = []
     for item in matches:
         label = re.sub(r"\s+", " ", item).strip()

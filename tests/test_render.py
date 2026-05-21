@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure
@@ -143,6 +144,51 @@ def test_prepare_key_figures_composes_same_label_multi_image_figure(tmp_path):
 
     assert len(figures) == 1
     assert figures[0][0].name == "fig_multi-head-att.png"
+    assert figures[0][1] == caption
+    assert figures[0][0].exists()
+
+
+def test_prepare_key_figures_composes_same_label_pdf_images(tmp_path):
+    from PIL import Image
+
+    source_dir = tmp_path / "source"
+    (source_dir / "figures").mkdir(parents=True)
+    sample = tmp_path / "sample.png"
+    Image.new("RGB", (120, 80), "white").save(sample)
+    (source_dir / "figures" / "loss_vs_steps.pdf").write_bytes(sample.read_bytes())
+    (source_dir / "figures" / "ppl_over_recur.pdf").write_bytes(sample.read_bytes())
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    qlmanage = bin_dir / "qlmanage"
+    qlmanage.write_text(
+        "#!/bin/sh\n"
+        "out=''\n"
+        "src=''\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  if [ \"$1\" = \"-o\" ]; then shift; out=\"$1\"; else src=\"$1\"; fi\n"
+        "  shift\n"
+        "done\n"
+        "cp \"$src\" \"$out/thumb.png\"\n",
+        encoding="utf-8",
+    )
+    qlmanage.chmod(0o755)
+    old_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+    try:
+        caption = "Left: Plot of pretrain loss. Right: Plot of val ppl."
+        bundle = _bundle(
+            source_dir=source_dir,
+            source_assets=["figures/loss_vs_steps.pdf", "figures/ppl_over_recur.pdf"],
+            source_figures=[
+                PaperFigure(asset="figures/loss_vs_steps.pdf", caption=caption, tex_file="main.tex", label="fig:training_run", asset_index=0, col=0),
+                PaperFigure(asset="figures/ppl_over_recur.pdf", caption=caption, tex_file="main.tex", label="fig:training_run", asset_index=1, col=1),
+            ],
+        )
+        figures = prepare_key_figures(bundle, max_figures=3)
+    finally:
+        os.environ["PATH"] = old_path
+
+    assert [path.name for path, _caption in figures] == ["fig_training_run.png"]
     assert figures[0][1] == caption
     assert figures[0][0].exists()
 
