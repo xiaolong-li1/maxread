@@ -101,6 +101,50 @@ def test_fetch_source_text_splits_multiple_captions_in_one_figure_block(tmp_path
     assert [figure.figure_index for figure in figures] == [0, 0, 1, 1]
 
 
+def test_fetch_source_text_groups_subfigures_under_parent_caption(tmp_path):
+    paper_dir = tmp_path / "papers" / "2605.15514"
+    paper_dir.mkdir(parents=True)
+    source_path = paper_dir / "2605.15514.source"
+    tex = br"""
+\begin{figure*}
+\begin{subfigure}{0.31\textwidth}
+\includegraphics{figures/a.pdf}
+\caption{First subcaption.}\label{fig:a}
+\end{subfigure}
+\begin{subfigure}{0.31\textwidth}
+\includegraphics{figures/b.pdf}
+\caption{Second subcaption.}\label{fig:b}
+\end{subfigure}
+\begin{subfigure}{0.31\textwidth}
+\includegraphics{figures/c.pdf}
+\caption{Third subcaption.}\label{fig:c}
+\end{subfigure}
+\caption{Parent caption for all panels.}\label{fig:parent}
+\end{figure*}
+"""
+    blob = io.BytesIO()
+    with tarfile.open(fileobj=blob, mode="w:gz") as tf:
+        info = tarfile.TarInfo("main.tex")
+        info.size = len(tex)
+        tf.addfile(info, io.BytesIO(tex))
+        for name in ["a", "b", "c"]:
+            pdf = b"%PDF-1.4\n%%EOF"
+            info = tarfile.TarInfo(f"figures/{name}.pdf")
+            info.size = len(pdf)
+            tf.addfile(info, io.BytesIO(pdf))
+    source_path.write_bytes(blob.getvalue())
+
+    client = ArxivClient(tmp_path)
+    _, _source_dir, _source_text, _tree, _assets, _captions, figures, _tables, warnings = client.fetch_source_text("2605.15514", paper_dir)
+
+    assert warnings == []
+    assert [figure.asset for figure in figures] == ["figures/a.pdf", "figures/b.pdf", "figures/c.pdf"]
+    assert [figure.label for figure in figures] == ["fig:parent", "fig:parent", "fig:parent"]
+    assert [figure.caption for figure in figures] == ["Parent caption for all panels."] * 3
+    assert [figure.figure_index for figure in figures] == [0, 0, 0]
+    assert [figure.asset_index for figure in figures] == [0, 1, 2]
+
+
 def test_fetch_source_text_expands_simple_caption_macros(tmp_path):
     paper_dir = tmp_path / "papers" / "2210.10340"
     paper_dir.mkdir(parents=True)

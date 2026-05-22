@@ -456,6 +456,29 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
         rel_tex = str(tex_path.relative_to(source_dir))
         text = _expand_simple_macros(_strip_latex_comments(_decode_text(tex_path.read_bytes())), macros)
         for block in _figure_blocks(text):
+            if _is_subfigure_block(block):
+                caption = _last_caption(block)
+                label = _last_label(block) or _first_label(block)
+                segment_figures = 0
+                for asset_index, (asset, row, col) in enumerate(_includegraphics_assets_with_layout(block, tex_path.parent, source_dir)):
+                    figures.append(
+                        PaperFigure(
+                            asset=asset,
+                            caption=caption,
+                            tex_file=rel_tex,
+                            label=label,
+                            figure_index=figure_index,
+                            asset_index=asset_index,
+                            row=row,
+                            col=col,
+                        )
+                    )
+                    segment_figures += 1
+                    if len(figures) >= max_items:
+                        return figures
+                if segment_figures:
+                    figure_index += 1
+                continue
             for segment, caption, label in _figure_segments(block):
                 segment_figures = 0
                 for asset_index, (asset, row, col) in enumerate(_includegraphics_assets_with_layout(segment, tex_path.parent, source_dir)):
@@ -477,6 +500,10 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
                 if segment_figures:
                     figure_index += 1
     return figures
+
+
+def _is_subfigure_block(block: str) -> bool:
+    return "\\begin{subfigure" in block and len(re.findall(r"\\includegraphics", block)) > 1
 
 def _extract_simple_macros(tex_text: str) -> dict[str, str]:
     stripped = _strip_latex_comments(tex_text)
@@ -615,9 +642,23 @@ def _first_caption(block: str) -> str:
     return _clip(_clean_latex_text(_norm(_balanced_brace_content(block, match.end() - 1))), 1200)
 
 
+def _last_caption(block: str) -> str:
+    caption = ""
+    for match in re.finditer(r"\\caption(?:\[[^\]]*\])?\{", block):
+        value = _balanced_brace_content(block, match.end() - 1)
+        if value:
+            caption = _clip(_clean_latex_text(_norm(value)), 1200)
+    return caption
+
+
 def _first_label(block: str) -> str:
     match = re.search(r"\\label\{([^}]+)\}", block)
     return match.group(1).strip() if match else ""
+
+
+def _last_label(block: str) -> str:
+    matches = re.findall(r"\\label\{([^}]+)\}", block)
+    return matches[-1].strip() if matches else ""
 
 
 def _strip_latex_comments(text: str) -> str:
