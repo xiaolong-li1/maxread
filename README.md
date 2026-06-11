@@ -7,6 +7,12 @@ Local MVP: send an arXiv ID/link, HuggingFace Papers link, or supported web arti
 
 The GitHub repo contains code and deployment automation only. Real keys stay in a local env file that is never committed.
 
+For Windows migration, start with the dedicated guide:
+
+```text
+deploy/windows/README.md
+```
+
 1. On the target machine, create a local key file, for example `~/maxread.env`:
 
 ```bash

@@ -2,6 +2,8 @@
 
 This folder contains migration/deployment helpers. Real secrets must stay outside GitHub.
 
+For Windows migration, use `deploy/windows/README.md`. It includes a Windows env template, PowerShell install script, Feishu auth notes, file/cache migration choices, and a step-by-step task plan.
+
 ## Prepare a local key file
 
 On the target machine, create a file such as `~/maxread.env` from `deploy/env.keys.example` and fill real values:
