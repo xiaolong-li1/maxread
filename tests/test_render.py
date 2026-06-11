@@ -13,15 +13,43 @@ def test_polish_markdown_converts_math():
     assert "<latex>x+y</latex>" in out
 
 
+def test_polish_markdown_converts_tex_delimited_math():
+    text = r"结果显示，\(k=4\) 有 \(1.6\times\) 加速。\[\hat{x}_{t+1}=F^{-1}(z)\]"
+    out = polish_markdown(text)
+    assert r"\(k=4\)" not in out
+    assert r"\times" in out
+    assert "<latex>k=4</latex>" in out
+    assert "<latex>1.6\\times</latex>" in out
+    assert "<latex>\\hat{x}_{t+1}=F^{-1}(z)</latex>" in out
+
+
 def test_polish_markdown_repairs_common_latex_join_errors():
-    text = r"$$\tau\sim N,\quadr\sim P, a\leL_{\mathrm{sm}}, b\geC$$ eta $5\mathrm{e}{-4}$"
+    text = r"$$\tau\sim N,\quadr\sim P, a\leL_{\mathrm{sm}}, b\geC, c\toY, d\inC, e\notinS$$ eta $5\mathrm{e}{-4}$ $block\_size$ $D_{JS}&lt;\tau$"
     out = polish_markdown(text)
     assert "\\quadr" not in out
     assert "\\quad r" in out
     assert "\\leL" not in out
     assert "\\le L_{\\mathrm{sm}}" in out
     assert "\\ge C" in out
+    assert "\\to Y" in out
+    assert "\\in C" in out
+    assert "\\notin S" in out
     assert "5\\times10^{-4}" in out
+    assert "block\\_size" not in out
+    assert "block_size" in out
+    assert "&lt;" not in out
+    assert "D_{JS}<\\tau" in out
+
+
+def test_polish_markdown_preserves_valid_latex_commands():
+    text = r"$\left(x^\top\right)$ $\infty + \int_0^1 f(x)dx$ $\left\{x: A^\top x\right\}$ $\simCLR$"
+    out = polish_markdown(text)
+    assert "\\le ft" not in out
+    assert "\\to p" not in out
+    assert "\\left(x^\\top\\right)" in out
+    assert "\\infty + \\int_0^1 f(x)dx" in out
+    assert "\\left\\{x: A^\\top x\\right\\}" in out
+    assert "\\simCLR" in out
 
 
 def test_markdown_to_docx_xml_preserves_latex_and_tables():

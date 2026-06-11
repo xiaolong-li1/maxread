@@ -28,6 +28,16 @@ def test_article_parser_extracts_text_images_tables_code():
     assert "A B" in parser.tables[0]
 
 
+def test_article_parser_drops_obvious_incomplete_claims():
+    parser = ArticleHTMLParser("https://example.com/post")
+    parser.feed("<html><body><p>We find that .</p><p>Complete finding remains.</p></body></html>")
+
+    text = parser.main_text()
+
+    assert "We find that ." not in text
+    assert "Complete finding remains." in text
+
+
 def test_raster_image_detection_rejects_svg():
     assert _is_raster_image(b"\x89PNG\r\n\x1a\nxxx") is True
     assert _is_raster_image(b"<svg></svg>") is False

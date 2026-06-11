@@ -68,6 +68,7 @@ def test_review_prompt_preserves_markers_and_checks_format():
     assert "[MaxReadFigure:1:local]" in prompt
     assert "长英文 caption" in prompt
     assert "\\formername" in prompt
+    assert "不要仅凭 marker 名称" in prompt
 
 
 class _FenceLLM:
@@ -117,3 +118,17 @@ def test_visible_review_issues_hides_existing_resolved_rows():
         {"detail": "仍存在图文错位，需要人工检查。"},
     ]
     assert visible_review_issues(rows) == [rows[4]]
+
+
+def test_visible_review_issues_hides_marker_name_only_false_positive():
+    rows = [
+        {
+            "category": "figure_marker",
+            "detail": "[MaxReadFigure:5:tre] 的 marker 名称像机构或 Logo，与当前段落可能不匹配，需人工确认原图。",
+        },
+        {
+            "category": "figure_marker",
+            "detail": "图解和周围段落明显不匹配，无法判断，需要人工检查。",
+        },
+    ]
+    assert visible_review_issues(rows) == [rows[1]]

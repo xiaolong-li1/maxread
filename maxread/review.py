@@ -66,6 +66,7 @@ def build_review_user_prompt(markdown: str, markers: Iterable[str], kind: str = 
 - 是否有长英文 caption 被直接复制到正文。
 - 是否有 TeX 宏残留，例如 \formername、\localattentionname。
 - 原稿已经使用的图片 marker 是否保留且独立成行，且周围图解是否和段落主题一致。候选清单里但原稿没用的 marker 不要补回；如果你只是按要求保留/未补回 marker，不要写入 issues，只有 marker 丢失、错位且无法修复时才写 issue。
+- marker 后缀/文件名可能是截图名、hash、临时文件名或无意义缩写；不要仅凭 marker 名称像机构、Logo、缩写或文件名就记录 `figure_marker` issue。
 - 公式是否仍是 `<latex>...</latex>`，公式内部反斜杠命令是否被保留。
 - 表格是否仍是合法 Markdown 表格。
 - 方法/实验事实不能被你改写成新结论。
@@ -131,6 +132,8 @@ def is_unresolved_review_issue(issue) -> bool:
     detail = _issue_detail(issue)
     if not detail:
         return False
+    if _is_low_value_marker_name_issue(issue, detail):
+        return False
     unresolved = (
         "仍有", "仍然", "仍存在", "未解决", "未修复", "尚未",
         "无法判断", "无法确认", "无法修复", "需要人工", "需要检查",
@@ -146,6 +149,15 @@ def is_unresolved_review_issue(issue) -> bool:
     if any(token in detail for token in resolved):
         return False
     return True
+
+
+def _is_low_value_marker_name_issue(issue, detail: str) -> bool:
+    category = issue.get("category", "") if isinstance(issue, dict) else getattr(issue, "category", "")
+    if str(category) != "figure_marker":
+        return False
+    name_only = ("marker 名称" in detail or "marker名" in detail or "文件名" in detail) and ("像机构" in detail or "Logo" in detail or "缩写" in detail)
+    has_real_misalignment = any(token in detail for token in ("错位", "周围段落", "丢失"))
+    return name_only and not has_real_misalignment
 
 
 def _issue_detail(issue) -> str:

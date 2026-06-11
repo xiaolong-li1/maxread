@@ -194,6 +194,27 @@ def test_add_reaction_uses_im_reactions_create():
     assert client.args[client.args.index("--data") + 1] == '{"reaction_type": {"emoji_type": "Typing"}}'
 
 
+def test_insert_image_passes_dimensions_caption_and_selection(tmp_path):
+    old_cwd = Path.cwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        os.chdir(root)
+        try:
+            image = root / "var" / "paper" / "figure.png"
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b"png")
+            client = CapturingFeishu()
+            client.insert_image("https://tenant.feishu.cn/docx/doc", str(image), caption="图", width=720, height=154, selection="[Marker]")
+        finally:
+            os.chdir(old_cwd)
+
+    assert client.args[:3] == ["lark-cli", "docs", "+media-insert"]
+    assert client.args[client.args.index("--width") + 1] == "720"
+    assert client.args[client.args.index("--height") + 1] == "154"
+    assert client.args[client.args.index("--caption") + 1] == "图"
+    assert client.args[client.args.index("--selection-with-ellipsis") + 1] == "[Marker]"
+
+
 def test_progress_emoji_mapping():
     assert progress_emoji_type("start") == "Get"
     assert progress_emoji_type("downloading") == "OnIt"

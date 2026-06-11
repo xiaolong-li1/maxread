@@ -54,6 +54,10 @@ class WebArticleClient:
             },
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            content_type = response.headers.get_content_type()
+            final_url = response.geturl()
+            if content_type == "application/pdf" or urllib.parse.urlparse(final_url).path.lower().endswith(".pdf"):
+                raise UnsupportedWebArticleError("direct PDF URLs are not supported yet; send an arXiv/HuggingFace paper link instead")
             data = response.read()
             charset = response.headers.get_content_charset() or "utf-8"
         return data.decode(charset, errors="replace")
@@ -84,6 +88,10 @@ class WebArticleClient:
             except Exception:
                 downloaded.append(image)
         return downloaded
+
+
+class UnsupportedWebArticleError(RuntimeError):
+    pass
 
 
 StructuredBlock = Tuple[str, int, str]
@@ -163,7 +171,7 @@ class ArticleHTMLParser(HTMLParser):
             return
         if tag in {"p", "li", "h1", "h2", "h3", "h4", "blockquote"}:
             text = _clean(" ".join(self._current_text))
-            if len(text) >= 2:
+            if _is_useful_text_block(text):
                 if tag in {"h1", "h2", "h3", "h4"}:
                     level = int(tag[1])
                     self.sections.append(text)
@@ -282,6 +290,18 @@ def _extract_math(text: str, max_items: int = 80) -> List[str]:
 
 def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+def _is_useful_text_block(text: str) -> bool:
+    if len(text) < 2:
+        return False
+    normalized = text.strip()
+    low_info_patterns = (
+        r"(?i)^(we\s+)?find\s+that\s*[\.:;,!?。！？；：]*$",
+        r"(?i)^we\s+show\s+that\s*[\.:;,!?。！？；：]*$",
+        r"(?i)^the\s+results\s+show\s+that\s*[\.:;,!?。！？；：]*$",
+    )
+    return not any(re.match(pattern, normalized) for pattern in low_info_patterns)
 
 
 def _clip_text(text: str, max_chars: int) -> str:

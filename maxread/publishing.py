@@ -8,7 +8,7 @@ from .render import display_caption
 
 
 class ImageDocClient(Protocol):
-    def insert_image(self, doc_url: str, image_path: str, caption: str = "", width: int = 720, selection: str = ""):
+    def insert_image(self, doc_url: str, image_path: str, caption: str = "", width: int = 720, height: int = 0, selection: str = ""):
         ...
 
     def remove_text(self, doc_url: str, text: str):
@@ -38,16 +38,21 @@ def publish_marker_image(feishu: ImageDocClient, doc_url: str, image_path: Path 
     safe_path = prepare_feishu_image(original)
     display = display_caption(caption, safe_path)
     result = ImagePublishResult(marker=marker, image_path=safe_path)
+    width, height = image_display_size(safe_path)
+    small_width = max(360, min(width - 80, round(width * 0.82)))
+    small_height = round(height * small_width / width) if width else 0
+    fallback_width = min(width, 560)
+    fallback_height = round(height * fallback_width / width) if width else 0
 
     attempts = [
-        ("selected", marker, 720),
-        ("selected-small", marker, 560),
-        ("append-fallback", "", 640),
+        ("selected", marker, width, height),
+        ("selected-small", marker, small_width, small_height),
+        ("append-fallback", "", fallback_width, fallback_height),
     ]
     last_error = ""
-    for label, selection, width in attempts:
+    for label, selection, width, height in attempts:
         try:
-            feishu.insert_image(doc_url, str(safe_path), caption=display, selection=selection, width=width)
+            feishu.insert_image(doc_url, str(safe_path), caption=display, selection=selection, width=width, height=height)
             result.inserted = True
             result.fallback_appended = label == "append-fallback"
             if label != "selected":
@@ -90,6 +95,7 @@ def prepare_feishu_image(image_path: Path | str) -> Path:
             background = Image.new("RGBA", image.size, (255, 255, 255, 255))
             background.alpha_composite(image)
             rgb = background.convert("RGB")
+            rgb = _crop_near_white_border(rgb)
             max_side = max(rgb.size)
             if max_side > 2200:
                 scale = 2200 / max_side
@@ -98,6 +104,65 @@ def prepare_feishu_image(image_path: Path | str) -> Path:
         return safe_path
     except Exception:
         return path
+
+
+def image_display_width(image_path: Path | str) -> int:
+    return image_display_size(image_path)[0]
+
+
+def image_display_size(image_path: Path | str) -> tuple[int, int]:
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            source_width, source_height = image.size
+    except Exception:
+        return 640, 0
+    if source_width <= 0 or source_height <= 0:
+        return 640, 0
+    ratio = source_width / source_height
+    if ratio >= 3.2:
+        width = 720
+    elif ratio >= 2.3:
+        width = 680
+    elif ratio <= 0.75:
+        width = 440
+    elif ratio <= 1.15:
+        width = 560
+    else:
+        width = 640
+    height = max(1, round(width * source_height / source_width))
+    return width, height
+
+
+def _crop_near_white_border(image):
+    try:
+        from PIL import Image
+        from PIL import ImageChops
+
+        background = Image.new(image.mode, image.size, (255, 255, 255))
+        diff = ImageChops.difference(image, background).convert("L")
+        mask = diff.point(lambda value: 255 if value > 14 else 0)
+        box = mask.getbbox()
+        if not box:
+            return image
+        left, top, right, bottom = box
+        pad = 18
+        left = max(0, left - pad)
+        top = max(0, top - pad)
+        right = min(image.width, right + pad)
+        bottom = min(image.height, bottom + pad)
+        crop_area = (right - left) * (bottom - top)
+        original_area = image.width * image.height
+        if crop_area >= original_area * 0.92:
+            return image
+        if right - left >= image.width * 0.96 and bottom - top >= image.height * 0.72:
+            return image
+        if right - left < 32 or bottom - top < 32:
+            return image
+        return image.crop((left, top, right, bottom))
+    except Exception:
+        return image
 
 
 def _short_error(text: str, limit: int = 260) -> str:

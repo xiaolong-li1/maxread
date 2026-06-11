@@ -144,6 +144,7 @@ class FeishuClient:
         image_path: str,
         caption: str = "",
         width: int = 720,
+        height: int = 0,
         selection: str = "",
     ) -> Dict[str, Any]:
         args = [
@@ -163,6 +164,8 @@ class FeishuClient:
             "--width",
             str(width),
         ]
+        if height:
+            args += ["--height", str(height)]
         if caption:
             args += ["--caption", caption]
         if selection:
@@ -289,11 +292,10 @@ class FeishuClient:
 
     def event_stream(self) -> Iterator[FeishuEvent]:
         proc = subprocess.Popen(
-            [self.cli, "event", "consume", "im.message.receive_v1", "--as", self.identity, "--quiet"],
+            [self.cli, "event", "consume", "im.message.receive_v1", "--as", self.identity],
             text=True,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
         )
         assert proc.stdout is not None
         for line in proc.stdout:

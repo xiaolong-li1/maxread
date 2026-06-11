@@ -16,6 +16,14 @@ def test_regular_url_becomes_web_ref():
     assert [ref.url for ref in web_refs] == ["https://nrehiew.github.io/blog/sft_rl_opd/"]
 
 
+def test_direct_pdf_and_feishu_docs_are_not_web_articles():
+    refs, web_refs = extract_supported_inputs(
+        "看看 https://openreview.net/pdf?id=nM5tDHrQsx 和 https://tenant.feishu.cn/docx/AbCdEf"
+    )
+    assert refs == []
+    assert web_refs == []
+
+
 def test_queue_message_includes_order_and_wait():
     refs, web_refs = extract_supported_inputs("2605.15980 https://nrehiew.github.io/blog/sft_rl_opd/")
     msg = _queue_message([("paper", refs[0]), ("article", web_refs[0])], workers=1)

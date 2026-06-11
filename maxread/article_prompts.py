@@ -103,7 +103,7 @@ def build_article_user_prompt(bundle: ArticleBundle, image_inserts: Sequence[Ima
 
 def _section_material(bundle: ArticleBundle, image_inserts: Sequence[ImageInsert]) -> str:
     if not bundle.section_blocks:
-        return bundle.text
+        return _clip(bundle.text, 60_000)
     text_by_source = {str(item[3]): f"{item[0]}\n**图：{item[2]}**" for item in image_inserts if len(item) >= 4}
     parts: List[str] = []
     for index, section in enumerate(bundle.section_blocks[:80], start=1):
@@ -116,7 +116,7 @@ def _section_material(bundle: ArticleBundle, image_inserts: Sequence[ImageInsert
             else:
                 parts.append(block)
         parts.append("")
-    return _clip("\n".join(parts).strip(), 120_000)
+    return _clip("\n".join(parts).strip(), 60_000)
 
 
 def _article_marker_source(block: str) -> str:

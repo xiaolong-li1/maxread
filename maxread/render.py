@@ -306,6 +306,7 @@ def _normalize_display_math(markdown: str) -> str:
         return f"\n<latex>{body}</latex>\n"
 
     markdown = re.sub(r"\$\$\s*(.*?)\s*\$\$", repl, markdown, flags=re.S)
+    markdown = re.sub(r"\\\[\s*(.*?)\s*\\\]", repl, markdown, flags=re.S)
     # Guard against model output like '# $$ ... $$', which Feishu markdown may
     # interpret as headings before converting math.
     markdown = re.sub(r"(?m)^#+\s*(<latex>.*?</latex>)\s*$", r"\1", markdown)
@@ -392,12 +393,15 @@ def _normalize_inline_math(markdown: str) -> str:
             return match.group(0)
         return f"<latex>{body}</latex>"
 
+    markdown = re.sub(r"\\\((.{1,240}?)\\\)", repl, markdown)
     return re.sub(r"(?<!\$)\$([^\n$]{1,240})\$(?!\$)", repl, markdown)
 
 
 def _normalize_latex_body(body: str) -> str:
+    body = html.unescape(body)
+    body = body.replace(r"\_", "_")
     body = re.sub(r"\\quad([A-Za-z])", r"\\quad \1", body)
-    body = re.sub(r"\\(le|leq|ge|geq|approx|sim|to|in|notin)([A-Za-z])", r"\\\1 \2", body)
+    body = re.sub(r"\\(le|leq|ge|geq|approx|to|in|notin)([A-Z\\])", r"\\\1 \2", body)
     body = re.sub(r"(\d+)\\mathrm\{e\}\{(-?\d+)\}", r"\1\\times10^{\2}", body)
     body = re.sub(r"(\d+)\\mathrm\{e\}\s*([+-]\d+)", r"\1\\times10^{\2}", body)
     return body
