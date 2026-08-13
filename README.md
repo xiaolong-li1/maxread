@@ -155,3 +155,20 @@ MAXREAD_QUEUE_HEARTBEAT_SECONDS=15
 MAXREAD_LLM_CONCURRENCY=2
 MAXREAD_FEISHU_CONCURRENCY=1
 ```
+
+## Independent Duty Reminder
+
+The duty reminder is separate from the paper-reading queue. It rotates through a configured roster and posts once per day to a fixed Feishu group at 07:00 Asia/Shanghai by default. Configure the target group with its `oc_...` chat ID, then set the roster:
+
+```bash
+python3 -m maxread.cli duty set \
+  --member '张三' \
+  --member '李四' \
+  --member '王五'
+python3 -m maxread.cli duty list
+python3 -m maxread.cli duty today
+python3 -m maxread.cli duty send --dry-run
+python3 -m maxread.cli duty history
+```
+
+Set `MAXREAD_DUTY_CHAT_ID=oc_...` in `.env`. The deployment installer starts `maxread-duty-reminder` as an independent user service. It records each date's result in SQLite, so restarts do not duplicate a successful reminder; a failed reminder remains retryable on the next poll.

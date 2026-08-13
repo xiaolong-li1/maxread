@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import traceback
 from dataclasses import dataclass
 from hashlib import sha256
@@ -12,10 +13,12 @@ from .feishu import FeishuClient
 from .models import ArticleBundle, FeishuEvent
 from .openai_client import OpenAIClient
 from .publishing import publish_marker_image
+from .quality import PrePublishQualityError, blocking_quality_warnings, pre_publish_quality_warnings, verify_published_docx
 from .render import markdown_to_docx_xml, polish_markdown
 from .review import review_markdown_with_report
 from .sources import WebRef
 from .web_article import WebArticleClient
+from .visual_qa import VisualQAController
 
 
 @dataclass
@@ -27,11 +30,21 @@ class ArticleProcessResult:
 
 
 class ArticlePipeline:
-    def __init__(self, store: Store, web: WebArticleClient, feishu: FeishuClient, llm: Optional[OpenAIClient]):
+    def __init__(
+        self,
+        store: Store,
+        web: WebArticleClient,
+        feishu: FeishuClient,
+        llm: Optional[OpenAIClient],
+        review_reasoning_effort: str = "",
+        visual_qa: Optional[VisualQAController] = None,
+    ):
         self.store = store
         self.web = web
         self.feishu = feishu
         self.llm = llm
+        self.review_reasoning_effort = review_reasoning_effort
+        self.visual_qa = visual_qa
 
     def process_ref(self, ref: WebRef, event: Optional[FeishuEvent] = None, send_progress: bool = True) -> ArticleProcessResult:
         article_id = sha256(ref.url.encode("utf-8")).hexdigest()[:16]
@@ -62,7 +75,7 @@ class ArticlePipeline:
                 if event and send_progress:
                     self._reply(event, f"[审阅中] 正在审阅/修订：{_clip(bundle.title or '网页文章', 40)}", "reviewing", article_id)
                 try:
-                    review = review_markdown_with_report(self.llm, markdown, markers, kind="article")
+                    review = review_markdown_with_report(self.llm, markdown, markers, kind="article", reasoning_effort=self.review_reasoning_effort)
                     markdown = review.markdown
                     self.store.add_review_issues("article", article_id, review.issues)
                     for issue in review.issues:
@@ -73,6 +86,19 @@ class ArticlePipeline:
                 missing_markers = [marker for marker in markers if marker not in markdown]
                 publish_warnings = review_warnings + [f"missing-marker:{marker}" for marker in missing_markers]
                 xml = markdown_to_docx_xml(markdown)
+                expected_image_count = sum(1 for marker in markers if marker in markdown)
+                expected_latex_count = xml.count("<latex>")
+                quality_warnings = pre_publish_quality_warnings(markdown, xml)
+                publish_warnings.extend(quality_warnings)
+                blocking_warnings = blocking_quality_warnings(quality_warnings)
+                if blocking_warnings:
+                    raise PrePublishQualityError("; ".join(blocking_warnings))
+            except PrePublishQualityError as exc:
+                message = f"文章已读完，但发布前格式质检未通过，未发布文档：{exc}"
+                self.store.upsert_document(article_id, "quality_failed", error=message)
+                if event and send_progress:
+                    self._reply(event, f"这篇已读完，但发布前格式质检未通过：{ref.url}\n原因：{message}", "quality-fail", article_id)
+                return ArticleProcessResult(article_id, "", cached=False, error=message)
             except Exception as exc:
                 message = f"文章总结模型调用失败，未发布文档：{exc}"
                 self.store.upsert_document(article_id, "summary_failed", error=message)
@@ -92,6 +118,48 @@ class ArticlePipeline:
                 publish_result = publish_marker_image(self.feishu, doc["url"], image_path, caption, marker)
                 warnings.extend(publish_result.warnings)
             self.feishu.publish_docx(doc["token"])
+            post_publish_warnings = verify_published_docx(
+                self.feishu,
+                doc["url"],
+                expected_title=bundle.title or ref.url,
+                expected_image_min=expected_image_count,
+                expected_latex_min=expected_latex_count,
+            )
+            if self.visual_qa:
+                visual_result = self.visual_qa.run(
+                    self.feishu,
+                    doc["url"],
+                    initial_warnings=post_publish_warnings,
+                    source_id=article_id,
+                )
+                warnings.extend(visual_result.warnings)
+                if visual_result.changed:
+                    warnings.extend(
+                        verify_published_docx(
+                            self.feishu,
+                            doc["url"],
+                            expected_title=bundle.title or ref.url,
+                            expected_image_min=expected_image_count,
+                            expected_latex_min=0,
+                        )
+                    )
+                else:
+                    warnings.extend(post_publish_warnings)
+            else:
+                warnings.extend(post_publish_warnings)
+            post_publish_blocking = blocking_quality_warnings(warnings)
+            if post_publish_blocking:
+                message = "文档已生成，但发布后质检失败，暂不交付：" + "; ".join(post_publish_blocking)
+                self.store.upsert_document(
+                    article_id,
+                    "quality_failed",
+                    doc_url=doc["url"],
+                    doc_token=doc["token"],
+                    error=message,
+                )
+                if event and send_progress:
+                    self._reply(event, f"这篇发布后质检未通过：{ref.url}\n原因：{message}", "quality-fail", article_id)
+                return ArticleProcessResult(article_id, doc["url"], cached=False, error=message)
             self.store.upsert_document(article_id, "done", doc_url=doc["url"], doc_token=doc["token"], error="; ".join(warnings))
             if event and send_progress:
                 self._reply(event, f"哥，读完了：{doc['url']}", "done", article_id)
@@ -125,12 +193,13 @@ def _progress_stage(prefix: str) -> str:
 def _image_placeholders(bundle: ArticleBundle):
     inserts = []
     index = 0
+    max_images = int(os.environ.get("MAXREAD_ARTICLE_MAX_IMAGES", "32"))
     for image in bundle.images:
         if image.local_path and image.local_path.exists():
             index += 1
             marker = f"[MaxReadFigure:{index}:{image.local_path.stem}]"
             inserts.append((marker, image.local_path, image.caption or image.alt or image.url, image.source_index))
-    return inserts[:16]
+    return inserts[:max_images]
 
 
 def _replace_article_image_markers(text: str, image_inserts) -> str:

@@ -42,17 +42,23 @@ class ReviewResult:
     raw: str = ""
 
 
-def review_markdown(llm: OpenAIClient, markdown: str, markers: Iterable[str], kind: str = "paper") -> str:
-    return review_markdown_with_report(llm, markdown, markers, kind).markdown
+def review_markdown(llm: OpenAIClient, markdown: str, markers: Iterable[str], kind: str = "paper", reasoning_effort: str | None = None) -> str:
+    return review_markdown_with_report(llm, markdown, markers, kind, reasoning_effort).markdown
 
 
-def review_markdown_with_report(llm: OpenAIClient, markdown: str, markers: Iterable[str], kind: str = "paper") -> ReviewResult:
-    raw = llm.responses_text(REVIEW_SYSTEM_PROMPT, build_review_user_prompt(markdown, markers, kind))
+def review_markdown_with_report(llm: OpenAIClient, markdown: str, markers: Iterable[str], kind: str = "paper", reasoning_effort: str | None = None) -> ReviewResult:
+    markers = list(markers)
+    raw = llm.responses_text(REVIEW_SYSTEM_PROMPT, build_review_user_prompt(markdown, markers, kind), reasoning_effort=reasoning_effort)
     result = parse_review_response(raw)
     if _has_non_json_review_issue(result):
         issues = list(result.issues)
         if _looks_like_model_refusal(result.markdown):
             issues.append(ReviewIssue("other", "medium", "review returned refusal; kept original markdown"))
+        return ReviewResult(markdown=markdown.strip() + "\n", issues=issues, raw=raw)
+    structure_error = _review_structure_error(markdown, result.markdown, markers)
+    if structure_error:
+        issues = list(result.issues)
+        issues.append(ReviewIssue("layout", "high", f"review output {structure_error}; kept original markdown"))
         return ReviewResult(markdown=markdown.strip() + "\n", issues=issues, raw=raw)
     return result
 
@@ -122,6 +128,22 @@ def _looks_like_model_refusal(markdown: str) -> bool:
         "不能协助",
     )
     return any(item in text for item in refusals)
+
+
+def _review_structure_error(original: str, reviewed: str, markers: Iterable[str]) -> str:
+    original = str(original or "").strip()
+    reviewed = str(reviewed or "").strip()
+    first_line = next((line.strip() for line in reviewed.splitlines() if line.strip()), "")
+    if original.lstrip().startswith("# ") and not first_line.startswith("# "):
+        return "lost H1"
+    if "TL;DR" in original and "TL;DR" not in reviewed:
+        return "lost TL;DR"
+    if len(original) >= 1200 and len(reviewed) < len(original) * 0.65:
+        return "was truncated"
+    for marker in markers:
+        if marker in original and marker not in reviewed:
+            return f"lost marker {marker}"
+    return ""
 
 
 def visible_review_issues(rows):

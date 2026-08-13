@@ -1,0 +1,164 @@
+from maxread.quality import (
+    blocking_quality_warnings,
+    paper_markdown_completeness_errors,
+    pre_publish_quality_warnings,
+    quality_warnings,
+    validate_fetched_docx_content,
+    verify_published_docx,
+)
+
+
+def test_blocking_quality_warnings_selects_high_severity_only():
+    warnings = [
+        "quality:xml:xml:high:latex-downgraded-to-code",
+        "post-publish:quality:formula:xml:high:joined-spacing-command",
+        "quality:text:markdown:medium:source-truncated-marker",
+        "image-anchor-missing:figure.png:[marker]",
+    ]
+
+    assert blocking_quality_warnings(warnings) == warnings[:2]
+
+
+def test_blocking_quality_warnings_includes_visual_high_severity():
+    warnings = [
+        "visual-qa:high:invalid-formula:bad formula",
+        "visual-qa:recheck:high:image-overflow:still outside editor",
+        "visual-qa:medium:image-too-wide:review",
+        "visual-qa:remote-error:ssh unavailable",
+    ]
+
+    assert blocking_quality_warnings(warnings) == warnings[:2]
+
+
+def test_paper_completeness_requires_all_sections_and_three_selected_figures():
+    markers = [f"[MaxReadFigure:{i}:f{i}]" for i in range(1, 6)]
+    markdown = "# T\n\n**TL;DR**：摘要。\n\n" + "\n\n".join(
+        f"## {number}. S\n\n" + ("正文。" * 80) for number in range(1, 8)
+    )
+    markdown += "\n\n" + "\n".join(markers[:3])
+
+    assert paper_markdown_completeness_errors(markdown, markers) == []
+    assert "missing-section-7" in paper_markdown_completeness_errors(markdown.replace("## 7. S", "### 7. S"), markers)
+    assert "too-few-figures:2/3" in paper_markdown_completeness_errors(markdown.replace(markers[2], ""), markers)
+
+
+def test_quality_formula_agent_flags_unsupported_macros():
+    warnings = quality_warnings(r"<latex>\bmX+\rvx+\tens{K}+\matrix{A}</latex>", r"<p><latex>\bmX+\rvx+\tens{K}+\matrix{A}</latex></p>")
+    assert "quality:formula:markdown:high:unsupported-bm-macro" in warnings
+    assert "quality:formula:markdown:high:unsupported-paper-macro" in warnings
+    assert "quality:formula:markdown:high:unsupported-tensor-macro" in warnings
+    assert "quality:formula:markdown:high:unsupported-position-macro" in warnings
+
+
+def test_quality_formula_agent_flags_joined_spacing_commands():
+    warnings = quality_warnings(r"<latex>a=1,\qquadb=2</latex>")
+
+    assert "quality:formula:markdown:high:joined-spacing-command" in warnings
+
+
+def test_quality_agents_flag_raw_formatting_and_fused_formula_commands():
+    warnings = quality_warnings(
+        "",
+        r"<p>\textbfLeaked</p><p><latex>\overlineQ<br/></latex></p>",
+    )
+
+    assert "quality:format:xml:high:raw-tex-formatting-command" in warnings
+    assert "quality:formula:xml:high:fused-accent-command" in warnings
+    assert "quality:formula:xml:high:html-tag-in-formula" in warnings
+
+
+def test_quality_formula_agent_distinguishes_math_less_than_from_html_tags():
+    warnings = quality_warnings(r"<latex>q<p,\quad a_1,\dots,a_n,\quad q\to p</latex>")
+
+    assert "quality:formula:markdown:high:html-tag-in-formula" not in warnings
+    assert "quality:formula:markdown:high:fused-accent-command" not in warnings
+    assert "quality:formula:markdown:high:split-latex-command" not in warnings
+
+    warnings = quality_warnings(r"<latex>x<br/>y</latex>")
+    assert "quality:formula:markdown:high:html-tag-in-formula" in warnings
+
+
+def test_quality_formula_agent_blocks_nested_latex_tags():
+    warnings = quality_warnings(r"<latex><latex>x+y</latex></latex>")
+
+    assert "quality:formula:markdown:high:nested-latex-tag" in warnings
+
+
+def test_quality_text_agent_flags_unresolved_placeholders_and_truncated_tails():
+    warnings = quality_warnings("这与 ?? 的发现一致。模型会 rep")
+
+    assert "quality:text:markdown:medium:unresolved-question-placeholder" in warnings
+    assert "quality:text:markdown:medium:possible-truncated-english-tail" in warnings
+
+
+def test_validate_fetched_docx_content_checks_empty_title_and_markers():
+    warnings = validate_fetched_docx_content("<title>T</title><p>[MaxReadFigure:1:a]</p>", expected_title="Missing")
+    assert "missing-title" not in warnings
+    assert "marker-left-after-publish" in warnings
+    assert "missing-title" in validate_fetched_docx_content("<p>正文</p>", expected_title="T")
+    assert "missing-title" in validate_fetched_docx_content("<title> </title><p>正文</p>", expected_title="T")
+    assert validate_fetched_docx_content("", expected_title="T") == ["fetch-empty"]
+
+
+def test_pre_publish_quality_warnings_ignores_unpublished_markers():
+    warnings = pre_publish_quality_warnings(
+        r"<latex>\bmX</latex>",
+        r"<p><latex>\bmX</latex></p><p>[MaxReadFigure:1:a]</p>",
+    )
+
+    assert "quality:formula:xml:high:unsupported-bm-macro" in warnings
+
+
+def test_quality_formula_agent_allows_standard_eta_command():
+    warnings = quality_warnings("", r"<p><latex>p_\eta(z|x)+\eta_t+\eta^\star</latex></p>")
+
+    assert "quality:formula:xml:high:unsupported-paper-macro" not in warnings
+    assert all(":unpublished-marker:" not in warning for warning in warnings)
+
+
+def test_quality_formula_agent_still_flags_et_prefixed_paper_macro():
+    warnings = quality_warnings(r"<latex>\etLambda+\eta_t</latex>")
+
+    assert "quality:formula:markdown:high:unsupported-paper-macro" in warnings
+
+
+def test_quality_formula_agent_allows_standard_b_prefix_commands():
+    warnings = quality_warnings(r"<latex>(i+p)\bmod n+\begin{bmatrix}x\\y\end{bmatrix}</latex>")
+
+    assert "quality:formula:markdown:high:unsupported-bm-macro" not in warnings
+
+
+def test_quality_formula_agent_still_flags_unexpanded_bm_macros():
+    warnings = quality_warnings(r"<latex>\bmX+\bm{q}</latex>")
+
+    assert "quality:formula:markdown:high:unsupported-bm-macro" in warnings
+
+
+def test_validate_fetched_docx_content_does_not_count_omitted_media_blocks():
+    warnings = validate_fetched_docx_content(
+        "<title>T</title><p><latex>x+y</latex></p><img token=\"img1\"/>",
+        expected_title="T",
+        expected_image_min=2,
+        expected_latex_min=3,
+    )
+
+    assert all(not warning.startswith("missing-images:") for warning in warnings)
+    assert "missing-latex:1/3" in warnings
+
+
+def test_verify_published_docx_returns_post_publish_quality_warnings():
+    class Feishu:
+        def fetch_docx(self, doc_url, doc_format="xml", detail="simple"):
+            return {"data": {"document": {"content": "<title>T</title><p><latex>\\bmX</latex></p>"}}}
+
+    warnings = verify_published_docx(Feishu(), "doc", expected_title="T", attempts=1)
+    assert "post-publish:quality:formula:xml:high:unsupported-bm-macro" in warnings
+
+
+def test_verify_published_docx_fetch_failure_is_soft_warning():
+    class Feishu:
+        def fetch_docx(self, *args, **kwargs):
+            raise RuntimeError("temporary failure")
+
+    warnings = verify_published_docx(Feishu(), "doc", expected_title="T", attempts=1)
+    assert warnings[0].startswith("post-publish:fetch-failed:")

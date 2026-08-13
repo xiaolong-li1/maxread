@@ -172,6 +172,41 @@ class Store:
             create index if not exists job_events_job_idx on job_events(job_id, id);
             create index if not exists review_issues_source_idx on review_issues(source_kind, source_id, id);
             create index if not exists review_issues_category_idx on review_issues(category, severity);
+
+            create table if not exists duty_roster (
+                id integer primary key autoincrement,
+                ordinal integer not null,
+                name text not null default '',
+                user_id text not null,
+                enabled integer not null default 1,
+                created_at datetime not null default current_timestamp,
+                updated_at datetime not null default current_timestamp
+            );
+
+            create unique index if not exists duty_roster_user_idx on duty_roster(user_id);
+            create index if not exists duty_roster_order_idx on duty_roster(enabled, ordinal, id);
+
+            create table if not exists duty_settings (
+                key text primary key,
+                value text not null default '',
+                updated_at datetime not null default current_timestamp
+            );
+
+            create table if not exists duty_reminders (
+                reminder_date text primary key,
+                roster_id integer not null,
+                name text not null default '',
+                user_id text not null,
+                status text not null default 'pending',
+                message_id text not null default '',
+                error text not null default '',
+                attempts integer not null default 0,
+                sent_at datetime,
+                created_at datetime not null default current_timestamp,
+                updated_at datetime not null default current_timestamp
+            );
+
+            create index if not exists duty_reminders_status_idx on duty_reminders(status, reminder_date);
             """
         )
         self.conn.commit()
@@ -716,6 +751,8 @@ class Store:
         )
         self.conn.commit()
         if cur.rowcount:
+            self.conn.execute("update job_watchers set notified = 0 where job_id = ?", (int(job_id),))
+            self.conn.commit()
             self.add_job_event(job_id, "retry", "manual retry")
             return True
         return False
@@ -779,6 +816,105 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def replace_duty_roster(self, members) -> None:
+        clean = []
+        seen = set()
+        for ordinal, member in enumerate(members):
+            user_id = str(member.get("user_id", "")).strip()
+            if not user_id or user_id in seen:
+                continue
+            seen.add(user_id)
+            clean.append((len(clean), str(member.get("name", "")).strip() or user_id, user_id))
+        if not clean:
+            raise ValueError("Duty roster cannot be empty")
+        self.conn.execute("delete from duty_roster")
+        self.conn.executemany(
+            "insert into duty_roster (ordinal, name, user_id) values (?, ?, ?)",
+            clean,
+        )
+        self.set_duty_setting("rotation_start_date", "")
+        self.conn.commit()
+
+    def list_duty_roster(self, enabled_only: bool = False):
+        query = "select id, ordinal, name, user_id, enabled, created_at, updated_at from duty_roster"
+        if enabled_only:
+            query += " where enabled = 1"
+        query += " order by ordinal asc, id asc"
+        return [dict(row) for row in self.conn.execute(query).fetchall()]
+
+    def get_duty_setting(self, key: str, default: str = "") -> str:
+        row = self.conn.execute("select value from duty_settings where key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_duty_setting(self, key: str, value: str) -> None:
+        self.conn.execute(
+            """
+            insert into duty_settings (key, value) values (?, ?)
+            on conflict(key) do update set value = excluded.value, updated_at = current_timestamp
+            """,
+            (str(key), str(value)),
+        )
+
+    def get_duty_reminder(self, reminder_date: str):
+        row = self.conn.execute(
+            "select * from duty_reminders where reminder_date = ?", (reminder_date,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def reserve_duty_reminder(self, reminder_date: str, roster_member) -> bool:
+        row = self.get_duty_reminder(reminder_date)
+        if row and row["status"] == "sent":
+            return False
+        if row:
+            self.conn.execute(
+                """
+                update duty_reminders
+                set roster_id = ?, name = ?, user_id = ?, status = 'pending',
+                    error = '', attempts = attempts + 1, updated_at = current_timestamp
+                where reminder_date = ?
+                """,
+                (int(roster_member["id"]), roster_member["name"], roster_member["user_id"], reminder_date),
+            )
+        else:
+            self.conn.execute(
+                """
+                insert into duty_reminders (reminder_date, roster_id, name, user_id, status, attempts)
+                values (?, ?, ?, ?, 'pending', 1)
+                """,
+                (reminder_date, int(roster_member["id"]), roster_member["name"], roster_member["user_id"]),
+            )
+        self.conn.commit()
+        return True
+
+    def complete_duty_reminder(self, reminder_date: str, message_id: str = "") -> None:
+        self.conn.execute(
+            """
+            update duty_reminders
+            set status = 'sent', message_id = ?, error = '', sent_at = current_timestamp,
+                updated_at = current_timestamp
+            where reminder_date = ?
+            """,
+            (str(message_id), reminder_date),
+        )
+        self.conn.commit()
+
+    def fail_duty_reminder(self, reminder_date: str, error: str) -> None:
+        self.conn.execute(
+            """
+            update duty_reminders
+            set status = 'failed', error = ?, updated_at = current_timestamp
+            where reminder_date = ?
+            """,
+            (str(error)[:1000], reminder_date),
+        )
+        self.conn.commit()
+
+    def list_duty_reminders(self, limit: int = 30):
+        rows = self.conn.execute(
+            "select * from duty_reminders order by reminder_date desc limit ?", (int(limit),)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def close(self) -> None:
         self.conn.close()
 
@@ -790,4 +926,3 @@ def _parse_worker_host_pid(worker_id: str) -> tuple[str, int | None]:
         return parts[0], int(parts[1])
     except ValueError:
         return parts[0], None
-

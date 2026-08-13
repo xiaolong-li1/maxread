@@ -1,0 +1,17 @@
+{
+  "chat_id": "oc_xxx",
+  "identity": "bot",
+  "lark_cli": "lark-cli",
+  "state_db": "./duty-reminder.sqlite3",
+  "lock_file": "./duty-reminder.lock",
+  "timezone": "Asia/Shanghai",
+  "hour": 7,
+  "minute": 0,
+  "poll_seconds": 30,
+  "send_timeout_seconds": 90,
+  "rotation_start_date": "2026-08-12",
+  "roster": [
+    "Name A",
+    "Name B"
+  ]
+}

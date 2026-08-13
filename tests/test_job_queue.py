@@ -10,8 +10,8 @@ class _DummyLLM:
         self.calls = []
         self.image_calls = []
 
-    def responses_text(self, system, user):
-        self.calls.append((system, user))
+    def responses_text(self, system, user, **kwargs):
+        self.calls.append((system, user, kwargs))
         return "ok"
 
     def responses_image_text(self, system, user, image_path):
@@ -51,7 +51,7 @@ class _ReactionFeishu:
         self.reactions = []
         self.replies = []
 
-    def react_progress(self, message_id, stage):
+    def set_progress_reaction(self, message_id, stage):
         self.reactions.append((message_id, stage))
 
     def reply_text(self, message_id, text, idempotency_key=None):

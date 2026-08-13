@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 
 from .models import PaperBundle
 from .render import figure_prompt_lines
+from .repository import find_repository_url
 
 
 FINAL_SYSTEM_PROMPT = """你是“读不动了 / MaxRead”的论文解读编辑。
@@ -31,7 +32,7 @@ def build_final_user_prompt(
     figure_visuals: Dict[str, str] | None = None,
 ) -> str:
     metadata = bundle.metadata
-    authors = ", ".join(metadata.authors[:20])
+    repository_url = _repository_url_text(bundle)
     warnings = "\n".join(f"- {item}" for item in bundle.parse_warnings) or "- 无"
     source_text = bundle.source_text or "[TeX source unavailable]"
     pdf_text = bundle.pdf_text or "[PDF text unavailable]"
@@ -48,7 +49,7 @@ def build_final_user_prompt(
 文档结构必须尽量贴近这个形态：
 # [{metadata.paper_id}] {{中文标题}}：{{一句话定位}}
 **{{英文标题}}**  
-{{作者列表}} — {{机构/会议，如材料中可见}}
+原文：{metadata.abs_url}
 
 标题规则：
 - H1 必须像中文技术精读标题，读者一眼知道“研究问题 + 方法抓手”，不要像机器翻译或论文摘要压缩。
@@ -68,6 +69,7 @@ def build_final_user_prompt(
 | 方法 | {{核心机制，不超过 25 字}} |
 | 证据 | {{最重要实验/图表结论}} |
 | 适用 | {{适用场景或边界}} |
+| 仓库 | {{如果且仅如果输入材料中存在经明确代码语境验证的 GitHub/GitLab/Bitbucket/Codeberg/HuggingFace/SourceForge 仓库 URL，填该 URL；项目主页、论文主页、demo 页面不要填在这里}} |
 
 ## 1. 这篇论文要解决什么问题
 解释背景、核心痛点、已有路线和本文切入点。只写读者理解后文必需的信息。
@@ -90,10 +92,10 @@ def build_final_user_prompt(
 还原实验设置、baseline、指标、主表数据。能写 Markdown 表格就写表格。实验图必须放在对应结论附近。
 
 ## 5. 消融与补充分析
-只保留最能解释方法有效性的消融、效率、scaling、失败案例或敏感性分析。
+只保留最能解释方法有效性的消融、效率、scaling、失败案例或敏感性分析。附录/Appendix/Supplement 中如果有关键扩展实验、额外主表、失败案例、敏感性分析或能支撑正文结论的证据，可以择要写进本节；不要机械堆附录细节。
 
 ## 6. 局限性与开放问题
-只写材料支持的局限；推断必须标明。
+只写材料支持的局限；推断必须标明。附录里提到的限制、适用边界、额外失败案例或未解决问题，可以作为本节依据。
 
 ## 7. 整体评价
 给出对这篇论文贡献、可信度、适用场景和阅读价值的判断。
@@ -106,6 +108,8 @@ def build_final_user_prompt(
 - 只有在 source excerpt、TeX tables、captions 都缺少方法/实验依据时，才允许写“材料不足”。如果 TeX tables 中有实验表，必须还原主表结论，不要误报材料不足。
 - 对标题、方法名、模块名、变量名、数据集、指标、表格数字要忠实。
 - H1 标题要自然、短、具体；如果标题读起来像“摘要压缩”或包含抽象废话，必须改写。
+- 开头不要放作者列表或作者信息；只保留标题、英文标题、原文链接，以及可选仓库行。
+- 仓库行只能使用下方的 Repository URL；如果该值为“无”，不要从正文里自行挑项目主页、demo 页、论文主页或其他 GitHub 链接充当仓库。
 - 方法节不能只写“通过 X 提升 Y”这类概括句；每个核心机制至少要说明一次“怎么计算/怎么执行”。
 - 方法节可以适当长于其他节，但不要引入 source/PDF 没有的实现细节。
 - 语言像技术同事写的精读笔记，不要像产品营销稿。
@@ -114,13 +118,18 @@ def build_final_user_prompt(
 - 图片必须像参考文档一样嵌入：先写一句“XXX 的整体设计如下图所示。”，下一行放 marker，再紧跟一段 `**图：...**` 图解。
 - 图片位置以“原文引用位置”为准：如果 figure 有 label/ref context，必须放在该上下文对应内容附近；不要因为 TeX source 中 figure 环境靠前/靠后就跟着移动。
 - `**图：...**` 必须用中文转述 caption 和图中信息，不要直接复制英文 caption；TeX 宏如 `\formername` 必须展开成真实方法名。
+- 如果某个 marker 的 caption/visual 与当前段落不一致，不要使用这个 marker；绝不能把 logo、品牌图或无 caption 图片解释成方法/实验图。
+- 不能只根据文件名、marker 名或泛化句子解释图片；图解必须能从同一 figure pair 的 caption、visual 描述或 Figure reference context 直接支撑。
 - 每个顶层章节最多放 2 张图；不要连续放图；不要把 3 张以上图放在同一个章节。
 - 如果下方有可插入图片锚点，优先使用正文关键方法图/实验图；marker 必须逐字保留，不要删、不改、不翻译。宁可少放图，也不要把图放错位置或集中堆到文末。
+- 附录内容不是必写章节；只把最有信息量、能解释正文方法/实验/局限的 appendix evidence 融入第 5/6 节或相关实验段落。
+- 附录和补充实验优先用文字或表格摘要；除非某张图被正文明确讨论且你能把它放在对应段落旁边，否则不要插入附录图。
+- 全文图片目标 3-5 张，优先级是方法总览图、最关键实验图、最关键消融/效率图；不要为了覆盖所有候选图而牺牲阅读流。
 
 arXiv metadata：
 - ID: {metadata.paper_id}
 - Title: {metadata.title}
-- Authors: {authors}
+- Repository URL: {repository_url}
 - Published: {metadata.published}
 - Updated: {metadata.updated}
 - Categories: {', '.join(metadata.categories)}
@@ -209,13 +218,43 @@ def _figure_reference_text(bundle: PaperBundle) -> str:
             lines.append(f"- label={label}: " + " || ".join(contexts))
     return "\n".join(lines) if lines else "- 无"
 
+
+def _repository_url_text(bundle: PaperBundle) -> str:
+    url = _find_repository_url(bundle)
+    return url or "无"
+
+
+def _find_repository_url(bundle: PaperBundle) -> str:
+    return find_repository_url(bundle)
+
+
+def _is_repository_url(url: str) -> bool:
+    lower = url.lower()
+    if any(host in lower for host in (
+        "github.com/",
+        "gitlab.com/",
+        "bitbucket.org/",
+        "codeberg.org/",
+        "sourceforge.net/",
+        "huggingface.co/",
+    )):
+        return True
+    return any(word in lower for word in (
+        "/code",
+        "project",
+        "github.io",
+        "software",
+        "demo",
+    ))
+
 def fallback_markdown(bundle: PaperBundle, reason: str) -> str:
     metadata = bundle.metadata
-    authors = ", ".join(metadata.authors)
     warnings = "\n".join(f"- {item}" for item in bundle.parse_warnings) or "- 无"
+    repository_url = _find_repository_url(bundle)
+    repository_line = f"仓库：{repository_url}\n" if repository_url else ""
     return f"""# {metadata.title}
 原文：{metadata.abs_url}
-作者：{authors}
+{repository_line}\
 一句话总结：{metadata.summary}
 
 ## 先说结论

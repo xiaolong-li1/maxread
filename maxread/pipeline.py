@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import traceback
+import json
+import os
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -13,8 +16,11 @@ from .models import ArxivMetadata, FeishuEvent, PaperBundle, PaperRef
 from .openai_client import OpenAIClient
 from .prompts import FINAL_SYSTEM_PROMPT, build_final_user_prompt
 from .publishing import publish_marker_image
-from .render import ensure_priority_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning
+from .quality import PrePublishQualityError, blocking_quality_warnings, paper_markdown_completeness_errors, pre_publish_quality_warnings, verify_published_docx
+from .repository import find_repository_url
+from .render import ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning
 from .review import review_markdown_with_report
+from .visual_qa import VisualQAController
 
 
 @dataclass
@@ -33,12 +39,16 @@ class MaxReadPipeline:
         feishu: FeishuClient,
         llm: Optional[OpenAIClient],
         require_source: bool = True,
+        review_reasoning_effort: str = "",
+        visual_qa: Optional[VisualQAController] = None,
     ):
         self.store = store
         self.arxiv = arxiv
         self.feishu = feishu
         self.llm = llm
         self.require_source = require_source
+        self.review_reasoning_effort = review_reasoning_effort
+        self.visual_qa = visual_qa
 
     def process_ref(self, ref: PaperRef, event: Optional[FeishuEvent] = None, send_progress: bool = True) -> ProcessResult:
         record = self.store.get_paper(ref.paper_id)
@@ -69,6 +79,23 @@ class MaxReadPipeline:
                 pdf_path=str(bundle.pdf_path or ""),
                 source_path=str(bundle.source_path or ""),
             )
+            _write_paper_artifact(
+                bundle,
+                "00-source-summary.json",
+                json.dumps(
+                    {
+                        "paper_id": ref.paper_id,
+                        "title": bundle.metadata.title,
+                        "source_chars": len(bundle.source_text or ""),
+                        "pdf_chars": len(bundle.pdf_text or ""),
+                        "figures": len(bundle.source_figures),
+                        "tables": len(bundle.source_tables),
+                        "parse_warnings": list(bundle.parse_warnings),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
             if self.require_source and not bundle.source_text:
                 message = _source_required_message(ref.paper_id, bundle.parse_warnings)
                 self.store.upsert_paper(ref.paper_id, "needs_source", error=message)
@@ -85,30 +112,70 @@ class MaxReadPipeline:
                 figures = prepare_key_figures(bundle)
                 figure_inserts = figure_placeholders(figures)
                 figure_visuals, figure_visual_warnings = _describe_figures_for_prompt(self.llm, figure_inserts)
-                markdown = self.llm.responses_text(FINAL_SYSTEM_PROMPT, build_final_user_prompt(bundle, figure_inserts, figure_visuals))
-                markdown = polish_markdown(markdown)
+                macro_kwargs = _paper_macro_kwargs(bundle)
+                markers = [marker for marker, _path, _caption in figure_inserts]
+                markdown = _generate_complete_paper_markdown(
+                    self.llm,
+                    build_final_user_prompt(bundle, figure_inserts, figure_visuals),
+                    markers,
+                )
+                _write_paper_artifact(bundle, "01-generated.md", markdown)
+                markdown = _sanitize_repository_markdown(markdown, find_repository_url(bundle))
+                markdown = polish_markdown(markdown, **macro_kwargs)
                 markdown = remove_false_material_warning(markdown, bundle)
                 markdown = ensure_priority_figure_markers(markdown, figure_inserts, visual_descriptions=figure_visuals)
-                markers = [marker for marker, _path, _caption in figure_inserts]
+                _write_paper_artifact(bundle, "02-polished.md", markdown)
                 review_warnings = list(figure_visual_warnings)
                 if event and send_progress:
                     self._reply(event, f"[审阅中] 正在审阅/修订：{ref.paper_id}", "reviewing", ref.paper_id)
                 try:
-                    review = review_markdown_with_report(self.llm, markdown, markers, kind="paper")
+                    review = review_markdown_with_report(self.llm, markdown, markers, kind="paper", reasoning_effort=self.review_reasoning_effort)
+                    _write_paper_artifact(bundle, "03-review-response.txt", review.raw)
                     markdown = review.markdown
+                    _write_paper_artifact(bundle, "04-reviewed.md", markdown)
                     self.store.add_review_issues("paper", ref.paper_id, review.issues)
                     for issue in review.issues:
                         review_warnings.append(f"review:{issue.category}:{issue.severity}:{issue.detail}")
                 except Exception as review_exc:
                     review_warnings.append(f"Review pass failed: {review_exc}")
-                markdown = polish_markdown(markdown)
+                markdown = polish_markdown(markdown, **macro_kwargs)
                 markdown = remove_false_material_warning(markdown, bundle)
                 markdown = ensure_priority_figure_markers(markdown, figure_inserts, visual_descriptions=figure_visuals)
+                markdown = ensure_referenced_figure_markers(markdown, figure_inserts, visual_descriptions=figure_visuals)
+                _write_paper_artifact(bundle, "05-final.md", markdown)
+                completeness_errors = paper_markdown_completeness_errors(markdown, markers)
+                if completeness_errors:
+                    raise RuntimeError("incomplete generated paper: " + ", ".join(completeness_errors))
                 missing_markers = [marker for marker in markers if marker not in markdown]
                 publish_warnings = review_warnings + [f"missing-marker:{marker}" for marker in missing_markers]
-                xml = markdown_to_docx_xml(markdown)
+                xml = markdown_to_docx_xml(
+                    markdown,
+                    latex_macros=bundle.source_latex_macros,
+                    latex_arg_macros=bundle.source_latex_arg_macros,
+                )
+                _write_paper_artifact(bundle, "06-document.xml", xml)
+                expected_image_count = sum(1 for marker in markers if marker in markdown)
+                expected_latex_count = xml.count("<latex>")
+                quality_warnings = pre_publish_quality_warnings(markdown, xml)
+                _write_paper_artifact(
+                    bundle,
+                    "07-quality.json",
+                    json.dumps({"warnings": quality_warnings}, ensure_ascii=False, indent=2),
+                )
+                publish_warnings.extend(quality_warnings)
+                blocking_warnings = blocking_quality_warnings(quality_warnings)
+                if blocking_warnings:
+                    raise PrePublishQualityError("; ".join(blocking_warnings))
+            except PrePublishQualityError as exc:
+                message = f"论文已读完，但发布前格式质检未通过，未发布文档：{exc}"
+                _write_paper_artifact(bundle, "08-failure.txt", message)
+                self.store.upsert_paper(ref.paper_id, "quality_failed", error=message)
+                if event and send_progress:
+                    self._reply(event, f"这篇已读完，但发布前格式质检未通过：{ref.paper_id}\n原因：{message}", "quality-fail", ref.paper_id)
+                return ProcessResult(ref.paper_id, "", cached=False, error=message)
             except Exception as exc:
                 message = f"总结模型调用失败，未发布文档：{exc}"
+                _write_paper_artifact(bundle, "08-failure.txt", message)
                 self.store.upsert_paper(ref.paper_id, "summary_failed", error=message)
                 if event and send_progress:
                     self._reply(event, f"这篇我没读成：{ref.paper_id}\n原因：{message}", "summary-fail", ref.paper_id)
@@ -126,6 +193,48 @@ class MaxReadPipeline:
                 publish_result = publish_marker_image(self.feishu, doc["url"], image_path, caption, marker)
                 figure_warnings.extend(publish_result.warnings)
             self.feishu.publish_docx(doc["token"])
+            post_publish_warnings = verify_published_docx(
+                self.feishu,
+                doc["url"],
+                expected_title=bundle.metadata.title or ref.paper_id,
+                expected_image_min=expected_image_count,
+                expected_latex_min=expected_latex_count,
+            )
+            if self.visual_qa:
+                visual_result = self.visual_qa.run(
+                    self.feishu,
+                    doc["url"],
+                    initial_warnings=post_publish_warnings,
+                    source_id=ref.paper_id,
+                )
+                figure_warnings.extend(visual_result.warnings)
+                if visual_result.changed:
+                    figure_warnings.extend(
+                        verify_published_docx(
+                            self.feishu,
+                            doc["url"],
+                            expected_title=bundle.metadata.title or ref.paper_id,
+                            expected_image_min=expected_image_count,
+                            expected_latex_min=0,
+                        )
+                    )
+                else:
+                    figure_warnings.extend(post_publish_warnings)
+            else:
+                figure_warnings.extend(post_publish_warnings)
+            post_publish_blocking = blocking_quality_warnings(figure_warnings)
+            if post_publish_blocking:
+                message = "文档已生成，但发布后质检失败，暂不交付：" + "; ".join(post_publish_blocking)
+                self.store.upsert_paper(
+                    ref.paper_id,
+                    "quality_failed",
+                    doc_url=doc["url"],
+                    doc_token=doc["token"],
+                    error=message,
+                )
+                if event and send_progress:
+                    self._reply(event, f"这篇发布后质检未通过：{ref.paper_id}\n原因：{message}", "quality-fail", ref.paper_id)
+                return ProcessResult(ref.paper_id, doc["url"], cached=False, error=message)
             self.store.upsert_paper(ref.paper_id, "done", doc_url=doc["url"], doc_token=doc["token"], error="; ".join(figure_warnings))
             if event and send_progress:
                 self._reply(event, f"哥，读完了：{doc['url']}", "done", ref.paper_id)
@@ -141,7 +250,7 @@ class MaxReadPipeline:
         stage = _progress_stage(prefix)
         if stage:
             try:
-                self.feishu.react_progress(event.message_id, stage)
+                self.feishu.set_progress_reaction(event.message_id, stage)
             except Exception:
                 pass
             return
@@ -158,6 +267,72 @@ class MaxReadPipeline:
 
 def _progress_stage(prefix: str) -> str:
     return prefix if prefix in {"start", "downloading", "reading", "reviewing", "writing"} else ""
+
+
+def _paper_macro_kwargs(bundle: PaperBundle) -> dict:
+    return {
+        "custom_macros": bundle.source_macros,
+        "latex_macros": bundle.source_latex_macros,
+        "latex_arg_macros": bundle.source_latex_arg_macros,
+    }
+
+
+def _write_paper_artifact(bundle: PaperBundle, name: str, content: str) -> None:
+    """Persist pipeline stages without making diagnostics part of the happy path."""
+    candidates = [bundle.pdf_path, bundle.source_path]
+    root = next(
+        (
+            Path(path).parent
+            for path in candidates
+            if path and Path(path).is_absolute() and Path(path).parent.exists()
+        ),
+        None,
+    )
+    if root is None:
+        return
+    try:
+        artifact_dir = root / "pipeline_artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        target = artifact_dir / Path(name).name
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_text(str(content or ""), encoding="utf-8")
+        temporary.replace(target)
+    except Exception:
+        return
+
+
+def _generate_complete_paper_markdown(llm, user_prompt: str, markers, attempts: int = 2) -> str:
+    last_error = ""
+    prompt = user_prompt
+    for attempt in range(max(1, attempts)):
+        try:
+            markdown = llm.responses_text(FINAL_SYSTEM_PROMPT, prompt)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        errors = paper_markdown_completeness_errors(markdown, markers)
+        if not errors:
+            return markdown
+        last_error = ", ".join(errors)
+        prompt = user_prompt + (
+            "\n\n上一次输出不完整，问题为：" + last_error +
+            "。请重新输出完整文档，必须包含第 1 至第 7 章，并只选择 3-5 张关键图片嵌入对应论述。"
+        )
+    raise RuntimeError("paper generation remained incomplete: " + last_error)
+
+
+def _sanitize_repository_markdown(markdown: str, repository_url: str) -> str:
+    text = str(markdown or "")
+    value = str(repository_url or "").strip()
+    table_pattern = re.compile(r"(?m)^\|\s*仓库\s*\|[^\n]*\|\s*$")
+    line_pattern = re.compile(r"(?m)^\s*仓库\s*[:：][^\n]*$")
+    if value:
+        text = table_pattern.sub(f"| 仓库 | {value} |", text)
+        text = line_pattern.sub(f"仓库：{value}", text)
+    else:
+        text = table_pattern.sub("", text)
+        text = line_pattern.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
 
 
 def _limited_bundle(paper_id: str, reason: str) -> PaperBundle:
@@ -211,6 +386,8 @@ FIGURE_VISION_SYSTEM_PROMPT = """你是论文图像审阅员。只描述图片�
 
 
 def _describe_figures_for_prompt(llm, figure_inserts):
+    if os.environ.get("MAXREAD_SKIP_FIGURE_VISION", "").lower() in {"1", "true", "yes", "on"}:
+        return {}, []
     if not hasattr(llm, "responses_image_text"):
         return {}, []
     descriptions = {}

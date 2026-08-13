@@ -10,10 +10,29 @@ def test_huggingface_papers_maps_to_arxiv():
     assert web_refs == []
 
 
+def test_arxiv_html_link_maps_to_paper_not_web_article():
+    refs, web_refs = extract_supported_inputs("读 https://arxiv.org/html/2503.08067v1")
+    assert [(ref.paper_id, ref.url) for ref in refs] == [("2503.08067", "https://arxiv.org/pdf/2503.08067v1")]
+    assert web_refs == []
+
+
 def test_regular_url_becomes_web_ref():
     refs, web_refs = extract_supported_inputs("看 https://nrehiew.github.io/blog/sft_rl_opd/")
     assert refs == []
     assert [ref.url for ref in web_refs] == ["https://nrehiew.github.io/blog/sft_rl_opd/"]
+
+
+def test_markdown_wrapped_url_is_cleaned_and_deduped():
+    text = (
+        "这篇我没读成：[https://transformer-circuits.pub/2026/workspace/index.html]"
+        "(https://transformer-circuits.pub/2026/workspace/index.html)]([https://transformer-circuits.pub/2026/workspace/index.html]"
+        "(https://transformer-circuits.pub/2026/workspace/index.html)"
+    )
+
+    refs, web_refs = extract_supported_inputs(text)
+
+    assert refs == []
+    assert [ref.url for ref in web_refs] == ["https://transformer-circuits.pub/2026/workspace/index.html"]
 
 
 def test_direct_pdf_and_feishu_docs_are_not_web_articles():

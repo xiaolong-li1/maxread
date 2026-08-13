@@ -15,7 +15,9 @@ def test_intro_message_says_feedback_is_direct_chat():
     msg = intro_message("https://example.feishu.cn/docx/feedback")
     assert "目前支持" in msg
     assert "arXiv" in msg
-    assert "直接私聊我" in msg
+    assert "arXiv ID / 飞书文档链接" in msg
+    assert "这样我能定位是哪篇出了问题" in msg
+    assert "反馈：图片太少" not in msg
     assert "添加飞书表情反应" in msg
     assert "[在做了]：正在下载" in msg
     assert "[精神补给]：正在读" in msg

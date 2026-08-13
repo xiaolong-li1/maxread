@@ -13,20 +13,37 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import shutil
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
 
 
-ARXIV_ID_RE = re.compile(
-    r"(?:arxiv\.org/(?:abs|pdf)/)?(?P<id>\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?",
+ARXIV_URL_RE = re.compile(
+    r"https?://(?:www\.)?arxiv\.org/(?P<kind>abs|pdf|html)/(?P<id>\d{4}\.\d{4,5})(?P<version>v\d+)?(?:\.pdf)?",
     re.IGNORECASE,
 )
+ARXIV_ID_RE = re.compile(r"(?<![\w./-])(?P<id>\d{4}\.\d{4,5})(?:v\d+)?(?![\w.-])", re.IGNORECASE)
+FIGURE_CAPTION_RE = re.compile(r"\\(?:caption\*?(?:\[[^\]]*\])?|captionof\{figure\}(?:\[[^\]]*\])?)\{")
+GRAPHICS_COMMAND_RE = re.compile(r"\\(?:includegraphics|begin\{overpic\})(?:\[[^\]]*\])?\{([^}]+)\}")
 
 
 def extract_arxiv_refs(text: str) -> List[PaperRef]:
     seen = set()
     refs: List[PaperRef] = []
+    for match in ARXIV_URL_RE.finditer(text):
+        paper_id = match.group("id")
+        if paper_id in seen:
+            continue
+        seen.add(paper_id)
+        versioned_id = paper_id + (match.group("version") or "")
+        kind = match.group("kind").lower()
+        if kind == "html":
+            url = f"https://arxiv.org/pdf/{versioned_id}"
+        elif kind == "pdf":
+            url = f"https://arxiv.org/pdf/{versioned_id}"
+        else:
+            url = f"https://arxiv.org/abs/{versioned_id}"
+        refs.append(PaperRef(paper_id=paper_id, url=url))
     for match in ARXIV_ID_RE.finditer(text):
         paper_id = match.group("id")
         if paper_id in seen:
@@ -51,7 +68,7 @@ class ArxivClient:
         # arXiv is happier when a single client does not chain metadata/pdf/source
         # requests back-to-back. This also matches the intended usage: a few
         # papers per hour, not a bulk mirror.
-        source_path, source_dir, source_text, source_tree, source_assets, source_captions, source_figures, source_tables, source_warnings = self.fetch_source_text(paper_id, paper_dir)
+        source_path, source_dir, source_text, source_tree, source_assets, source_captions, source_figures, source_tables, source_macros, source_latex_macros, source_latex_arg_macros, source_warnings = self.fetch_source_text(paper_id, paper_dir)
         time.sleep(1.5)
         pdf_path, pdf_text, pdf_warnings = self.fetch_pdf_text(paper_id, paper_dir)
         return PaperBundle(
@@ -66,6 +83,9 @@ class ArxivClient:
             source_captions=source_captions,
             source_figures=source_figures,
             source_tables=source_tables,
+            source_macros=source_macros,
+            source_latex_macros=source_latex_macros,
+            source_latex_arg_macros=source_latex_arg_macros,
             parse_warnings=source_warnings + pdf_warnings,
         )
 
@@ -181,31 +201,32 @@ class ArxivClient:
             warnings.append(f"PDF text extraction failed: {exc}")
         return pdf_path, _clip(text, 120_000), warnings
 
-    def fetch_source_text(self, paper_id: str, paper_dir: Path) -> Tuple[Optional[Path], Optional[Path], str, str, List[str], List[str], List[PaperFigure], List[str], List[str]]:
+    def fetch_source_text(self, paper_id: str, paper_dir: Path) -> Tuple[Optional[Path], Optional[Path], str, str, List[str], List[str], List[PaperFigure], List[str], Dict[str, str], Dict[str, str], Dict[str, str], List[str]]:
         source_path = paper_dir / f"{paper_id}.source"
         if not source_path.exists() or source_path.stat().st_size == 0:
             try:
                 self._download_to_path(f"https://arxiv.org/e-print/{paper_id}", source_path)
             except urllib.error.HTTPError as exc:
-                return None, None, "", "", [], [], [], [], [f"TeX source unavailable: HTTP {exc.code}"]
+                return None, None, "", "", [], [], [], [], {}, {}, {}, [f"TeX source unavailable: HTTP {exc.code}"]
             except Exception as exc:
-                return None, None, "", "", [], [], [], [], [f"TeX source download failed: {exc}"]
+                return None, None, "", "", [], [], [], [], {}, {}, {}, [f"TeX source download failed: {exc}"]
         try:
             source_dir = _extract_source_to_dir(source_path, paper_dir / "source")
             texts = list(_source_texts_from_dir(source_dir))
             if not texts:
-                return source_path, source_dir, "", _source_tree(source_dir), _source_assets(source_dir), [], [], [], ["TeX source archive contained no readable .tex/.bib/.bbl files"]
+                return source_path, source_dir, "", _source_tree(source_dir), _source_assets(source_dir), [], [], [], {}, {}, {}, ["TeX source archive contained no readable .tex/.bib/.bbl files"]
             combined = "\n\n".join(texts)
             macros = _extract_simple_macros(combined)
+            latex_macros, latex_arg_macros = _extract_latex_macro_definitions(combined)
             combined = _expand_simple_macros(_strip_simple_macro_definitions(combined), macros)
             tree = _source_tree(source_dir)
             assets = _source_assets(source_dir)
             captions = _extract_captions(combined)
             figures = _extract_figures_from_dir(source_dir, macros=macros)
             tables = _extract_tables(combined)
-            return source_path, source_dir, _clip(combined, 90_000), tree, assets, captions, figures, tables, []
+            return source_path, source_dir, _clip_source_with_appendix(combined, 90_000), tree, assets, captions, figures, tables, macros, latex_macros, latex_arg_macros, []
         except Exception as exc:
-            return source_path, None, "", "", [], [], [], [], [f"TeX source extraction failed: {exc}"]
+            return source_path, None, "", "", [], [], [], [], {}, {}, {}, [f"TeX source extraction failed: {exc}"]
 
     def _get(self, url: str) -> bytes:
         self._pace_requests()
@@ -425,7 +446,7 @@ def _source_assets(source_dir: Path, max_items: int = 240) -> List[str]:
 def _extract_captions(tex_text: str, max_items: int = 80) -> List[str]:
     tex_text = _strip_latex_comments(tex_text)
     captions = []
-    for match in re.finditer(r"\\caption(?:\[[^\]]*\])?\{", tex_text):
+    for match in FIGURE_CAPTION_RE.finditer(tex_text):
         body = _balanced_brace_content(tex_text, match.end() - 1)
         if body:
             captions.append(_clip(_clean_latex_text(_norm(body)), 1200))
@@ -503,7 +524,7 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
 
 
 def _is_subfigure_block(block: str) -> bool:
-    return "\\begin{subfigure" in block and len(re.findall(r"\\includegraphics", block)) > 1
+    return "\\begin{subfigure" in block and len(GRAPHICS_COMMAND_RE.findall(block)) > 1
 
 def _extract_simple_macros(tex_text: str) -> dict[str, str]:
     stripped = _strip_latex_comments(tex_text)
@@ -523,6 +544,70 @@ def _extract_simple_macros(tex_text: str) -> dict[str, str]:
             if value and len(value) <= 80:
                 macros[name] = value
     return macros
+
+
+def _extract_latex_macro_definitions(tex_text: str) -> tuple[dict[str, str], dict[str, str]]:
+    stripped = _strip_latex_comments(tex_text)
+    zero_arg: dict[str, str] = {}
+    one_arg: dict[str, str] = {}
+    patterns = [
+        r"\\(?:re)?newcommand\*?\s*(?:\{\\(?P<name1>[A-Za-z]+)\}|\\(?P<name2>[A-Za-z]+))\s*(?:\[(?P<argc>\d+)\])?\s*\{",
+        r"\\def\\(?P<name3>[A-Za-z]+)(?P<defargs>(?:#\d+)*)\s*\{",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, stripped):
+            name = match.groupdict().get("name1") or match.groupdict().get("name2") or match.groupdict().get("name3") or ""
+            if not name:
+                continue
+            argc = 0
+            if match.groupdict().get("argc"):
+                try:
+                    argc = int(match.group("argc"))
+                except ValueError:
+                    argc = 0
+            elif match.groupdict().get("defargs"):
+                argc = match.group("defargs").count("#")
+            if argc > 1:
+                continue
+            body = _balanced_brace_content(stripped, match.end() - 1).strip()
+            if not _is_safe_latex_macro_body(body, expects_arg=argc == 1):
+                continue
+            if argc == 1:
+                one_arg[name] = body
+            else:
+                zero_arg[name] = body
+    return zero_arg, one_arg
+
+
+def _is_safe_latex_macro_body(body: str, expects_arg: bool = False) -> bool:
+    if not body or len(body) > 240:
+        return False
+    if not expects_arg and "#" in body:
+        return False
+    if expects_arg and re.search(r"#(?!1)", body):
+        return False
+    if re.search(r"\\(?:begin|end|def|newcommand|renewcommand|usepackage|RequirePackage|input|include|includegraphics|citep?|ref|label|url|href)\b", body):
+        return False
+    return _balanced_braces_fragment(body)
+
+
+def _balanced_braces_fragment(text: str) -> bool:
+    depth = 0
+    escaped = False
+    for ch in text:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
 
 
 def _expand_simple_macros(text: str, macros: dict[str, str]) -> str:
@@ -554,7 +639,7 @@ def _figure_blocks(tex_text: str) -> Iterable[str]:
 
 def _figure_segments(block: str) -> Iterable[Tuple[str, str, str]]:
     captions = []
-    for match in re.finditer(r"\\caption(?:\[[^\]]*\])?\{", block):
+    for match in FIGURE_CAPTION_RE.finditer(block):
         open_index = match.end() - 1
         close_index = _balanced_brace_end_index(block, open_index)
         if close_index < 0:
@@ -583,7 +668,7 @@ def _includegraphics_assets_with_layout(block: str, tex_dir: Path, source_dir: P
     row = 0
     col = 0
     last_end = 0
-    for match in re.finditer(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", block):
+    for match in GRAPHICS_COMMAND_RE.finditer(block):
         between = block[last_end:match.start()]
         if assets:
             if _contains_graphics_row_break(between):
@@ -636,7 +721,7 @@ def _resolve_graphic_path(raw: str, tex_dir: Path, source_dir: Path) -> str:
 
 
 def _first_caption(block: str) -> str:
-    match = re.search(r"\\caption(?:\[[^\]]*\])?\{", block)
+    match = FIGURE_CAPTION_RE.search(block)
     if not match:
         return ""
     return _clip(_clean_latex_text(_norm(_balanced_brace_content(block, match.end() - 1))), 1200)
@@ -644,7 +729,7 @@ def _first_caption(block: str) -> str:
 
 def _last_caption(block: str) -> str:
     caption = ""
-    for match in re.finditer(r"\\caption(?:\[[^\]]*\])?\{", block):
+    for match in FIGURE_CAPTION_RE.finditer(block):
         value = _balanced_brace_content(block, match.end() - 1)
         if value:
             caption = _clip(_clean_latex_text(_norm(value)), 1200)
@@ -723,6 +808,31 @@ def _clip(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n\n[TRUNCATED]"
+
+
+def _clip_source_with_appendix(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    appendix_start = _find_appendix_start(text)
+    if appendix_start < 0 or appendix_start < max_chars // 3:
+        return _clip(text, max_chars)
+    appendix_budget = min(24_000, max_chars // 3)
+    main_budget = max_chars - appendix_budget - 80
+    main = text[:main_budget].rstrip()
+    appendix = text[appendix_start:appendix_start + appendix_budget].strip()
+    return f"{main}\n\n[TRUNCATED: skipped middle source; preserved appendix excerpt]\n\n{appendix}\n\n[TRUNCATED]"
+
+
+def _find_appendix_start(text: str) -> int:
+    patterns = [
+        r"\\appendix\b",
+        r"\\section\*?\{Appendix",
+        r"\\section\*?\{Supplement",
+        r"% FILE: [^\n]*(?:appendix|supplement)[^\n]*",
+    ]
+    starts = [match.start() for pattern in patterns for match in re.finditer(pattern, text, re.I)]
+    return min(starts) if starts else -1
 
 
 def _meta(page: str, name: str) -> str:

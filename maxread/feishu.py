@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
@@ -25,6 +28,7 @@ PROGRESS_STAGES = (
 
 PROGRESS_EMOJI_TYPES = {stage: emoji_type for stage, _label, _desc, emoji_type in PROGRESS_STAGES}
 PROGRESS_EMOJI_TYPES.update({"queued": "Get", "claimed": "Get", "running": "OnIt"})
+PROGRESS_EMOJI_TYPE_SET = set(PROGRESS_EMOJI_TYPES.values())
 
 
 def progress_emoji_type(stage: str) -> str:
@@ -61,6 +65,22 @@ class FeishuClient:
             args += ["--idempotency-key", idempotency_key]
         return self._json(args).data
 
+    def send_text_to_chat(self, chat_id: str, text: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        args = [
+            self.cli,
+            "im",
+            "+messages-send",
+            "--as",
+            self.identity,
+            "--chat-id",
+            chat_id,
+            "--text",
+            text,
+        ]
+        if idempotency_key:
+            args += ["--idempotency-key", idempotency_key]
+        return self._json(args).data
+
     def add_reaction(self, message_id: str, emoji_type: str) -> Dict[str, Any]:
         return self._json([
             self.cli,
@@ -75,10 +95,58 @@ class FeishuClient:
             json.dumps({"reaction_type": {"emoji_type": emoji_type}}, ensure_ascii=False),
         ]).data
 
+    def list_reactions(self, message_id: str) -> Dict[str, Any]:
+        return self._json([
+            self.cli,
+            "im",
+            "reactions",
+            "list",
+            "--as",
+            self.identity,
+            "--params",
+            json.dumps({"message_id": message_id, "page_size": 50}, ensure_ascii=False),
+        ]).data
+
+    def delete_reaction(self, message_id: str, reaction_id: str) -> Dict[str, Any]:
+        return self._json([
+            self.cli,
+            "im",
+            "reactions",
+            "delete",
+            "--as",
+            self.identity,
+            "--params",
+            json.dumps({"message_id": message_id, "reaction_id": reaction_id}, ensure_ascii=False),
+            "--data",
+            "{}",
+        ]).data
+
     def react_progress(self, message_id: str, stage: str) -> Dict[str, Any]:
         emoji_type = progress_emoji_type(stage)
         if not emoji_type:
             return {}
+        return self.add_reaction(message_id, emoji_type)
+
+    def set_progress_reaction(self, message_id: str, stage: str) -> Dict[str, Any]:
+        emoji_type = progress_emoji_type(stage)
+        if not emoji_type:
+            return {}
+        try:
+            payload = self.list_reactions(message_id)
+            for item in _reaction_items(payload):
+                item_emoji = item.get("reaction_type", {}).get("emoji_type", "")
+                if item_emoji not in PROGRESS_EMOJI_TYPE_SET or item_emoji == emoji_type:
+                    continue
+                if not _reaction_from_current_identity(item, self.identity):
+                    continue
+                reaction_id = str(item.get("reaction_id") or "")
+                if reaction_id:
+                    try:
+                        self.delete_reaction(message_id, reaction_id)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         return self.add_reaction(message_id, emoji_type)
 
     def create_docx(self, title: str) -> Dict[str, str]:
@@ -145,7 +213,6 @@ class FeishuClient:
         caption: str = "",
         width: int = 720,
         height: int = 0,
-        selection: str = "",
     ) -> Dict[str, Any]:
         args = [
             self.cli,
@@ -168,9 +235,105 @@ class FeishuClient:
             args += ["--height", str(height)]
         if caption:
             args += ["--caption", caption]
-        if selection:
-            args += ["--selection-with-ellipsis", selection]
         return self._json(args).data
+
+    def find_text_block_id(self, doc_url: str, text: str) -> str:
+        payload = self._json([
+            self.cli,
+            "docs",
+            "+fetch",
+            "--as",
+            self.identity,
+            "--doc",
+            doc_url,
+            "--scope",
+            "keyword",
+            "--keyword",
+            text,
+            "--detail",
+            "with-ids",
+            "--format",
+            "json",
+        ]).data
+        content = _document_content(payload)
+        block_id = _find_exact_text_block_id(content, text)
+        if block_id:
+            return block_id
+
+        # Newly created marker blocks are not always immediately available in
+        # keyword scope, especially when the marker contains punctuation. A
+        # full fetch is slower but authoritative and prevents false misses.
+        payload = self._json([
+            self.cli,
+            "docs",
+            "+fetch",
+            "--as",
+            self.identity,
+            "--doc",
+            doc_url,
+            "--detail",
+            "with-ids",
+            "--format",
+            "json",
+        ]).data
+        return _find_exact_text_block_id(_document_content(payload), text)
+
+    def move_block_after(self, doc_url: str, anchor_block_id: str, source_block_id: str) -> Dict[str, Any]:
+        return self._json([
+            self.cli,
+            "docs",
+            "+update",
+            "--api-version",
+            "v2",
+            "--as",
+            self.identity,
+            "--doc",
+            doc_url,
+            "--command",
+            "block_move_after",
+            "--block-id",
+            anchor_block_id,
+            "--src-block-ids",
+            source_block_id,
+        ]).data
+
+    def delete_block(self, doc_url: str, block_id: str) -> Dict[str, Any]:
+        return self._json([
+            self.cli,
+            "docs",
+            "+update",
+            "--api-version",
+            "v2",
+            "--as",
+            self.identity,
+            "--doc",
+            doc_url,
+            "--command",
+            "block_delete",
+            "--block-id",
+            block_id,
+        ]).data
+
+    def block_replace(self, doc_url: str, block_id: str, content: str) -> Dict[str, Any]:
+        return self._json([
+            self.cli,
+            "docs",
+            "+update",
+            "--api-version",
+            "v2",
+            "--as",
+            self.identity,
+            "--doc",
+            doc_url,
+            "--command",
+            "block_replace",
+            "--block-id",
+            block_id,
+            "--doc-format",
+            "xml",
+            "--content",
+            content,
+        ]).data
 
     def remove_text(self, doc_url: str, text: str) -> Dict[str, Any]:
         return self._json([
@@ -204,10 +367,10 @@ class FeishuClient:
             "--data",
             json.dumps(
                 {
-                    "link_share_entity": "anyone_readable",
+                    "link_share_entity": "anyone_editable",
                     "external_access": True,
-                    "security_entity": "anyone_can_view",
-                    "comment_entity": "anyone_can_view",
+                    "security_entity": "anyone_can_edit",
+                    "comment_entity": "anyone_can_edit",
                     "share_entity": "anyone",
                 },
                 ensure_ascii=False,
@@ -215,8 +378,8 @@ class FeishuClient:
             "--yes",
         ]).data
 
-    def fetch_docx(self, doc_url: str) -> Dict[str, Any]:
-        return self._json([
+    def fetch_docx(self, doc_url: str, doc_format: str = "xml", scope: str = "", detail: str = "simple") -> Dict[str, Any]:
+        args = [
             self.cli,
             "docs",
             "+fetch",
@@ -226,7 +389,14 @@ class FeishuClient:
             self.identity,
             "--doc",
             doc_url,
-        ]).data
+            "--doc-format",
+            doc_format,
+            "--detail",
+            detail,
+        ]
+        if scope:
+            args += ["--scope", scope]
+        return self._json(args).data
 
     def fetch_related_message_text(self, event: FeishuEvent) -> str:
         parts: List[str] = []
@@ -291,19 +461,35 @@ class FeishuClient:
         return "\n".join(part for part in parts if part).strip()
 
     def event_stream(self) -> Iterator[FeishuEvent]:
-        proc = subprocess.Popen(
-            [self.cli, "event", "consume", "im.message.receive_v1", "--as", self.identity],
-            text=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            payload = json.loads(line)
-            yield parse_event(payload)
+        while True:
+            proc = subprocess.Popen(
+                [self.cli, "event", "consume", "im.message.receive_v1", "--as", self.identity],
+                text=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+            )
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    yield parse_event(payload)
+                proc.wait(timeout=5)
+            except GeneratorExit:
+                _terminate_process(proc)
+                raise
+            except KeyboardInterrupt:
+                _terminate_process(proc)
+                raise
+            finally:
+                if proc.poll() is None:
+                    _terminate_process(proc)
+            time.sleep(2)
 
     def _json(self, args: List[str]) -> CommandResult:
         attempts = _retry_attempts(args)
@@ -325,14 +511,69 @@ class FeishuClient:
         raise LarkCliError(last_error or f"command failed: {args}")
 
 
+def _document_content(payload: Dict[str, Any]) -> str:
+    current: Any = payload
+    for key in ("data", "document"):
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(key, current)
+    if not isinstance(current, dict):
+        return ""
+    return str(current.get("content") or current.get("markdown") or current.get("text") or "")
+
+
+def _find_exact_text_block_id(content: str, text: str) -> str:
+    if not content:
+        return ""
+    try:
+        root = ET.fromstring(f"<root>{content}</root>")
+    except ET.ParseError:
+        return ""
+    for block in root.iter():
+        block_id = str(block.attrib.get("id") or "")
+        block_text = "".join(block.itertext()).strip()
+        if block_id and block_text == text:
+            return block_id
+    return ""
+
+
+
+def _terminate_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
 
 def _retry_attempts(args: List[str]) -> int:
     joined = " ".join(args)
     if "docs +media-insert" in joined:
-        return int(os.environ.get("MAXREAD_FEISHU_MEDIA_RETRIES", "4"))
+        return 1
     if "docs +update" in joined or "docs +create" in joined or "permission.public patch" in joined:
         return int(os.environ.get("MAXREAD_FEISHU_WRITE_RETRIES", "3"))
     return int(os.environ.get("MAXREAD_FEISHU_DEFAULT_RETRIES", "2"))
+
+
+def _reaction_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = payload.get("data", payload) if isinstance(payload, dict) else {}
+    items = data.get("items", []) if isinstance(data, dict) else []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _reaction_from_current_identity(item: Dict[str, Any], identity: str) -> bool:
+    operator = item.get("operator") or {}
+    operator_type = str(operator.get("operator_type") or "").lower()
+    if str(identity).lower() == "bot":
+        return operator_type == "app"
+    if str(identity).lower() == "user":
+        return operator_type == "user"
+    return False
 
 
 def _is_retryable_error(error: str) -> bool:
@@ -520,15 +761,63 @@ def doc_token_from_url(url: str) -> str:
 
 
 def _safe_relative_path(path: str) -> str:
-    value = Path(path).expanduser()
-    if not value.is_absolute():
-        return str(value)
-    value = value.resolve()
+    raw = Path(path).expanduser()
     cwd = Path.cwd().resolve()
-    rel = os.path.relpath(value, cwd)
-    if rel == os.curdir or rel.startswith(".."):
-        return str(value)
-    return rel
+    source = raw.resolve() if raw.is_absolute() else (Path.cwd() / raw).resolve()
+    if not raw.is_absolute():
+        try:
+            source.relative_to(cwd)
+            return raw.as_posix()
+        except ValueError:
+            pass
+    try:
+        return source.relative_to(cwd).as_posix()
+    except ValueError:
+        pass
+    try:
+        cached = _copy_into_upload_cache(source, cwd)
+        return cached.relative_to(cwd).as_posix()
+    except OSError:
+        return str(raw)
+
+
+def _copy_into_upload_cache(source: Path, cwd: Path) -> Path:
+    cache_dir = cwd / "var" / "feishu_uploads"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    _prune_upload_cache(cache_dir)
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", source.stem).strip(".-") or "upload"
+    digest = hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:12]
+    suffix = source.suffix.lower() or ".bin"
+    target = cache_dir / f"{stem}-{digest}{suffix}"
+    should_copy = True
+    if target.exists():
+        try:
+            should_copy = source.stat().st_mtime > target.stat().st_mtime or source.stat().st_size != target.stat().st_size
+        except OSError:
+            should_copy = True
+    if should_copy:
+        shutil.copy2(source, target)
+    return target
+
+
+def _prune_upload_cache(cache_dir: Path) -> None:
+    try:
+        ttl = int(os.environ.get("MAXREAD_FEISHU_UPLOAD_CACHE_TTL_SECONDS", "172800"))
+    except ValueError:
+        ttl = 172800
+    if ttl <= 0:
+        return
+    cutoff = time.time() - ttl
+    try:
+        entries = list(cache_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue
 
 
 def _xml_escape(text: str) -> str:

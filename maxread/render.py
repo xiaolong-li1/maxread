@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import html
+import os
 import re
 import shutil
 import subprocess
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -38,12 +40,69 @@ PREFERRED_FIGURE_NAMES = [
 ]
 
 
-def polish_markdown(markdown: str) -> str:
-    markdown = markdown.replace("<br/>", "\n")
-    markdown = _normalize_display_math(markdown)
-    markdown = _normalize_inline_math(markdown)
+def polish_markdown(
+    markdown: str,
+    custom_macros: Optional[Dict[str, str]] = None,
+    latex_macros: Optional[Dict[str, str]] = None,
+    latex_arg_macros: Optional[Dict[str, str]] = None,
+) -> str:
+    markdown = _flatten_nested_latex_wrappers(markdown)
+    markdown = _normalize_backticked_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
+    markdown = _normalize_display_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
+    markdown = _normalize_inline_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
+    markdown = _sanitize_latex_blocks(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
+    markdown = _replace_breaks_outside_latex(markdown)
+    markdown = _expand_text_macros_outside_latex(markdown, custom_macros or {})
+    markdown = _sanitize_visible_text_macros(markdown)
+    markdown = _flatten_nested_latex_wrappers(markdown)
     markdown = re.sub(r"\n{3,}", "\n\n", markdown)
     return markdown.strip() + "\n"
+
+
+def _flatten_nested_latex_wrappers(markdown: str) -> str:
+    """Remove presentation wrappers that would create nested Feishu formulas."""
+    text = re.sub(r"`\s*(<latex>.*?</latex>)\s*`", r"\1", str(markdown or ""), flags=re.S)
+    for _ in range(3):
+        updated = re.sub(r"<latex>\s*<latex>", "<latex>", text, flags=re.I)
+        updated = re.sub(r"</latex>\s*</latex>", "</latex>", updated, flags=re.I)
+        if updated == text:
+            break
+        text = updated
+    return text
+
+
+def _normalize_backticked_math(
+    markdown: str,
+    latex_macros: Optional[Dict[str, str]] = None,
+    latex_arg_macros: Optional[Dict[str, str]] = None,
+) -> str:
+    def repl(match: re.Match[str]) -> str:
+        raw = match.group(1).strip()
+        if not _looks_like_math_code(raw):
+            return match.group(0)
+        body = _normalize_latex_body(raw, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
+        if not _is_valid_latex_body(body):
+            return match.group(0)
+        return f"<latex>{body}</latex>"
+
+    return re.sub(r"`([^`\n]{1,240})`", repl, markdown)
+
+
+def _looks_like_math_code(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if re.search(r"\\[A-Za-z]+|[_^]", value):
+        return True
+    if re.search(r"[α-ωΑ-Ωϑϕϵℓ≤≥×]", value):
+        return True
+    if re.fullmatch(r"[A-Za-z]", value):
+        return True
+    if re.fullmatch(r"\(?[A-Za-z](?:\s*,\s*[A-Za-z])+\)?", value):
+        return True
+    if re.fullmatch(r"[A-Za-z0-9.{}()[\],\s]+(?:[=<>+*/-][A-Za-z0-9.{}()[\],\s]*)+", value):
+        return True
+    return bool(re.fullmatch(r"\[[0-9.,\s]+\]", value))
 
 
 def remove_false_material_warning(markdown: str, bundle: PaperBundle) -> str:
@@ -85,7 +144,18 @@ def figure_prompt_lines(inserts: List[Tuple[str, Path, str]], visual_description
     return lines
 
 
-def markdown_to_docx_xml(markdown: str) -> str:
+def markdown_to_docx_xml(
+    markdown: str,
+    latex_macros: Optional[Dict[str, str]] = None,
+    latex_arg_macros: Optional[Dict[str, str]] = None,
+) -> str:
+    markdown = _sanitize_latex_blocks(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
+    markdown = _sanitize_visible_text_macros(markdown)
+    markdown = re.sub(
+        r"(?m)^[ \t]*(\[MaxReadFigure:[^\]\n]+\])[ \t]*$",
+        r"\n\1\n",
+        markdown,
+    )
     blocks = _markdown_blocks(markdown)
     xml_parts: List[str] = []
     i = 0
@@ -229,7 +299,8 @@ def _is_priority_figure(path: Path, caption: str = "", visual_description: str =
 
 
 def _short_caption(caption: str, max_chars: int = 180) -> str:
-    text = re.sub(r"\s+", " ", str(caption or "")).strip()
+    text = _sanitize_visible_text_macros(str(caption or ""))
+    text = re.sub(r"\s+", " ", text).strip()
     return text if len(text) <= max_chars else text[:max_chars].rstrip() + "..."
 
 
@@ -291,7 +362,7 @@ def _looks_english(text: str) -> bool:
 
 
 def _strip_common_text_macros(text: str) -> str:
-    text = re.sub(r"\\(?:textsc|textbf|textit|emph|mathrm|mathbf|mathtt)\s*\{([^{}]*)\}", r"\1", text)
+    text = _sanitize_visible_text_macros(text)
     text = re.sub(r"\\(?:xspace|NB|DX|lpk|wx|qz)(?![A-Za-z])(?:\s*\{([^{}]*)\})?", lambda m: m.group(1) or "", text)
     text = re.sub(r"\\(?:citep?|ref|label|url|href)\s*\{[^{}]*\}", "", text)
     text = re.sub(r"\\([A-Za-z]{3,})(?![A-Za-z])", r"\1", text)
@@ -299,9 +370,17 @@ def _strip_common_text_macros(text: str) -> str:
     return re.sub(r"[ \t]+", " ", text).strip()
 
 
-def _normalize_display_math(markdown: str) -> str:
+def _normalize_display_math(
+    markdown: str,
+    latex_macros: Optional[Dict[str, str]] = None,
+    latex_arg_macros: Optional[Dict[str, str]] = None,
+) -> str:
     def repl(match: re.Match[str]) -> str:
-        body = _normalize_latex_body(re.sub(r"\s+", " ", match.group(1).strip()))
+        body = _normalize_latex_body(
+            re.sub(r"\s+", " ", match.group(1).strip()),
+            latex_macros=latex_macros,
+            latex_arg_macros=latex_arg_macros,
+        )
         body = body.replace("\\\\", r"\\")
         return f"\n<latex>{body}</latex>\n"
 
@@ -316,15 +395,44 @@ def _normalize_display_math(markdown: str) -> str:
 def _markdown_blocks(markdown: str) -> List[str]:
     blocks: List[str] = []
     current: List[str] = []
-    for line in markdown.splitlines():
-        if line.strip():
-            current.append(line.rstrip())
-            continue
+
+    def flush() -> None:
         if current:
             blocks.append("\n".join(current))
-            current = []
-    if current:
-        blocks.append("\n".join(current))
+            current.clear()
+
+    def block_kind(lines: List[str]) -> str:
+        nonempty = [line.strip() for line in lines if line.strip()]
+        if nonempty and all(_looks_like_table_row(line) for line in nonempty):
+            return "table"
+        if nonempty and all(re.match(r"^[-*+]\s+", line) for line in nonempty):
+            return "unordered-list"
+        if nonempty and all(re.match(r"^\d+[.)]\s+", line) for line in nonempty):
+            return "ordered-list"
+        return "paragraph"
+
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            flush()
+            continue
+        # Markdown producers often omit the blank line before a heading, table,
+        # or list. Split those structural boundaries before XML conversion.
+        if re.match(r"^#{1,6}\s+\S", stripped):
+            flush()
+            blocks.append(stripped)
+            continue
+        kind = "table" if _looks_like_table_row(stripped) else ""
+        if re.match(r"^[-*+]\s+", stripped):
+            kind = "unordered-list"
+        elif re.match(r"^\d+[.)]\s+", stripped):
+            kind = "ordered-list"
+        if current and kind and block_kind(current) != kind:
+            flush()
+        if current and not kind and block_kind(current) in {"table", "unordered-list", "ordered-list"}:
+            flush()
+        current.append(line.rstrip())
+    flush()
     return blocks
 
 
@@ -333,8 +441,12 @@ def _is_latex_block(text: str) -> bool:
 
 
 def _is_table_block(block: str) -> bool:
-    lines = [line.strip() for line in block.splitlines() if line.strip()]
-    return len(lines) >= 2 and all(line.startswith("|") and line.endswith("|") for line in lines[:2]) and re.fullmatch(r"\|[\s:|\-]+\|", lines[1]) is not None
+    lines = [_normalize_table_line(line) for line in block.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    if not all(_looks_like_table_row(line) for line in lines[:2]):
+        return False
+    return re.fullmatch(r"\|?[\s:|\-]+\|?", lines[1]) is not None
 
 
 def _is_unordered_list(block: str) -> bool:
@@ -358,7 +470,7 @@ def _list_xml(block: str, ordered: bool) -> str:
 
 
 def _table_xml(block: str) -> str:
-    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    lines = [_normalize_table_line(line) for line in block.splitlines() if line.strip()]
     rows = [lines[0]] + lines[2:]
     out = ["<table>"]
     for row in rows:
@@ -366,6 +478,14 @@ def _table_xml(block: str) -> str:
         out.append("<tr>" + "".join(f"<td><p>{_inline_xml(cell)}</p></td>" for cell in cells) + "</tr>")
     out.append("</table>")
     return "".join(out)
+
+
+def _normalize_table_line(line: str) -> str:
+    return line.strip().rstrip()
+
+
+def _looks_like_table_row(line: str) -> bool:
+    return line.count("|") >= 2 and bool(line.strip("|").strip())
 
 
 def _inline_xml(text: str) -> str:
@@ -378,17 +498,39 @@ def _inline_xml(text: str) -> str:
     text = re.sub(r"<latex>(.*?)</latex>", lambda m: hold(f"<latex>{html.escape(m.group(1), quote=False)}</latex>"), text, flags=re.S)
     text = re.sub(r"<br\s*/?>", lambda m: hold("<br/>"), text)
     text = re.sub(r"`([^`]+)`", lambda m: hold(f"<code>{html.escape(m.group(1), quote=False)}</code>"), text)
+    text = _sanitize_visible_text_macros(text)
     text = html.escape(text, quote=False)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", text)
     for index, value in enumerate(placeholders):
         text = text.replace(f"@@MAXREAD_XML_{index}@@", value)
+    # Feishu can canonicalize a break immediately after an inline formula as a
+    # child of <latex>, which makes the persisted formula invalid.
+    text = re.sub(r"(</latex>)<br/>", r"\1 ", text)
     return text
 
 
-def _normalize_inline_math(markdown: str) -> str:
+def _sanitize_latex_blocks(
+    markdown: str,
+    latex_macros: Optional[Dict[str, str]] = None,
+    latex_arg_macros: Optional[Dict[str, str]] = None,
+) -> str:
     def repl(match: re.Match[str]) -> str:
-        body = _normalize_latex_body(match.group(1).strip())
+        body = _normalize_latex_body(match.group(1).strip(), latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
+        if not _is_valid_latex_body(body):
+            return f"`{_strip_latex_for_text(body)}`"
+        return f"<latex>{body}</latex>"
+
+    return re.sub(r"<latex>(.*?)</latex>", repl, markdown, flags=re.S)
+
+
+def _normalize_inline_math(
+    markdown: str,
+    latex_macros: Optional[Dict[str, str]] = None,
+    latex_arg_macros: Optional[Dict[str, str]] = None,
+) -> str:
+    def repl(match: re.Match[str]) -> str:
+        body = _normalize_latex_body(match.group(1).strip(), latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
         if not body:
             return match.group(0)
         return f"<latex>{body}</latex>"
@@ -397,17 +539,416 @@ def _normalize_inline_math(markdown: str) -> str:
     return re.sub(r"(?<!\$)\$([^\n$]{1,240})\$(?!\$)", repl, markdown)
 
 
-def _normalize_latex_body(body: str) -> str:
-    body = html.unescape(body)
+def _normalize_latex_body(
+    body: str,
+    latex_macros: Optional[Dict[str, str]] = None,
+    latex_arg_macros: Optional[Dict[str, str]] = None,
+) -> str:
+    body = _decode_latex_html(body)
+    body = _normalize_unicode_math_symbols(body)
     body = body.replace(r"\_", "_")
-    body = re.sub(r"\\quad([A-Za-z])", r"\\quad \1", body)
+    body = _expand_latex_custom_macros(body, latex_macros or {}, latex_arg_macros or {})
+    body = _flatten_substack(body)
+    body = _repair_split_latex_commands(body)
+    body = _strip_latex_publish_metadata(body)
+    body = _normalize_paper_math_macros(body)
+    body = _normalize_fused_latex_accents(body)
+    body = _normalize_latex_text_macros(body)
+    body = _normalize_boldsymbol(body)
+    body = _normalize_latex_control_spaces(body)
+    body = _repair_cases_missing_row_breaks(body)
+    body = re.sub(r"\\bm\s*\{([^{}]+)\}", r"\\mathbf{\1}", body)
+    body = re.sub(r"\\bm([A-Za-z])(?=[^A-Za-z]|$)", r"\\mathbf{\1}", body)
+    body = re.sub(r"\\(?:m|v)([A-Z])(?=\b|_)", r"\\mathbf{\1}", body)
+    body = re.sub(r"\\g([A-Z])(?=\b|_)", r"\\mathcal{\1}", body)
+    body = re.sub(r"\\mathcal([A-Za-z])\b", r"\\mathcal{\1}", body)
+    body = re.sub(r"\\(?:Ls|mathcalL)(?=\b|_)", r"\\mathcal{L}", body)
+    body = re.sub(r"\\R\b", r"\\mathbb{R}", body)
+    body = re.sub(r"\\rm\s+([A-Za-z][A-Za-z0-9]*)", r"\\mathrm{\1}", body)
+    body = re.sub(r"\\rm\b", r"\\mathrm", body)
+    body = re.sub(r"\\sg\b", r"\\mathrm{sg}", body)
+    body = re.sub(r"\\softmax\b", r"\\mathrm{softmax}", body)
+    body = re.sub(r"(?<!\\)(?<![A-Za-z])softmax(?=\s*(?:\\left|\())", r"\\mathrm{softmax}", body)
+    body = re.sub(r"(?<!\\)(?<![A-Za-z])stopgrad(?=\s*(?:\\left|\())", r"\\mathrm{stopgrad}", body)
+    body = re.sub(r"\\KL\b", r"\\mathrm{KL}", body)
+    body = re.sub(r"\\TopK\b", r"\\mathrm{TopK}", body)
+    # Feishu removes ordinary spaces after spacing commands when persisting
+    # formulas. An empty group keeps the command boundary stable on round-trip.
+    body = re.sub(r"\\(qquad|quad)(?:\s+)?([A-Za-z])", r"\\\1{}\2", body)
     body = re.sub(r"\\(le|leq|ge|geq|approx|to|in|notin)([A-Z\\])", r"\\\1 \2", body)
     body = re.sub(r"(\d+)\\mathrm\{e\}\{(-?\d+)\}", r"\1\\times10^{\2}", body)
     body = re.sub(r"(\d+)\\mathrm\{e\}\s*([+-]\d+)", r"\1\\times10^{\2}", body)
     return body
 
 
-def prepare_key_figures(bundle: PaperBundle, max_figures: int = 8) -> List[Tuple[Path, str]]:
+def _decode_latex_html(body: str) -> str:
+    """Decode model-escaped HTML before removing tags from a formula body."""
+    body = str(body or "")
+    for _ in range(3):
+        decoded = html.unescape(body)
+        if decoded == body:
+            break
+        body = decoded
+    body = re.sub(r"<\s*br\s*/?\s*>", " ", body, flags=re.I)
+    body = re.sub(r"<\s*/?\s*(?:p|div)\b[^>]*>", " ", body, flags=re.I)
+    return body
+
+
+def _normalize_unicode_math_symbols(body: str) -> str:
+    replacements = {
+        "α": r"\alpha", "β": r"\beta", "γ": r"\gamma", "δ": r"\delta",
+        "ε": r"\epsilon", "ϵ": r"\varepsilon", "ζ": r"\zeta", "η": r"\eta",
+        "θ": r"\theta", "ϑ": r"\vartheta", "ι": r"\iota", "κ": r"\kappa",
+        "λ": r"\lambda", "μ": r"\mu", "ν": r"\nu", "ξ": r"\xi",
+        "π": r"\pi", "ρ": r"\rho", "σ": r"\sigma", "τ": r"\tau",
+        "φ": r"\phi", "ϕ": r"\varphi", "χ": r"\chi", "ψ": r"\psi", "ω": r"\omega",
+        "Δ": r"\Delta", "Σ": r"\Sigma", "Π": r"\Pi", "Λ": r"\Lambda",
+        "ℓ": r"\ell", "≤": r"\le ", "≥": r"\ge ", "×": r"\times ",
+    }
+    return "".join(replacements.get(char, char) for char in str(body or ""))
+
+
+def _expand_text_macros_outside_latex(text: str, macros: Dict[str, str]) -> str:
+    macros = _safe_text_macros(macros)
+    if not macros:
+        return text
+    parts = re.split(r"(<latex>.*?</latex>)", text, flags=re.S)
+    for index in range(0, len(parts), 2):
+        parts[index] = _expand_text_macros(parts[index], macros)
+    return "".join(parts)
+
+
+_VISIBLE_TEXT_COMMANDS = (
+    "textnormal", "operatorname", "textbf", "textit", "textsc", "textrm",
+    "emph", "mathrm", "mathbf", "mathtt",
+)
+
+
+def _sanitize_visible_text_macros(text: str) -> str:
+    """Remove TeX presentation commands that leaked into ordinary prose."""
+    parts = re.split(r"(<latex>.*?</latex>|<code>.*?</code>)", text or "", flags=re.S)
+    commands = sorted(_VISIBLE_TEXT_COMMANDS, key=len, reverse=True)
+    command_pattern = r"\\(?:" + "|".join(map(re.escape, commands)) + r")"
+    for index in range(0, len(parts), 2):
+        segment = parts[index]
+        for command in commands:
+            segment = _replace_simple_latex_command(segment, command, _plain_latex_text)
+        # Review output can lose the braces and leave text such as \textbfTitle.
+        segment = re.sub(command_pattern + r"(?=[A-Za-z])", "", segment)
+        segment = re.sub(r"\\(?:xspace|NB|DX|lpk|wx|qz)(?![A-Za-z])", "", segment)
+        segment = re.sub(r"\\(?:citep?|ref|label|url|href)\s*\{[^{}]*\}", "", segment)
+        parts[index] = segment
+    return "".join(parts)
+
+
+def _replace_breaks_outside_latex(text: str) -> str:
+    parts = re.split(r"(<latex>.*?</latex>|<code>.*?</code>)", text or "", flags=re.S)
+    for index in range(0, len(parts), 2):
+        parts[index] = re.sub(r"<br\s*/?>", "\n", parts[index], flags=re.I)
+    return "".join(parts)
+
+
+def _safe_text_macros(macros: Dict[str, str]) -> Dict[str, str]:
+    unsafe_names = {
+        "R", "N", "Z", "C", "E", "P", "Q", "KL", "Var", "Cov", "argmax", "argmin",
+        "max", "min", "sin", "cos", "tan", "log", "exp", "sqrt", "frac",
+    }
+    out: Dict[str, str] = {}
+    for name, value in (macros or {}).items():
+        key = str(name or "").strip()
+        text = str(value or "").strip()
+        if not key or key in unsafe_names:
+            continue
+        if len(text) < 2 or re.fullmatch(r"[A-Za-z]", text):
+            continue
+        if re.search(r"[\\{}_^]", text):
+            continue
+        out[key] = text
+    return out
+
+
+def _expand_text_macros(text: str, macros: Dict[str, str]) -> str:
+    for name, value in sorted(macros.items(), key=lambda item: -len(item[0])):
+        pattern = rf"\\{re.escape(name)}(?![A-Za-z])(?P<space>\s*)"
+        text = re.sub(pattern, lambda m, v=value: v + (" " if m.group("space") else ""), text)
+    return text
+
+
+def _expand_latex_custom_macros(body: str, zero_arg: Dict[str, str], one_arg: Dict[str, str]) -> str:
+    for _ in range(2):
+        before = body
+        for name, value in sorted((zero_arg or {}).items(), key=lambda item: -len(item[0])):
+            body = re.sub(rf"\\{re.escape(name)}(?![A-Za-z])", lambda _m, v=value: v, body)
+        for name, template in sorted((one_arg or {}).items(), key=lambda item: -len(item[0])):
+            body = _replace_simple_latex_command(body, name, lambda content, t=template: t.replace("#1", content.strip()))
+        if body == before:
+            break
+    return body
+
+
+def _normalize_latex_text_macros(body: str) -> str:
+    body = _replace_simple_latex_command(body, "mbox", _plain_latex_text)
+    body = re.sub(r"\\xspace\b", "", body)
+    for command in ("text", "textnormal", "textsc", "textbf", "textit", "emph", "mathtt", "operatorname"):
+        body = _replace_simple_latex_command(body, command, lambda content: rf"\mathrm{{{_plain_latex_text(content)}}}")
+    body = _replace_simple_latex_command(body, "mathrm", lambda content: rf"\mathrm{{{_normalize_mathrm_content(content)}}}")
+    return body
+
+
+def _normalize_fused_latex_accents(body: str) -> str:
+    commands = "overline|underline|hat|widehat|tilde|widetilde|bar|vec|dot|ddot|check|breve|acute|grave"
+    # A whitespace-delimited argument is unambiguous. Without whitespace, only
+    # repair the uppercase matrix/vector shorthand commonly emitted by models;
+    # accepting lowercase here corrupts valid commands such as \dots,
+    # \doteq, \vector, and \checkmark.
+    body = re.sub(rf"\\({commands})\s+([A-Za-z])", r"\\\1{\2}", body)
+    return re.sub(rf"\\({commands})([A-Z])", r"\\\1{\2}", body)
+
+
+def _normalize_mathrm_content(content: str) -> str:
+    text = str(content or "").strip()
+    text = re.sub(r"\\\s+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _repair_cases_missing_row_breaks(body: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        inside = match.group(1).strip()
+        if r"\\" in inside:
+            return match.group(0)
+        parts = re.split(r",\s*&\s*", inside, maxsplit=2)
+        if len(parts) != 3:
+            return match.group(0)
+        split = re.match(r"(.+?)\s{2,}(\\[A-Za-z].*)\Z", parts[1].strip(), flags=re.S)
+        if not split:
+            return match.group(0)
+        first_expr = parts[0].strip()
+        first_condition = split.group(1).strip()
+        second_expr = split.group(2).strip()
+        second_condition = parts[2].strip()
+        return rf"\begin{{cases}}{first_expr} & {first_condition} \\ {second_expr} & {second_condition}\end{{cases}}"
+
+    return re.sub(r"\\begin\{cases\}(.*?)\\end\{cases\}", repl, body, flags=re.S)
+
+
+def _normalize_latex_control_spaces(body: str) -> str:
+    return re.sub(r"(?<!\\)\\(?!\\)\s+", " ", body)
+
+
+def _normalize_boldsymbol(body: str) -> str:
+    body = _replace_simple_latex_command(body, "boldsymbol", _boldsymbol_replacement)
+    return _replace_simple_latex_command(body, "bm", _boldsymbol_replacement)
+
+
+def _boldsymbol_replacement(content: str) -> str:
+    content = content.strip()
+    if re.fullmatch(r"\\(?:mathcal|mathrm|mathbb|mathbf)\{[^{}]+\}", content):
+        return content
+    if re.fullmatch(r"\\[A-Za-z]+", content):
+        return content
+    if re.fullmatch(r"[A-Za-z](?:[_^].*)?", content):
+        return rf"\mathbf{{{content}}}"
+    return content
+
+
+def _plain_latex_text(content: str) -> str:
+    text = str(content or "").strip()
+    text = re.sub(r"\\[A-Za-z]+\s*\{([^{}]*)\}", r"\1", text)
+    text = re.sub(r"\\[A-Za-z]+", "", text)
+    return text
+
+
+def _replace_simple_latex_command(body: str, command: str, repl) -> str:
+    marker = "\\" + command
+    out: List[str] = []
+    i = 0
+    while i < len(body):
+        start = body.find(marker, i)
+        if start < 0:
+            out.append(body[i:])
+            break
+        end_marker = start + len(marker)
+        if end_marker < len(body) and body[end_marker].isalpha():
+            out.append(body[i:end_marker])
+            i = end_marker
+            continue
+        out.append(body[i:start])
+        j = end_marker
+        while j < len(body) and body[j].isspace():
+            j += 1
+        if j >= len(body) or body[j] != "{":
+            out.append(marker)
+            i = end_marker
+            continue
+        end = _matching_brace_index(body, j)
+        if end is None:
+            out.append(body[start:])
+            break
+        out.append(repl(body[j + 1:end]))
+        i = end + 1
+    return "".join(out)
+
+
+def _normalize_paper_math_macros(body: str) -> str:
+    body = re.sub(r"\\mathsfit\s*\{([^{}]+)\}", r"\\mathbf{\1}", body)
+    body = re.sub(r"\\(?:tens|etens)\s*\{([^{}]+)\}", r"\\mathbf{\1}", body)
+    for command in ("matrix", "vector"):
+        body = _replace_simple_latex_command(body, command, lambda content: rf"\mathbf{{{content.strip()}}}")
+    body = _replace_simple_latex_command(body, "tr", _transpose_latex_content)
+    body = re.sub(r"\\rv([A-Za-z]+)(?=[^A-Za-z]|$)", lambda m: _styled_macro(m.group(1), "mathbf"), body)
+    body = re.sub(r"\\rm([A-Z])(?=[^A-Za-z]|$)", r"\\mathbf{\1}", body)
+    body = re.sub(r"\\erv([A-Za-z])(?=[^A-Za-z]|$)", r"\\mathrm{\1}", body)
+    body = re.sub(r"\\erm([A-Za-z])(?=[^A-Za-z]|$)", r"\\mathrm{\1}", body)
+    body = re.sub(r"\\et([A-Z][A-Za-z]*)(?=[^A-Za-z]|$)", lambda m: _styled_macro(m.group(1), "mathbf"), body)
+    body = re.sub(r"\\t([A-Z][A-Za-z]*)(?=[^A-Za-z]|$)", lambda m: _styled_macro(m.group(1), "mathbf"), body)
+    return body
+
+
+def _transpose_latex_content(content: str) -> str:
+    content = str(content or "").strip()
+    if not content:
+        return ""
+    return rf"{{{content}}}^\top"
+
+
+def _styled_macro(name: str, command: str) -> str:
+    greek = {
+        "alpha", "beta", "gamma", "delta", "epsilon", "varepsilon", "zeta", "eta",
+        "theta", "vartheta", "iota", "kappa", "lambda", "Lambda", "mu", "nu", "xi",
+        "pi", "rho", "sigma", "tau", "upsilon", "phi", "varphi", "chi", "psi", "omega",
+    }
+    if name in greek:
+        return f"\\{command}{{\\{name}}}"
+    return f"\\{command}{{{name}}}"
+
+
+def _strip_latex_publish_metadata(body: str) -> str:
+    body = re.sub(r"\\(?:label|ref|eqref|tag)\s*\{[^{}]*\}", "", body)
+    body = re.sub(r"\\nonumber\b", "", body)
+    return body
+
+
+def _repair_split_latex_commands(body: str) -> str:
+    repairs = {
+        r"\\le\s+ft\b": r"\\left",
+        r"\\ri\s+ght\b": r"\\right",
+        # A split transpose only makes sense in superscript position. Matching
+        # every ``\to p`` corrupts ordinary arrows such as ``q\to p``.
+        r"(?<=\^)\\to\s+p\b": r"\\top",
+        r"\\in\s+fty\b": r"\\infty",
+        r"\\ap\s+prox\b": r"\\approx",
+        r"\\ge\s+q\b": r"\\geq",
+        r"\\le\s+q\b": r"\\leq",
+    }
+    for pattern, replacement in repairs.items():
+        body = re.sub(pattern, replacement, body)
+    return body
+
+
+def _flatten_substack(body: str) -> str:
+    marker = r"\substack"
+    out: List[str] = []
+    i = 0
+    while i < len(body):
+        start = body.find(marker, i)
+        if start < 0:
+            out.append(body[i:])
+            break
+        out.append(body[i:start])
+        j = start + len(marker)
+        while j < len(body) and body[j].isspace():
+            j += 1
+        if j >= len(body) or body[j] != "{":
+            out.append(marker)
+            i = start + len(marker)
+            continue
+        end = _matching_brace_index(body, j)
+        if end is None:
+            out.append(body[start:])
+            break
+        content = body[j + 1:end]
+        content = content.replace(r"\\", ", ")
+        content = re.sub(r"\s+", " ", content).strip()
+        out.append(content)
+        i = end + 1
+    return "".join(out)
+
+
+def _matching_brace_index(text: str, open_index: int) -> Optional[int]:
+    depth = 0
+    escaped = False
+    for idx in range(open_index, len(text)):
+        ch = text[idx]
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return idx
+    return None
+
+
+def _is_valid_latex_body(body: str) -> bool:
+    text = str(body or "").strip()
+    if not text:
+        return False
+    if any(ch in text for ch in "\uFFFD"):
+        return False
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return False
+    if not _balanced_latex_braces(text):
+        return False
+    if _latex_command_count(text, "left") != _latex_command_count(text, "right"):
+        return False
+    if re.search(r"\\(?:def|newcommand|renewcommand|usepackage|RequirePackage)\b", text):
+        return False
+    if re.search(r"\\(?:begin|end)\s*\{(?!aligned|align|array|matrix|pmatrix|bmatrix|cases)[^{}]+\}", text):
+        return False
+    if re.search(r"\\(?:qquad|quad)[A-Za-z]", text):
+        return False
+    if re.search(r"\\rm\b", text):
+        return False
+    if re.search(r"\\[A-Za-z]+(?:\s+[A-Za-z]{3,}){3,}", text):
+        return False
+    return True
+
+
+def _latex_command_count(text: str, command: str) -> int:
+    return len(re.findall(rf"\\{re.escape(command)}(?![A-Za-z])", text or ""))
+
+
+def _balanced_latex_braces(text: str) -> bool:
+    depth = 0
+    escaped = False
+    for ch in text:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _strip_latex_for_text(body: str) -> str:
+    text = re.sub(r"\s+", " ", str(body or "")).strip()
+    return text.replace("`", "'")
+
+
+def prepare_key_figures(bundle: PaperBundle, max_figures: int = 5) -> List[Tuple[Path, str]]:
     if not bundle.source_dir:
         return []
     output_dir = bundle.source_dir.parent / "rendered_figures"
@@ -425,22 +966,169 @@ def prepare_key_figures(bundle: PaperBundle, max_figures: int = 8) -> List[Tuple
             continue
         caption = _caption_for_asset(path, bundle.source_figures, bundle.source_captions, bundle.source_dir)
         figure = _figure_for_asset(path, bundle.source_figures, bundle.source_dir)
+        if not caption or _is_non_content_asset(path, caption, figure):
+            continue
         candidates.append((_figure_rank(path, figure), path, caption))
 
     candidates.sort(key=lambda item: item[0])
-    figures: List[Tuple[Path, str]] = []
+    unique_candidates: List[Tuple[Path, str]] = []
     seen_paths = set()
     for _rank, path, caption in candidates:
-        if path.resolve() in seen_paths:
+        resolved = path.resolve()
+        if resolved in seen_paths:
             continue
-        rendered = _render_asset(path, output_dir)
-        if not rendered:
-            continue
-        figures.append((rendered, caption))
-        seen_paths.add(path.resolve())
+        seen_paths.add(resolved)
+        unique_candidates.append((path, caption))
+    return _render_key_figure_candidates(unique_candidates, output_dir, max_figures)
+
+
+def _render_key_figure_candidates(candidates: List[Tuple[Path, str]], output_dir: Path, max_figures: int) -> List[Tuple[Path, str]]:
+    if not candidates or max_figures <= 0:
+        return []
+    workers = _figure_render_workers()
+    if workers <= 1 or len(candidates) == 1:
+        figures: List[Tuple[Path, str]] = []
+        for path, caption in candidates:
+            rendered = _render_asset(path, output_dir)
+            if rendered:
+                figures.append((rendered, caption))
+            if len(figures) >= max_figures:
+                break
+        return figures
+
+    rendered_by_index: Dict[int, Optional[Path]] = {}
+    with ThreadPoolExecutor(max_workers=min(workers, len(candidates))) as executor:
+        future_to_index = {
+            executor.submit(_render_asset, path, output_dir): index
+            for index, (path, _caption) in enumerate(candidates)
+        }
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            try:
+                rendered_by_index[index] = future.result()
+            except Exception:
+                rendered_by_index[index] = None
+
+    figures: List[Tuple[Path, str]] = []
+    for index, (_path, caption) in enumerate(candidates):
+        rendered = rendered_by_index.get(index)
+        if rendered:
+            figures.append((rendered, caption))
         if len(figures) >= max_figures:
             break
     return figures
+
+
+def _figure_render_workers() -> int:
+    try:
+        value = int(os.environ.get("MAXREAD_FIGURE_RENDER_WORKERS", "4"))
+    except ValueError:
+        value = 4
+    return max(1, value)
+
+
+def ensure_referenced_figure_markers(
+    markdown: str,
+    inserts: List[Tuple[str, Path, str]],
+    max_missing: int = 1,
+    visual_descriptions: Optional[Dict[str, str]] = None,
+) -> str:
+    """Only rescue one missing method overview figure; avoid unreadable figure piles."""
+    if not inserts or max_missing <= 0:
+        return markdown
+    visual_descriptions = visual_descriptions or {}
+    if _marker_count(markdown) >= 3:
+        return markdown
+    missing = [
+        (marker, path, caption)
+        for marker, path, caption in inserts
+        if marker not in markdown and _is_priority_figure(path, caption, visual_descriptions.get(marker, ""))
+    ]
+    if not missing:
+        return markdown
+    lines = markdown.rstrip().splitlines()
+    inserted = 0
+    for marker, path, caption in missing[:max_missing]:
+        insert_at = _section_insert_index(lines, "method")
+        if insert_at is None:
+            continue
+        block = [
+            "",
+            "原文的方法总览图如下。",
+            marker,
+            f"**图：{_short_caption(caption or path.stem)}**",
+            "",
+        ]
+        lines = lines[:insert_at] + block + lines[insert_at:]
+        inserted += 1
+    if inserted == 0:
+        return markdown
+    return "\n".join(lines).strip() + "\n"
+
+
+def _marker_count(markdown: str) -> int:
+    return len(set(re.findall(r"\[MaxReadFigure:[^\]]+\]", markdown or "")))
+
+
+def _is_referenced_or_result_figure(path: Path, caption: str = "", visual_description: str = "") -> bool:
+    text = f"{path.stem} {caption or ''} {visual_description or ''}".lower()
+    skip_words = ("logo", "icon")
+    if any(word in text for word in skip_words):
+        return False
+    keep_words = (
+        "overview", "workflow", "framework", "architecture", "mechanism",
+        "comparison", "ablation", "rank", "loss", "variance", "attention",
+        "time", "profile", "breakdown", "quality", "validation", "demo",
+        "机制", "对比", "实验", "消融", "结果", "流程", "架构",
+    )
+    return any(word in text for word in keep_words)
+
+
+def _figure_section_target(path: Path, caption: str = "", visual_description: str = "") -> str:
+    text = f"{path.stem} {caption or ''} {visual_description or ''}".lower()
+    if any(word in text for word in (
+        "ablation", "sensitivity", "appendix", "supplement", "failure", "scaling",
+        "learnable sink", "with and without", "pilot", "training signal", "warmup",
+        "detach", "sliding-window", "消融", "敏感", "附录", "失败",
+    )):
+        return "analysis"
+    if any(word in text for word in ("experiment", "benchmark", "comparison", "result", "quality", "validation", "accuracy", "loss", "rank", "实验", "结果", "对比", "指标")):
+        return "experiments"
+    if any(word in text for word in ("overview", "workflow", "framework", "architecture", "mechanism", "attention", "pipeline", "流程", "架构", "框架", "机制")):
+        return "method"
+    return ""
+
+
+def _figure_lead_sentence(target: str) -> str:
+    if target == "analysis":
+        return "下面这张图补充了消融或扩展分析中的关键证据。"
+    if target == "experiments":
+        return "下面这张图对应实验结论中的关键对比或结果。"
+    return "下面这张图对应方法描述中的关键机制或结构。"
+
+
+def _section_insert_index(lines: List[str], target: str) -> Optional[int]:
+    if not target:
+        return None
+    patterns_by_target = {
+        "method": ("## 3.", "## 方法", "## 核心方法", "## 模型", "## 框架"),
+        "experiments": ("## 4.", "## 实验", "## 结果", "## Evaluation", "## Experiments"),
+        "analysis": ("## 5.", "## 消融", "## 补充", "## 分析", "## Ablation", "## Analysis"),
+    }
+    patterns = patterns_by_target.get(target, ())
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if any(stripped.startswith(pattern) for pattern in patterns):
+            next_heading = _next_top_level_heading_index(lines, idx + 1)
+            return next_heading if next_heading is not None else len(lines)
+    return None
+
+
+def _next_top_level_heading_index(lines: List[str], start: int) -> Optional[int]:
+    for idx in range(start, len(lines)):
+        if re.match(r"^##\s+", lines[idx].strip()):
+            return idx
+    return None
 
 
 
@@ -775,6 +1463,8 @@ def _ranked_figure_assets(bundle: PaperBundle) -> List[Path]:
         path = bundle.source_dir / figure.asset
         if not path.exists() or path in seen:
             continue
+        if _is_non_content_asset(path, figure.caption, figure):
+            continue
         label = figure.label or ""
         max_for_label = 1 if _is_gallery_figure(path, figure) else 2
         if label and label_counts.get(label, 0) >= max_for_label:
@@ -784,7 +1474,7 @@ def _ranked_figure_assets(bundle: PaperBundle) -> List[Path]:
         if label:
             label_counts[label] = label_counts.get(label, 0) + 1
     fallback = [bundle.source_dir / asset for asset in bundle.source_assets]
-    fallback = [path for path in fallback if path.exists() and path not in seen]
+    fallback = [path for path in fallback if path.exists() and path not in seen and not _is_non_content_asset(path, "", None)]
     ranked.extend((_figure_rank(path, None), path) for path in fallback)
     ranked.sort(key=lambda item: item[0])
     return [path for _rank, path in ranked]
@@ -845,6 +1535,26 @@ def _is_gallery_figure(path: Path, figure: Optional[PaperFigure]) -> bool:
     )
 
 
+def _is_non_content_asset(path: Path, caption: str = "", figure: Optional[PaperFigure] = None) -> bool:
+    text = "/".join(part.lower() for part in path.parts)
+    stem = path.stem.lower()
+    label = (figure.label or "").lower() if figure else ""
+    caption_text = (caption or "").strip().lower()
+    if any(part in text for part in ("/assets/", "/logo/", "/logos/", "/brand/", "/icon/", "/icons/")):
+        return True
+    if stem in {"logo", "mm", "minimax", "brand", "icon", "favicon"}:
+        return True
+    if any(word in stem for word in ("logo", "favicon", "brandmark")):
+        return True
+    if any(word in label for word in ("logo", "icon", "brand")):
+        return True
+    if caption_text in {"", path.name.lower(), stem}:
+        return figure is None
+    if re.fullmatch(r"(?:logo|icon|brand|mm|minimax)(?:\.\w+)?", caption_text):
+        return True
+    return False
+
+
 def _frame_number(path: Path) -> int:
     match = re.search(r"frame_(\d+)", path.stem.lower())
     return int(match.group(1)) if match else 0
@@ -894,7 +1604,31 @@ def _render_asset(path: Path, output_dir: Path) -> Optional[Path]:
                 shutil.move(str(generated_png), str(out_png))
                 return out_png
 
+    rendered = _render_pdf_with_pymupdf(path, out_png)
+    if rendered:
+        return rendered
+
     return None
+
+
+def _render_pdf_with_pymupdf(path: Path, out_png: Path) -> Optional[Path]:
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        return None
+    try:
+        doc = fitz.open(str(path))
+        if len(doc) < 1:
+            doc.close()
+            return None
+        page = doc.load_page(0)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
+        out_png.parent.mkdir(parents=True, exist_ok=True)
+        pix.save(str(out_png))
+        doc.close()
+        return out_png if out_png.exists() and out_png.stat().st_size > 0 else None
+    except Exception:
+        return None
 
 
 def _caption_for_asset(path: Path, figures: List[PaperFigure], captions: List[str], source_dir: Optional[Path] = None) -> str:
@@ -915,4 +1649,4 @@ def _caption_for_asset(path: Path, figures: List[PaperFigure], captions: List[st
         lower = caption.lower()
         if stem in lower or stem.replace("_", " ") in lower:
             return caption[:500]
-    return path.name
+    return ""

@@ -4,6 +4,8 @@ __pycache__/
 .env
 *.sqlite3
 var/
+tmp/
+artifacts/
 
 # Local deployment/runtime artifacts
 *.env
@@ -17,3 +19,7 @@ var/
 dist/
 build/
 *.egg-info/
+
+# Duty reminder runtime configs contain real chat IDs and machine paths.
+duty-reminder/*.json
+!duty-reminder/*.example.json

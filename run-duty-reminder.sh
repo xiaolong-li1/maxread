@@ -15,11 +15,5 @@ export MAXREAD_FEISHU_AS="${MAXREAD_FEISHU_AS:-bot}"
 export MAXREAD_DB="${MAXREAD_DB:-./maxread.sqlite3}"
 export MAXREAD_WORKDIR="${MAXREAD_WORKDIR:-./var/maxread}"
 
-if [ -n "${MAXREAD_PYTHON:-}" ]; then
-  PYTHON_BIN="$MAXREAD_PYTHON"
-elif [ -x ./.venv/bin/python ] && ./.venv/bin/python -c 'import PIL' >/dev/null 2>&1; then
-  PYTHON_BIN="./.venv/bin/python"
-else
-  PYTHON_BIN="python3"
-fi
-exec "$PYTHON_BIN" -m maxread.cli listen
+PYTHON_BIN="${MAXREAD_PYTHON:-/usr/bin/python3}"
+exec "$PYTHON_BIN" -m maxread.cli duty daemon

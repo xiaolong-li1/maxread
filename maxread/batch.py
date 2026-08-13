@@ -16,6 +16,7 @@ from .openai_client import OpenAIClient
 from .pipeline import MaxReadPipeline
 from .sources import WebRef
 from .web_article import WebArticleClient
+from .visual_qa import VisualQAController
 
 
 @dataclass
@@ -64,6 +65,7 @@ class BatchProcessor:
                 timeout=self.settings.openai_timeout,
                 base_url=self.settings.openai_base_url,
                 sub_module=self.settings.openai_sub_module,
+                reasoning_effort=self.settings.openai_reasoning_effort,
             ),
             self.llm_sem,
         )
@@ -80,6 +82,8 @@ class BatchProcessor:
                     feishu,
                     llm,
                     require_source=self.settings.require_source,
+                    review_reasoning_effort=self.settings.openai_review_reasoning_effort,
+                    visual_qa=VisualQAController.from_settings(self.settings),
                 )
                 result = pipeline.process_ref(ref, send_progress=False)
                 return BatchItemResult(ref.paper_id, result.doc_url, result.error)
@@ -88,6 +92,8 @@ class BatchProcessor:
                 WebArticleClient(self.settings.workdir, timeout=self.settings.arxiv_timeout),
                 feishu,
                 llm,
+                review_reasoning_effort=self.settings.openai_review_reasoning_effort,
+                visual_qa=VisualQAController.from_settings(self.settings),
             )
             result = pipeline.process_ref(ref, send_progress=False)
             return BatchItemResult(ref.url, result.doc_url, result.error)
@@ -100,9 +106,9 @@ class _LimitedLLM:
         self.inner = inner
         self.sem = sem
 
-    def responses_text(self, system: str, user: str) -> str:
+    def responses_text(self, system: str, user: str, **kwargs) -> str:
         with self.sem:
-            return self.inner.responses_text(system, user)
+            return self.inner.responses_text(system, user, **kwargs)
 
 
 class _LimitedFeishu:
@@ -112,7 +118,7 @@ class _LimitedFeishu:
 
     def __getattr__(self, name: str):
         attr = getattr(self.inner, name)
-        if name in {"create_docx", "overwrite_docx", "overwrite_docx_xml", "insert_image", "remove_text", "publish_docx"}:
+        if name in {"create_docx", "overwrite_docx", "overwrite_docx_xml", "insert_image", "remove_text", "publish_docx", "fetch_docx", "block_replace"}:
             def wrapped(*args, **kwargs):
                 with self.sem:
                     return attr(*args, **kwargs)

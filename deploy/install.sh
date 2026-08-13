@@ -78,6 +78,10 @@ ensure_env_defaults() {
   grep -q '^MAXREAD_LLM_CONCURRENCY=' "$env_file" || printf 'MAXREAD_LLM_CONCURRENCY=5\n' >> "$env_file"
   grep -q '^MAXREAD_FEISHU_CONCURRENCY=' "$env_file" || printf 'MAXREAD_FEISHU_CONCURRENCY=3\n' >> "$env_file"
   grep -q '^MAXREAD_MODEL=' "$env_file" || printf 'MAXREAD_MODEL=gpt-5.5\n' >> "$env_file"
+  grep -q '^MAXREAD_DUTY_TIMEZONE=' "$env_file" || printf 'MAXREAD_DUTY_TIMEZONE=Asia/Shanghai\n' >> "$env_file"
+  grep -q '^MAXREAD_DUTY_CHAT_ID=' "$env_file" || printf 'MAXREAD_DUTY_CHAT_ID=\n' >> "$env_file"
+  grep -q '^MAXREAD_DUTY_HOUR=' "$env_file" || printf 'MAXREAD_DUTY_HOUR=7\n' >> "$env_file"
+  grep -q '^MAXREAD_DUTY_MINUTE=' "$env_file" || printf 'MAXREAD_DUTY_MINUTE=0\n' >> "$env_file"
 }
 install_python_deps() {
   local install_dir="$1"
@@ -110,26 +114,31 @@ if [ -f .env ]; then
 fi
 exec ./.venv/bin/python -m maxread.cli admin --host "${MAXREAD_ADMIN_HOST:-127.0.0.1}" --port "${MAXREAD_ADMIN_PORT:-8765}"
 SH
-  chmod +x "$install_dir/run-listener.sh" "$install_dir/run-admin.sh"
+  chmod +x "$install_dir/run-listener.sh" "$install_dir/run-admin.sh" "$install_dir/run-duty-reminder.sh"
 }
 install_systemd_units() {
   local install_dir="$1" user_systemd_dir="$HOME/.config/systemd/user"
   mkdir -p "$user_systemd_dir"
   sed "s#__INSTALL_DIR__#$install_dir#g; s#__SERVICE_NAME__#$SERVICE_NAME#g" "$install_dir/deploy/systemd/maxread.service" > "$user_systemd_dir/$SERVICE_NAME.service"
   sed "s#__INSTALL_DIR__#$install_dir#g; s#__SERVICE_NAME__#$ADMIN_SERVICE_NAME#g" "$install_dir/deploy/systemd/maxread-admin.service" > "$user_systemd_dir/$ADMIN_SERVICE_NAME.service"
+  sed "s#__INSTALL_DIR__#$install_dir#g" "$install_dir/deploy/systemd/maxread-duty-reminder.service" > "$user_systemd_dir/maxread-duty-reminder.service"
   systemctl --user daemon-reload
   systemctl --user enable --now "$SERVICE_NAME.service"
   systemctl --user enable --now "$ADMIN_SERVICE_NAME.service"
+  systemctl --user enable --now "maxread-duty-reminder.service"
 }
 install_launchd_plists() {
   local install_dir="$1" plist_dir="$HOME/Library/LaunchAgents"
   mkdir -p "$plist_dir"
   sed "s#__INSTALL_DIR__#$install_dir#g" "$install_dir/deploy/launchd/com.maxread.listener.plist" > "$plist_dir/com.maxread.listener.plist"
   sed "s#__INSTALL_DIR__#$install_dir#g" "$install_dir/deploy/launchd/com.maxread.admin.plist" > "$plist_dir/com.maxread.admin.plist"
+  sed "s#__INSTALL_DIR__#$install_dir#g" "$install_dir/deploy/launchd/com.maxread.duty-reminder.plist" > "$plist_dir/com.maxread.duty-reminder.plist"
   launchctl unload "$plist_dir/com.maxread.listener.plist" >/dev/null 2>&1 || true
   launchctl unload "$plist_dir/com.maxread.admin.plist" >/dev/null 2>&1 || true
+  launchctl unload "$plist_dir/com.maxread.duty-reminder.plist" >/dev/null 2>&1 || true
   launchctl load "$plist_dir/com.maxread.listener.plist"
   launchctl load "$plist_dir/com.maxread.admin.plist"
+  launchctl load "$plist_dir/com.maxread.duty-reminder.plist"
 }
 
 main() {
@@ -183,7 +192,7 @@ main() {
     fi
     if [ "$mode" = "yes" ]; then
       install_systemd_units "$install_dir"
-      log "Started systemd user services: $SERVICE_NAME, $ADMIN_SERVICE_NAME"
+      log "Started systemd user services: $SERVICE_NAME, $ADMIN_SERVICE_NAME, maxread-duty-reminder"
     fi
   elif command -v launchctl >/dev/null 2>&1; then
     mode="${MAXREAD_AUTO_START:-}"
@@ -192,7 +201,7 @@ main() {
     fi
     if [ "$mode" = "yes" ]; then
       install_launchd_plists "$install_dir"
-      log "Started launchd agents: com.maxread.listener, com.maxread.admin"
+      log "Started launchd agents: com.maxread.listener, com.maxread.admin, com.maxread.duty-reminder"
     fi
   fi
 

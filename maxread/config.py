@@ -32,6 +32,8 @@ class Settings:
     arxiv_parallel_streams: int
     arxiv_parallel_min_bytes: int
     openai_timeout: int
+    openai_reasoning_effort: str
+    openai_review_reasoning_effort: str
     require_source: bool
     batch_workers: int
     batch_llm_concurrency: int
@@ -41,6 +43,18 @@ class Settings:
     queue_workers: int
     queue_stale_minutes: int
     queue_heartbeat_seconds: int
+    visual_qa_enabled: bool
+    visual_qa_host: str
+    visual_qa_runner: str
+    visual_qa_remote_root: str
+    visual_qa_timeout: int
+    visual_qa_max_sections: int
+    visual_qa_max_repairs: int
+    duty_timezone: str
+    duty_chat_id: str
+    duty_hour: int
+    duty_minute: int
+    duty_poll_seconds: int
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Settings":
@@ -65,6 +79,8 @@ class Settings:
             arxiv_parallel_streams=int(os.environ.get("MAXREAD_ARXIV_PARALLEL_STREAMS", "4")),
             arxiv_parallel_min_bytes=int(os.environ.get("MAXREAD_ARXIV_PARALLEL_MIN_BYTES", "1048576")),
             openai_timeout=int(os.environ.get("MAXREAD_OPENAI_TIMEOUT", "180")),
+            openai_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REASONING_EFFORT", "high"),
+            openai_review_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REVIEW_REASONING_EFFORT", "low"),
             require_source=os.environ.get("MAXREAD_REQUIRE_SOURCE", "true").lower() in {"1", "true", "yes", "on"},
             batch_workers=int(os.environ.get("MAXREAD_BATCH_WORKERS", "3")),
             batch_llm_concurrency=int(os.environ.get("MAXREAD_LLM_CONCURRENCY", "2")),
@@ -74,4 +90,22 @@ class Settings:
             queue_workers=int(os.environ.get("MAXREAD_QUEUE_WORKERS", os.environ.get("MAXREAD_BATCH_WORKERS", "3"))),
             queue_stale_minutes=int(os.environ.get("MAXREAD_QUEUE_STALE_MINUTES", "30")),
             queue_heartbeat_seconds=int(os.environ.get("MAXREAD_QUEUE_HEARTBEAT_SECONDS", "15")),
+            visual_qa_enabled=os.environ.get("MAXREAD_VISUAL_QA_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+            visual_qa_host=os.environ.get("MAXREAD_VISUAL_QA_HOST", "ziplab-5090"),
+            visual_qa_runner=os.environ.get(
+                "MAXREAD_VISUAL_QA_RUNNER",
+                "/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh",
+            ),
+            visual_qa_remote_root=os.environ.get(
+                "MAXREAD_VISUAL_QA_REMOTE_ROOT",
+                "/home/lixiaolong/.local/share/maxread-browser",
+            ),
+            visual_qa_timeout=int(os.environ.get("MAXREAD_VISUAL_QA_TIMEOUT", "90")),
+            visual_qa_max_sections=int(os.environ.get("MAXREAD_VISUAL_QA_MAX_SECTIONS", "12")),
+            visual_qa_max_repairs=int(os.environ.get("MAXREAD_VISUAL_QA_MAX_REPAIRS", "2")),
+            duty_timezone=os.environ.get("MAXREAD_DUTY_TIMEZONE", "Asia/Shanghai"),
+            duty_chat_id=os.environ.get("MAXREAD_DUTY_CHAT_ID", "").strip(),
+            duty_hour=int(os.environ.get("MAXREAD_DUTY_HOUR", "7")),
+            duty_minute=int(os.environ.get("MAXREAD_DUTY_MINUTE", "0")),
+            duty_poll_seconds=int(os.environ.get("MAXREAD_DUTY_POLL_SECONDS", "30")),
         )

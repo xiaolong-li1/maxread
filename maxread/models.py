@@ -83,6 +83,9 @@ class PaperBundle:
     source_captions: List[str] = field(default_factory=list)
     source_figures: List[PaperFigure] = field(default_factory=list)
     source_tables: List[str] = field(default_factory=list)
+    source_macros: Dict[str, str] = field(default_factory=dict)
+    source_latex_macros: Dict[str, str] = field(default_factory=dict)
+    source_latex_arg_macros: Dict[str, str] = field(default_factory=dict)
     parse_warnings: List[str] = field(default_factory=list)
 
 

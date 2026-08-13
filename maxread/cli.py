@@ -21,6 +21,8 @@ from .pipeline import MaxReadPipeline
 from .models import PaperRef
 from .sources import WebRef, extract_supported_inputs
 from .web_article import WebArticleClient
+from .visual_qa import VisualQAController
+from .duty import run_duty_command
 
 
 def main(argv: List[str] | None = None) -> int:
@@ -60,6 +62,9 @@ def main(argv: List[str] | None = None) -> int:
     p_jobs.add_argument("--limit", type=int, default=50)
     p_jobs.add_argument("--status", default="", help="Filter by queued/running/done/failed")
 
+    p_retry = sub.add_parser("retry-job", help="Retry a failed or stuck queue job")
+    p_retry.add_argument("job_id", type=int)
+
     p_job_events = sub.add_parser("job-events", help="List queue job lifecycle events")
     p_job_events.add_argument("--job-id", type=int, default=0)
     p_job_events.add_argument("--limit", type=int, default=100)
@@ -77,6 +82,19 @@ def main(argv: List[str] | None = None) -> int:
     p_admin.add_argument("--host", default="127.0.0.1", help="Bind host, default localhost only")
     p_admin.add_argument("--port", type=int, default=8765, help="Bind port")
 
+    p_duty = sub.add_parser("duty", help="Manage independent daily duty reminders")
+    duty_sub = p_duty.add_subparsers(dest="action", required=True)
+    p_duty_set = duty_sub.add_parser("set", help="Replace the duty roster")
+    p_duty_set.add_argument("--member", action="append", required=True, help="Name=ou_xxx or ou_xxx; repeatable")
+    duty_sub.add_parser("list", help="List the duty roster")
+    duty_sub.add_parser("today", help="Show today's duty member")
+    p_duty_history = duty_sub.add_parser("history", help="List reminder send history")
+    p_duty_history.add_argument("--limit", type=int, default=30)
+    p_duty_send = duty_sub.add_parser("send", help="Send or preview a reminder")
+    p_duty_send.add_argument("--date", default="", help="Target date YYYY-MM-DD")
+    p_duty_send.add_argument("--dry-run", action="store_true")
+    duty_sub.add_parser("daemon", help="Run the independent reminder daemon")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "extract":
@@ -87,6 +105,9 @@ def main(argv: List[str] | None = None) -> int:
     settings = Settings.load(Path.cwd())
     settings.workdir.mkdir(parents=True, exist_ok=True)
     store = Store(settings.db_path)
+    if args.cmd == "duty":
+        store.close()
+        return run_duty_command(settings, args)
     arxiv = ArxivClient(
         settings.workdir,
         timeout=settings.arxiv_timeout,
@@ -96,8 +117,24 @@ def main(argv: List[str] | None = None) -> int:
     web = WebArticleClient(settings.workdir, timeout=settings.arxiv_timeout)
     feishu = FeishuClient(settings.lark_cli, settings.feishu_as)
     llm = None if getattr(args, "no_openai", False) else _maybe_llm(settings)
-    pipeline = MaxReadPipeline(store, arxiv, feishu, llm, require_source=settings.require_source)
-    article_pipeline = ArticlePipeline(store, web, feishu, llm)
+    visual_qa = VisualQAController.from_settings(settings)
+    pipeline = MaxReadPipeline(
+        store,
+        arxiv,
+        feishu,
+        llm,
+        require_source=settings.require_source,
+        review_reasoning_effort=settings.openai_review_reasoning_effort,
+        visual_qa=visual_qa,
+    )
+    article_pipeline = ArticlePipeline(
+        store,
+        web,
+        feishu,
+        llm,
+        review_reasoning_effort=settings.openai_review_reasoning_effort,
+        visual_qa=visual_qa,
+    )
 
     if args.cmd == "import-source":
         source_path = Path(args.source_path).expanduser()
@@ -192,6 +229,7 @@ def _maybe_llm(settings: Settings) -> OpenAIClient | None:
         timeout=settings.openai_timeout,
         base_url=settings.openai_base_url,
         sub_module=settings.openai_sub_module,
+        reasoning_effort=settings.openai_reasoning_effort,
     )
 
 

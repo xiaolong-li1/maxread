@@ -20,6 +20,7 @@ from .openai_client import OpenAIClient
 from .pipeline import MaxReadPipeline
 from .sources import WebRef
 from .web_article import WebArticleClient
+from .visual_qa import VisualQAController
 
 
 @dataclass
@@ -114,6 +115,7 @@ class QueueManager:
                 timeout=self.settings.openai_timeout,
                 base_url=self.settings.openai_base_url,
                 sub_module=self.settings.openai_sub_module,
+                reasoning_effort=self.settings.openai_reasoning_effort,
             ),
             self.llm_sem,
             lambda: progress(f"[在做了] 正在读{'论文' if source_kind == 'paper' else '文章'}：{source_id}", "reading", "job-reading"),
@@ -137,6 +139,8 @@ class QueueManager:
                     feishu,
                     llm,
                     require_source=self.settings.require_source,
+                    review_reasoning_effort=self.settings.openai_review_reasoning_effort,
+                    visual_qa=VisualQAController.from_settings(self.settings),
                 )
                 result = pipeline.process_ref(PaperRef(source_id, source_url), event=None, send_progress=False)
                 record = store.get_paper(source_id)
@@ -147,11 +151,16 @@ class QueueManager:
                     WebArticleClient(self.settings.workdir, timeout=self.settings.arxiv_timeout),
                     feishu,
                     llm,
+                    review_reasoning_effort=self.settings.openai_review_reasoning_effort,
+                    visual_qa=VisualQAController.from_settings(self.settings),
                 )
                 result = pipeline.process_ref(WebRef(source_url), event=None, send_progress=False)
                 record = store.get_document(result.article_id)
                 title = record.title if record else ""
-            if result.doc_url:
+            if result.error:
+                store.fail_queue_job(int(job["id"]), result.error)
+                _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, result.error)
+            elif result.doc_url:
                 store.complete_queue_job(int(job["id"]), result.doc_url, title=title)
                 _notify_watchers(store, feishu, int(job["id"]), source_id, result.doc_url, title, "")
             else:
@@ -194,7 +203,7 @@ class _LimitedLLM:
         self._announced = False
         self._announced_review = False
 
-    def responses_text(self, system: str, user: str) -> str:
+    def responses_text(self, system: str, user: str, **kwargs) -> str:
         if self.on_review and _is_review_prompt(system) and not self._announced_review:
             self._announced_review = True
             self.on_review()
@@ -202,7 +211,7 @@ class _LimitedLLM:
             self._announced = True
             self.on_call()
         with self.sem:
-            return self.inner.responses_text(system, user)
+            return self.inner.responses_text(system, user, **kwargs)
 
     def responses_image_text(self, system: str, user: str, image_path) -> str:
         if self.on_call and not self._announced:
@@ -225,7 +234,7 @@ class _LimitedFeishu:
 
     def __getattr__(self, name: str):
         attr = getattr(self.inner, name)
-        if name in {"create_docx", "overwrite_docx", "overwrite_docx_xml", "insert_image", "remove_text", "publish_docx"}:
+        if name in {"create_docx", "overwrite_docx", "overwrite_docx_xml", "insert_image", "remove_text", "publish_docx", "fetch_docx", "block_replace"}:
             def wrapped(*args, **kwargs):
                 if self.on_write and not self._announced:
                     self._announced = True
@@ -353,7 +362,10 @@ def _reply(feishu: FeishuClient, message_id: str, text: str, prefix: str) -> Non
 def _react(feishu: FeishuClient, message_id: str, stage: str) -> None:
     if not progress_emoji_type(stage):
         return
-    feishu.react_progress(message_id, stage)
+    try:
+        feishu.set_progress_reaction(message_id, stage)
+    except Exception:
+        return
 
 
 def _pid_is_alive(pid: int) -> bool:

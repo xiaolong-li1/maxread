@@ -9,7 +9,7 @@ from .arxiv import extract_arxiv_refs
 from .models import PaperRef
 
 
-URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+URL_RE = re.compile(r"https?://[^\s<>'\"\]\)]+", re.IGNORECASE)
 HF_PAPER_RE = re.compile(r"https?://huggingface\.co/papers/(?P<id>\d{4}\.\d{4,5})(?:v\d+)?", re.IGNORECASE)
 FEISHU_DOC_RE = re.compile(r"https?://[^/]*(?:feishu|larksuite)\.[^/]+/(?:docx|docs|wiki|sheets|base|mindnotes|minutes)/", re.IGNORECASE)
 
@@ -54,4 +54,9 @@ def is_supported_web_article_url(url: str) -> bool:
 
 def _is_paper_url(url: str) -> bool:
     lower = url.lower()
-    return "arxiv.org/abs/" in lower or "arxiv.org/pdf/" in lower or "huggingface.co/papers/" in lower
+    return (
+        "arxiv.org/abs/" in lower
+        or "arxiv.org/pdf/" in lower
+        or "arxiv.org/html/" in lower
+        or "huggingface.co/papers/" in lower
+    )

@@ -2,18 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Protocol
+from typing import Any, List, Protocol
 
 from .render import display_caption
 
 
 class ImageDocClient(Protocol):
-    def insert_image(self, doc_url: str, image_path: str, caption: str = "", width: int = 720, height: int = 0, selection: str = ""):
+    def insert_image(self, doc_url: str, image_path: str, caption: str = "", width: int = 720, height: int = 0):
         ...
 
-    def remove_text(self, doc_url: str, text: str):
+    def find_text_block_id(self, doc_url: str, text: str) -> str:
         ...
 
+    def move_block_after(self, doc_url: str, anchor_block_id: str, source_block_id: str):
+        ...
+
+    def delete_block(self, doc_url: str, block_id: str):
+        ...
 
 @dataclass
 class ImagePublishResult:
@@ -26,52 +31,79 @@ class ImagePublishResult:
 
 
 def publish_marker_image(feishu: ImageDocClient, doc_url: str, image_path: Path | str, caption: str, marker: str) -> ImagePublishResult:
-    """Insert an image for a marker with defensive fallbacks.
-
-    Feishu media insertion has two independent failure modes: locating the
-    selection block and binding the uploaded media.  A selected main figure
-    should not disappear just because one media call fails, so we normalize the
-    raster file and then try selected insertion before appending as a last-resort
-    fallback.
-    """
+    """Upload an image, move it to its marker block, and roll back on failure."""
     original = Path(image_path)
     safe_path = prepare_feishu_image(original)
     display = display_caption(caption, safe_path)
     result = ImagePublishResult(marker=marker, image_path=safe_path)
     width, height = image_display_size(safe_path)
-    small_width = max(360, min(width - 80, round(width * 0.82)))
-    small_height = round(height * small_width / width) if width else 0
-    fallback_width = min(width, 560)
-    fallback_height = round(height * fallback_width / width) if width else 0
 
-    attempts = [
-        ("selected", marker, width, height),
-        ("selected-small", marker, small_width, small_height),
-        ("append-fallback", "", fallback_width, fallback_height),
-    ]
-    last_error = ""
-    for label, selection, width, height in attempts:
-        try:
-            feishu.insert_image(doc_url, str(safe_path), caption=display, selection=selection, width=width, height=height)
-            result.inserted = True
-            result.fallback_appended = label == "append-fallback"
-            if label != "selected":
-                result.warnings.append(f"image-insert-fallback:{original.name}:{label}")
-            break
-        except Exception as exc:  # keep trying lower-risk placements
-            last_error = str(exc)
-            result.warnings.append(f"image-insert-failed:{original.name}:{label}:{_short_error(last_error)}")
-
-    if not result.inserted:
-        result.warnings.append(f"image-missing:{original.name}:{_short_error(last_error)}")
+    try:
+        anchor_block_id = feishu.find_text_block_id(doc_url, marker)
+    except Exception as exc:
+        result.warnings.append(f"image-anchor-lookup-failed:{original.name}:{marker}:{_short_error(str(exc))}")
+        return result
+    if not anchor_block_id:
+        result.warnings.append(f"image-anchor-missing:{original.name}:{marker}")
         return result
 
     try:
-        feishu.remove_text(doc_url, marker)
+        inserted = feishu.insert_image(doc_url, str(safe_path), caption=display, width=width, height=height)
+    except Exception as exc:
+        result.warnings.append(f"image-insert-failed:{original.name}:{_short_error(str(exc))}")
+        return result
+
+    image_block_id = _find_block_id(inserted)
+    if not image_block_id:
+        result.fallback_appended = True
+        result.warnings.append(f"image-block-id-missing:{original.name}")
+        return result
+
+    try:
+        fresh_anchor_block_id = feishu.find_text_block_id(doc_url, marker)
+    except Exception as exc:
+        fresh_anchor_block_id = ""
+        result.warnings.append(f"image-anchor-refresh-failed:{original.name}:{marker}:{_short_error(str(exc))}")
+    if not fresh_anchor_block_id:
+        try:
+            feishu.delete_block(doc_url, image_block_id)
+        except Exception as rollback_exc:
+            result.fallback_appended = True
+            result.warnings.append(f"image-rollback-failed:{original.name}:{_short_error(str(rollback_exc))}")
+        return result
+
+    try:
+        feishu.move_block_after(doc_url, fresh_anchor_block_id, image_block_id)
+    except Exception as exc:
+        result.warnings.append(f"image-move-failed:{original.name}:{_short_error(str(exc))}")
+        try:
+            feishu.delete_block(doc_url, image_block_id)
+        except Exception as rollback_exc:
+            result.fallback_appended = True
+            result.warnings.append(f"image-rollback-failed:{original.name}:{_short_error(str(rollback_exc))}")
+        return result
+
+    try:
+        feishu.delete_block(doc_url, fresh_anchor_block_id)
         result.marker_removed = True
     except Exception as exc:
         result.warnings.append(f"image-marker-remove-failed:{original.name}:{_short_error(str(exc))}")
+    result.inserted = True
     return result
+
+
+def _find_block_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data")
+    if isinstance(data, dict):
+        block_id = data.get("block_id")
+        if isinstance(block_id, str) and block_id:
+            return block_id
+    block_id = payload.get("block_id")
+    if isinstance(block_id, str) and block_id:
+        return block_id
+    return ""
 
 
 def prepare_feishu_image(image_path: Path | str) -> Path:

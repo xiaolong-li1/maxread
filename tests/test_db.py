@@ -134,6 +134,7 @@ def test_store_retry_queue_job(tmp_path):
     rows = store.list_queue_jobs()
     assert rows[0]["status"] == "queued"
     assert rows[0]["error"] == ""
+    assert store.get_job_watchers(queued["job_id"])[0]["notified"] == 0
     assert any(event["event_type"] == "retry" for event in store.list_job_events(queued["job_id"]))
     store.close()
 
