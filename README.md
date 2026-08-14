@@ -37,6 +37,15 @@ bash deploy/install.sh
 
 The script asks for the deploy directory and local key file path, then creates `.env`, a Python venv, runtime directories, and user services when available.
 
+The paper-reading listener and admin UI are independent from the duty reminder. On a machine that should only run MaxRead, leave `maxread-duty-reminder` stopped:
+
+```bash
+systemctl --user disable --now maxread-duty-reminder.service
+systemctl --user enable --now maxread.service maxread-admin.service
+```
+
+On Linux, the user services are `maxread.service` and `maxread-admin.service`. The listener must be the only active `im.message.receive_v1` consumer for the configured Feishu app; do not run a second listener on another machine with the same app.
+
 3. For a fresh Linux/macOS machine with no checkout yet, copy or download `deploy/bootstrap.sh` and run:
 
 ```bash
@@ -94,6 +103,20 @@ python3 -m maxread.cli listen
 
 The listener ignores ordinary messages with no supported input. It replies with a short intro/help message when users send help keywords such as `帮助`, `怎么用`, `你是谁`, `读不动了`, or `MaxRead`. Configure `MAXREAD_FEEDBACK_URL` to include a Feishu feedback doc link in that intro.
 
+## Quality Gates and Visual QA
+
+Before publishing, MaxRead sanitizes LaTeX/Markdown formatting, checks required paper sections and figure references, and blocks documents with high-severity formula or raw-formatting errors. After publishing, it fetches the document again for a post-publish quality check.
+
+An optional browser worker can inspect the published Feishu document for invalid formulas, leaked formatting commands, image overflow, excessive image whitespace, and blank sections. Enable it only when the coordinator can SSH to the worker host:
+
+```bash
+MAXREAD_VISUAL_QA_ENABLED=true
+MAXREAD_VISUAL_QA_HOST=ziplab-5090
+MAXREAD_VISUAL_QA_RUNNER=/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh
+```
+
+The worker is read-only. Only bounded deterministic repairs are applied by MaxRead, and every repair is checked again. If MaxRead itself runs on `ziplab-5090`, keep this option disabled unless that machine has a working SSH alias back to itself.
+
 ## Current Scope
 
 - Supported: arXiv ID, `arxiv.org/abs`, `arxiv.org/pdf`.
@@ -105,11 +128,13 @@ The listener ignores ordinary messages with no supported input. It replies with 
 
 ## Tests
 
-This project has no required third-party test dependency. Run:
+Image publishing and figure composition use Pillow, which is declared in `pyproject.toml`. Use an isolated environment before running tests:
 
 ```bash
-python3 -m compileall maxread tests
-python3 tests/run_tests.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/python -m compileall maxread tests
+.venv/bin/python tests/run_tests.py
 ```
 
 If `pytest` is installed, `python3 -m pytest` also works.
