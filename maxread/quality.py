@@ -230,8 +230,20 @@ def validate_fetched_docx_content(
 
 
 def _latex_bodies(text: str) -> List[str]:
-    bodies = re.findall(r"<latex>(.*?)</latex>", text or "", flags=re.S)
-    bodies.extend(re.findall(r"\$\$?([^$\n][^$]{0,1200}?)\$\$?", text or ""))
+    source = str(text or "")
+    bodies = re.findall(r"<latex>(.*?)</latex>", source, flags=re.S)
+    # Inspect raw math only as a fallback. A loose dollar-pair regex treats
+    # currency such as "$19,627.77" as one huge formula spanning prose and
+    # XML tags, which creates false CJK/HTML-in-formula failures.
+    raw = re.sub(r"<latex>.*?</latex>", " ", source, flags=re.S)
+    raw = re.sub(
+        r"(?<!\\)\$(?=\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:USD|CNY|RMB|美元|元))?(?=\s*(?:[^\d\w]|$)))",
+        "",
+        raw,
+        flags=re.I,
+    )
+    bodies.extend(re.findall(r"\$\$(?!\$)([^$\n].{0,1200}?)\$\$(?!\$)", raw, flags=re.S))
+    bodies.extend(re.findall(r"(?<!\$)\$([^$\n]{1,240}?)\$(?!\$)", raw))
     return bodies
 
 

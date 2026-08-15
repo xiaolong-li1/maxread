@@ -93,6 +93,23 @@ def test_quality_formula_agent_distinguishes_math_less_than_from_html_tags():
     assert "quality:formula:markdown:high:html-tag-in-formula" in warnings
 
 
+def test_quality_formula_agent_does_not_treat_currency_as_raw_math():
+    markdown = "实验成本为 $19,627.77，另一阶段成本为 $1,656.25。"
+    xml = "<p>实验成本为 $19,627.77</p><p>另一阶段成本为 $1,656.25</p>"
+
+    warnings = quality_warnings(markdown, xml)
+
+    assert "quality:formula:markdown:high:cjk-inside-formula" not in warnings
+    assert "quality:formula:xml:high:cjk-inside-formula" not in warnings
+    assert "quality:formula:xml:high:html-tag-in-formula" not in warnings
+
+
+def test_quality_formula_agent_still_inspects_raw_dollar_math():
+    warnings = quality_warnings(r"$中文 + x$")
+
+    assert "quality:formula:markdown:high:cjk-inside-formula" in warnings
+
+
 def test_quality_formula_agent_blocks_nested_latex_tags():
     warnings = quality_warnings(r"<latex><latex>x+y</latex></latex>")
 
