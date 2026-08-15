@@ -139,8 +139,11 @@ def paper_markdown_completeness_errors(markdown: str, expected_markers: Iterable
     errors: List[str] = []
     if len(text.strip()) < 1800:
         errors.append("document-too-short")
-    if not re.search(r"(?m)^#\s+\S", text):
+    first_line = _first_nonempty_markdown_line(text)
+    if not re.match(r"^#\s+\S", first_line):
         errors.append("missing-h1")
+    if first_line.startswith("```"):
+        errors.append("leading-code-fence")
     if "TL;DR" not in text:
         errors.append("missing-tldr")
     for number in range(1, 8):
@@ -152,6 +155,14 @@ def paper_markdown_completeness_errors(markdown: str, expected_markers: Iterable
     if present < required:
         errors.append(f"too-few-figures:{present}/{required}")
     return errors
+
+
+def _first_nonempty_markdown_line(markdown: str) -> str:
+    for line in str(markdown or "").lstrip("\ufeff").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
 
 
 def verify_published_docx(

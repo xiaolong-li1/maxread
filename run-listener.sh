@@ -17,7 +17,9 @@ export MAXREAD_WORKDIR="${MAXREAD_WORKDIR:-./var/maxread}"
 
 if [ -n "${MAXREAD_PYTHON:-}" ]; then
   PYTHON_BIN="$MAXREAD_PYTHON"
-elif [ -x ./.venv/bin/python ] && ./.venv/bin/python -c 'import PIL' >/dev/null 2>&1; then
+elif [ -x ./.venv/bin/python ]; then
+  # The deployment venv is authoritative; dependency checks here can silently
+  # switch the service to a different interpreter with a different package set.
   PYTHON_BIN="./.venv/bin/python"
 else
   PYTHON_BIN="python3"

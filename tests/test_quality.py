@@ -42,6 +42,21 @@ def test_paper_completeness_requires_all_sections_and_three_selected_figures():
     assert "too-few-figures:2/3" in paper_markdown_completeness_errors(markdown.replace(markers[2], ""), markers)
 
 
+def test_paper_completeness_requires_h1_on_first_nonempty_line():
+    markdown = "前置说明\n\n# T\n\n**TL;DR**：摘要。\n\n" + "\n\n".join(
+        f"## {number}. S\n\n" + ("正文。" * 80) for number in range(1, 8)
+    )
+    errors = paper_markdown_completeness_errors(markdown)
+    assert "missing-h1" in errors
+
+
+def test_paper_completeness_flags_outer_code_fence():
+    markdown = "```markdown\n# T\n```"
+    errors = paper_markdown_completeness_errors(markdown)
+    assert "missing-h1" in errors
+    assert "leading-code-fence" in errors
+
+
 def test_quality_formula_agent_flags_unsupported_macros():
     warnings = quality_warnings(r"<latex>\bmX+\rvx+\tens{K}+\matrix{A}</latex>", r"<p><latex>\bmX+\rvx+\tens{K}+\matrix{A}</latex></p>")
     assert "quality:formula:markdown:high:unsupported-bm-macro" in warnings

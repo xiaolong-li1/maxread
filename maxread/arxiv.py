@@ -181,6 +181,7 @@ class ArxivClient:
             except Exception as exc:
                 return None, "", [f"PDF download failed: {exc}"]
         text = ""
+        extractor_issue = ""
         try:
             import subprocess
 
@@ -194,12 +195,22 @@ class ArxivClient:
             if result.returncode == 0:
                 text = result.stdout
             else:
-                warnings.append("pdftotext failed; PDF text unavailable")
+                extractor_issue = "pdftotext failed"
         except FileNotFoundError:
-            warnings.append("pdftotext is not installed; PDF text unavailable")
+            extractor_issue = "pdftotext is not installed"
         except Exception as exc:
-            warnings.append(f"PDF text extraction failed: {exc}")
+            extractor_issue = f"PDF text extraction failed: {exc}"
+        if not text.strip():
+            fallback_text, fallback_issue = _extract_pdf_text_with_python(pdf_path)
+            if fallback_text.strip():
+                text = fallback_text
+                warnings.append(f"{extractor_issue or 'pdftotext returned no text'}; used pypdf fallback")
+            else:
+                warnings.append(extractor_issue or "PDF text unavailable")
+                if fallback_issue:
+                    warnings.append(fallback_issue)
         return pdf_path, _clip(text, 120_000), warnings
+
 
     def fetch_source_text(self, paper_id: str, paper_dir: Path) -> Tuple[Optional[Path], Optional[Path], str, str, List[str], List[str], List[PaperFigure], List[str], Dict[str, str], Dict[str, str], Dict[str, str], List[str]]:
         source_path = paper_dir / f"{paper_id}.source"
@@ -322,6 +333,29 @@ class ArxivClient:
         elapsed = time.monotonic() - self._last_request_at
         if elapsed < 3.0:
             time.sleep(3.0 - elapsed)
+
+
+def _extract_pdf_text_with_python(pdf_path: Path) -> Tuple[str, str]:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return "", "pypdf fallback is not installed"
+    try:
+        reader = PdfReader(str(pdf_path))
+        chunks = []
+        failed_pages = 0
+        for page in reader.pages:
+            try:
+                chunks.append(page.extract_text() or "")
+            except Exception:
+                failed_pages += 1
+        text = "\n\n".join(chunk for chunk in chunks if chunk.strip())
+        if not text.strip():
+            return "", "pypdf extracted no text"
+        issue = f"pypdf skipped {failed_pages} page(s)" if failed_pages else ""
+        return text, issue
+    except Exception as exc:
+        return "", f"pypdf fallback failed: {exc}"
 
 
 def _parse_content_range_total(value: str) -> int:

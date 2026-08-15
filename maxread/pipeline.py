@@ -5,9 +5,10 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .arxiv import ArxivClient
 from .db import Store
@@ -29,6 +30,15 @@ class ProcessResult:
     doc_url: str
     cached: bool
     error: str = ""
+
+
+class IncompleteGenerationError(RuntimeError):
+    """The model returned text, but it did not satisfy the document contract."""
+
+    def __init__(self, errors, attempts: int):
+        self.errors = list(errors)
+        self.attempts = attempts
+        super().__init__(", ".join(self.errors) or "unknown-format-error")
 
 
 class MaxReadPipeline:
@@ -96,6 +106,7 @@ class MaxReadPipeline:
                     indent=2,
                 ),
             )
+            _remove_paper_artifact(bundle, "08-failure.txt")
             if self.require_source and not bundle.source_text:
                 message = _source_required_message(ref.paper_id, bundle.parse_warnings)
                 self.store.upsert_paper(ref.paper_id, "needs_source", error=message)
@@ -114,10 +125,16 @@ class MaxReadPipeline:
                 figure_visuals, figure_visual_warnings = _describe_figures_for_prompt(self.llm, figure_inserts)
                 macro_kwargs = _paper_macro_kwargs(bundle)
                 markers = [marker for marker, _path, _caption in figure_inserts]
+                generation_run = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                 markdown = _generate_complete_paper_markdown(
                     self.llm,
                     build_final_user_prompt(bundle, figure_inserts, figure_visuals),
                     markers,
+                    paper_id=bundle.metadata.paper_id,
+                    title=bundle.metadata.title,
+                    attempt_writer=lambda attempt, raw, errors: _write_generation_attempt(
+                        bundle, generation_run, attempt, raw, errors
+                    ),
                 )
                 _write_paper_artifact(bundle, "01-generated.md", markdown)
                 markdown = _sanitize_repository_markdown(markdown, find_repository_url(bundle))
@@ -145,7 +162,7 @@ class MaxReadPipeline:
                 _write_paper_artifact(bundle, "05-final.md", markdown)
                 completeness_errors = paper_markdown_completeness_errors(markdown, markers)
                 if completeness_errors:
-                    raise RuntimeError("incomplete generated paper: " + ", ".join(completeness_errors))
+                    raise IncompleteGenerationError(completeness_errors, attempts=0)
                 missing_markers = [marker for marker in markers if marker not in markdown]
                 publish_warnings = review_warnings + [f"missing-marker:{marker}" for marker in missing_markers]
                 xml = markdown_to_docx_xml(
@@ -172,6 +189,13 @@ class MaxReadPipeline:
                 self.store.upsert_paper(ref.paper_id, "quality_failed", error=message)
                 if event and send_progress:
                     self._reply(event, f"这篇已读完，但发布前格式质检未通过：{ref.paper_id}\n原因：{message}", "quality-fail", ref.paper_id)
+                return ProcessResult(ref.paper_id, "", cached=False, error=message)
+            except IncompleteGenerationError as exc:
+                message = f"生成格式不完整，未发布文档：{exc}"
+                _write_paper_artifact(bundle, "08-failure.txt", message)
+                self.store.upsert_paper(ref.paper_id, "summary_incomplete", error=message)
+                if event and send_progress:
+                    self._reply(event, f"这篇我没读成：{ref.paper_id}\n原因：{message}", "summary-fail", ref.paper_id)
                 return ProcessResult(ref.paper_id, "", cached=False, error=message)
             except Exception as exc:
                 message = f"总结模型调用失败，未发布文档：{exc}"
@@ -301,24 +325,121 @@ def _write_paper_artifact(bundle: PaperBundle, name: str, content: str) -> None:
         return
 
 
-def _generate_complete_paper_markdown(llm, user_prompt: str, markers, attempts: int = 2) -> str:
-    last_error = ""
-    prompt = user_prompt
-    for attempt in range(max(1, attempts)):
+def _remove_paper_artifact(bundle: PaperBundle, name: str) -> None:
+    candidates = [bundle.pdf_path, bundle.source_path]
+    root = next(
+        (
+            Path(path).parent
+            for path in candidates
+            if path and Path(path).is_absolute() and Path(path).parent.exists()
+        ),
+        None,
+    )
+    if root is None:
+        return
+    try:
+        (root / "pipeline_artifacts" / Path(name).name).unlink(missing_ok=True)
+    except Exception:
+        return
+
+
+def _write_generation_attempt(bundle: PaperBundle, run_id: str, attempt: int, markdown: str, errors) -> None:
+    _write_paper_artifact(bundle, f"01-{run_id}-attempt-{attempt}.md", markdown)
+    _write_paper_artifact(
+        bundle,
+        f"01-{run_id}-attempt-{attempt}.json",
+        json.dumps({"attempt": attempt, "errors": list(errors)}, ensure_ascii=False, indent=2),
+    )
+
+
+def _generate_complete_paper_markdown(
+    llm,
+    user_prompt: str,
+    markers,
+    attempts: int = 2,
+    paper_id: str = "",
+    title: str = "",
+    attempt_writer: Optional[Callable[[int, str, list[str]], None]] = None,
+) -> str:
+    attempt_count = max(1, attempts)
+    contract = _markdown_generation_contract(paper_id)
+    prompt = user_prompt + contract
+    last_errors: list[str] = []
+    last_markdown = ""
+    last_exception = ""
+    had_model_output = False
+    for attempt in range(attempt_count):
         try:
-            markdown = llm.responses_text(FINAL_SYSTEM_PROMPT, prompt)
+            raw_markdown = llm.responses_text(FINAL_SYSTEM_PROMPT, prompt)
         except Exception as exc:
-            last_error = str(exc)
+            last_exception = str(exc)
+            if attempt_writer:
+                attempt_writer(attempt + 1, "", [f"model-call:{last_exception}"])
             continue
+        had_model_output = True
+        markdown = _unwrap_outer_markdown_fence(raw_markdown)
         errors = paper_markdown_completeness_errors(markdown, markers)
+        if attempt_writer:
+            attempt_writer(attempt + 1, raw_markdown, errors)
         if not errors:
             return markdown
-        last_error = ", ".join(errors)
-        prompt = user_prompt + (
-            "\n\n上一次输出不完整，问题为：" + last_error +
-            "。请重新输出完整文档，必须包含第 1 至第 7 章，并只选择 3-5 张关键图片嵌入对应论述。"
+        last_markdown = markdown
+        last_errors = errors
+        prompt = user_prompt + contract + (
+            "\n\n上一次输出未通过结构检查，问题为：" + ", ".join(errors) +
+            "。请从第一行重新输出完整文档：第一行必须是 `# ` 开头的 H1；"
+            "不得有前置解释、JSON、YAML 或包住全文的代码围栏；必须包含第 1 至第 7 章，"
+            "并只选择 3-5 张关键图片嵌入对应论述。"
         )
-    raise RuntimeError("paper generation remained incomplete: " + last_error)
+    if had_model_output and last_errors == ["missing-h1"]:
+        repaired = _repair_missing_h1(last_markdown, paper_id, title)
+        repaired_errors = paper_markdown_completeness_errors(repaired, markers)
+        if not repaired_errors:
+            if attempt_writer:
+                attempt_writer(attempt_count + 1, repaired, ["deterministic-repair:missing-h1"])
+            return repaired
+        last_errors = repaired_errors
+    if not had_model_output:
+        raise RuntimeError("paper generation failed: " + (last_exception or "no model output"))
+    raise IncompleteGenerationError(last_errors, attempts=attempt_count)
+
+
+def _markdown_generation_contract(paper_id: str) -> str:
+    heading_hint = f"# [{paper_id}] ..." if paper_id else "# ..."
+    return (
+        "\n\n输出协议（硬约束）：\n"
+        f"- 第一个非空行必须是 Markdown H1，形如 `{heading_hint}`。\n"
+        "- 直接输出最终 Markdown；不要输出前置说明、JSON、YAML 或代码围栏。\n"
+        "- 不要用 ```markdown``` 包住全文；正文中的 marker 必须逐字保留。"
+    )
+
+
+def _unwrap_outer_markdown_fence(markdown: str) -> str:
+    text = str(markdown or "").strip().lstrip("\ufeff")
+    match = re.fullmatch(r"```(?:markdown|md)?\s*\n(.*?)\n```", text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip() + "\n"
+    return text + ("\n" if text else "")
+
+
+def _repair_missing_h1(markdown: str, paper_id: str, title: str) -> str:
+    text = _unwrap_outer_markdown_fence(markdown).strip()
+    lines = text.splitlines()
+    in_fence = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence and re.match(r"^#\s+\S", stripped):
+            heading = stripped
+            body = lines[:index] + lines[index + 1 :]
+            return f"{heading}\n\n{chr(10).join(body).strip()}\n"
+    clean_title = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not clean_title:
+        return text + ("\n" if text else "")
+    prefix = f"# [{paper_id}] {clean_title}" if paper_id else f"# {clean_title}"
+    return f"{prefix}\n\n{text}\n"
 
 
 def _sanitize_repository_markdown(markdown: str, repository_url: str) -> str:

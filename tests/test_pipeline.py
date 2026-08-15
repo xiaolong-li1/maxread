@@ -2,7 +2,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperRef
-from maxread.pipeline import MaxReadPipeline, _describe_figures_for_prompt, _sanitize_repository_markdown, _write_paper_artifact
+from maxread.pipeline import MaxReadPipeline, _describe_figures_for_prompt, _generate_complete_paper_markdown, _sanitize_repository_markdown, _write_paper_artifact
 from maxread.visual_qa import VisualQAController
 
 
@@ -121,6 +121,11 @@ class BadQualityLLM(FakeLLM):
         return body + r"\n\n公式：<latex>\newcommand{\RR}{\mathbb{R}} x\in\RR</latex>"
 
 
+class MissingH1LLM(FakeLLM):
+    def responses_text(self, system, user, **kwargs):
+        return super().responses_text(system, user, **kwargs).replace("# Fake Paper\n", "前置说明\n")
+
+
 class FakeArxivNoSource(FakeArxiv):
     def fetch(self, paper_id):
         bundle = super().fetch(paper_id)
@@ -147,6 +152,22 @@ def test_pipeline_process_and_cache(tmp_path):
     assert second.cached is True
     assert feishu.published == ["doc123"]
     store.close()
+
+
+def test_generation_repairs_only_missing_h1_from_metadata():
+    attempts = []
+    result = _generate_complete_paper_markdown(
+        MissingH1LLM(),
+        "生成文档",
+        [],
+        paper_id="2604.12946",
+        title="Fake Paper",
+        attempt_writer=lambda number, raw, errors: attempts.append((number, raw, errors)),
+    )
+
+    assert result.startswith("# [2604.12946] Fake Paper\n")
+    assert attempts[0][1].startswith("前置说明")
+    assert attempts[-1][2] == ["deterministic-repair:missing-h1"]
 
 
 def test_pipeline_post_publish_fetch_failure_is_warning(tmp_path):

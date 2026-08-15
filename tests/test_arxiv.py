@@ -1,7 +1,10 @@
 import io
+import sys
 import tarfile
+import types
+from pathlib import Path
 
-from maxread.arxiv import ArxivClient, _clip_source_with_appendix, _parse_content_range_total, _split_ranges, extract_arxiv_refs
+from maxread.arxiv import ArxivClient, _clip_source_with_appendix, _extract_pdf_text_with_python, _parse_content_range_total, _split_ranges, extract_arxiv_refs
 
 
 def test_extract_plain_id():
@@ -34,6 +37,31 @@ def test_range_helpers_parse_and_split():
     assert _parse_content_range_total("bytes */0") == 0
     assert _split_ranges(10, 4) == [(0, 2), (3, 5), (6, 8), (9, 9)]
     assert _split_ranges(3, 8) == [(0, 0), (1, 1), (2, 2)]
+
+
+def test_python_pdf_text_fallback_uses_pypdf_when_available(tmp_path):
+    class FakePage:
+        def extract_text(self):
+            return "Extracted page text"
+
+    class FakeReader:
+        def __init__(self, _path):
+            self.pages = [FakePage()]
+
+    fake_pypdf = types.ModuleType("pypdf")
+    fake_pypdf.PdfReader = FakeReader
+    previous = sys.modules.get("pypdf")
+    sys.modules["pypdf"] = fake_pypdf
+    try:
+        text, warning = _extract_pdf_text_with_python(Path(tmp_path) / "paper.pdf")
+    finally:
+        if previous is None:
+            sys.modules.pop("pypdf", None)
+        else:
+            sys.modules["pypdf"] = previous
+
+    assert text == "Extracted page text"
+    assert warning == ""
 
 
 def test_clip_source_with_appendix_preserves_appendix_excerpt():

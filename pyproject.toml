@@ -5,6 +5,7 @@ description = "Local MVP for 读不动了 / MaxRead: arXiv to Feishu docx summar
 requires-python = ">=3.9"
 dependencies = [
     "Pillow>=10",
+    "pypdf>=5",
 ]
 
 [project.scripts]
@@ -21,4 +22,3 @@ exclude = ["tests*", "deploy*"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-
