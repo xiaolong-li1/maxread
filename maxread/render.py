@@ -434,6 +434,7 @@ def _normalize_display_math(
 def _markdown_blocks(markdown: str) -> List[str]:
     blocks: List[str] = []
     current: List[str] = []
+    latex_unclosed = False
 
     def flush() -> None:
         if current:
@@ -452,8 +453,17 @@ def _markdown_blocks(markdown: str) -> List[str]:
 
     for line in markdown.splitlines():
         stripped = line.strip()
+        if latex_unclosed:
+            current.append(line.rstrip())
+            if re.search(r"</latex>\s*$", stripped, flags=re.I):
+                latex_unclosed = False
+            continue
         if not stripped:
             flush()
+            continue
+        if re.match(r"^<latex\b", stripped, flags=re.I) and not re.search(r"</latex>\s*$", stripped, flags=re.I):
+            current.append(line.rstrip())
+            latex_unclosed = True
             continue
         # Markdown producers often omit the blank line before a heading, table,
         # or list. Split those structural boundaries before XML conversion.

@@ -338,6 +338,17 @@ def test_markdown_to_docx_xml_preserves_latex_and_tables():
     assert "<latex>a+b</latex>" in xml
 
 
+def test_markdown_to_docx_xml_keeps_multiline_latex_with_norm_bars_intact():
+    md = "<latex>d=\\left\\|x\\right\\|\n=1</latex>"
+
+    xml = markdown_to_docx_xml(md)
+
+    assert "&lt;latex&gt;" not in xml
+    assert "<latex>d=\\left\\|x\\right\\|\n=1</latex>" in xml
+    assert "<table>" not in xml
+    assert "<code>" not in xml
+
+
 def test_markdown_to_docx_xml_accepts_loose_table_rows():
     md = """# 标题
 
