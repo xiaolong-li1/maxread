@@ -68,6 +68,15 @@ def test_polish_markdown_sanitizes_invalid_latex_blocks():
     assert "`\\frac{x}{y`" in out
 
 
+def test_polish_markdown_cleans_cjk_math_code_without_leaking_tex():
+    out = polish_markdown(r"路由集合：`\mathcal S_i=\{j:|i-j|\le w\}\cup\{全局锚点\}`")
+
+    assert r"\mathcal" not in out
+    assert r"\le" not in out
+    assert "全局锚点" in out
+    assert "S_i" in out
+
+
 def test_polish_markdown_normalizes_common_paper_macros():
     out = polish_markdown(r"$\mX \in \R^{N\times d}, \gI_i=\TopK(\mS), \Ls_{\rm KL}=\KL(P\|Q), \sg(P), \softmax(x)$")
     assert r"\mathbf{X}" in out

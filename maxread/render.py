@@ -82,6 +82,18 @@ def _normalize_backticked_math(
             return match.group(0)
         body = _normalize_latex_body(raw, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
         if not _is_valid_latex_body(body):
+            # Models sometimes put a readable set definition in code ticks
+            # while mixing TeX styling commands with Chinese prose. Keeping
+            # that raw string makes it render as code and triggers three
+            # separate blocking checks. Strip only presentation commands and
+            # retain the content as readable text; structural LaTeX errors
+            # still stay visible for the quality gate.
+            if re.search(r"[\u4e00-\u9fff]", raw) and re.search(
+                r"\\(?:mathcal|mathbf|mathrm|mathbb|mathsf|mathit)\b", raw
+            ):
+                cleaned = _strip_math_code_for_text(raw)
+                if cleaned and cleaned != raw:
+                    return f"`{cleaned}`"
             return match.group(0)
         return f"<latex>{body}</latex>"
 
@@ -103,6 +115,33 @@ def _looks_like_math_code(text: str) -> bool:
     if re.fullmatch(r"[A-Za-z0-9.{}()[\],\s]+(?:[=<>+*/-][A-Za-z0-9.{}()[\],\s]*)+", value):
         return True
     return bool(re.fullmatch(r"\[[0-9.,\s]+\]", value))
+
+
+def _strip_math_code_for_text(text: str) -> str:
+    value = html.unescape(str(text or "")).strip()
+    replacements = {
+        r"\leq": "<=",
+        r"\le": "<=",
+        r"\geq": ">=",
+        r"\ge": ">=",
+        r"\pm": "+/-",
+        r"\cup": " union ",
+        r"\cap": " intersection ",
+        r"\in": " in ",
+        r"\notin": " not in ",
+        r"\to": " -> ",
+    }
+    for command, replacement in replacements.items():
+        value = re.sub(re.escape(command) + r"(?![A-Za-z])", replacement, value)
+    value = re.sub(
+        r"\\(?:mathcal|mathbf|mathrm|mathbb|mathsf|mathit)\s*",
+        "",
+        value,
+    )
+    value = re.sub(r"\\([{}\[\]()])", r"\1", value)
+    value = re.sub(r"\\+", "+", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
 def remove_false_material_warning(markdown: str, bundle: PaperBundle) -> str:
