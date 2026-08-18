@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from maxread.visual_qa import (
     RemoteVisualResult,
     VisualFinding,
@@ -192,3 +194,26 @@ def test_last_json_object_ignores_ssh_banner():
     payload = _last_json_object('banner\n{"status":"ok","findings":[]}\n')
 
     assert payload == {"status": "ok", "findings": []}
+
+
+def test_from_settings_uses_independent_visual_model_when_configured():
+    settings = SimpleNamespace(
+        visual_qa_enabled=True,
+        visual_openai_api_key="visual-key",
+        visual_openai_base_url="https://visual.example/v1",
+        visual_openai_sub_module="visual",
+        visual_openai_api_mode="responses",
+        visual_model="vision-model",
+        model="primary-model",
+        openai_base_url="https://primary.example/v1",
+        openai_sub_module="primary",
+        openai_api_mode="responses",
+        openai_timeout=42,
+        openai_reasoning_effort="high",
+    )
+
+    controller = VisualQAController.from_settings(settings, llm=object())
+
+    assert controller.llm.api_key == "visual-key"
+    assert controller.llm.model == "vision-model"
+    assert controller.llm.base_url == "https://visual.example/v1"

@@ -66,6 +66,7 @@ class BatchProcessor:
                 base_url=self.settings.openai_base_url,
                 sub_module=self.settings.openai_sub_module,
                 reasoning_effort=self.settings.openai_reasoning_effort,
+                api_mode=self.settings.openai_api_mode,
             ),
             self.llm_sem,
         )

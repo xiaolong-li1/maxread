@@ -23,6 +23,12 @@ class Settings:
     openai_api_key: str
     openai_base_url: str
     openai_sub_module: str
+    openai_api_mode: str
+    visual_openai_api_key: str
+    visual_openai_base_url: str
+    visual_openai_sub_module: str
+    visual_openai_api_mode: str
+    visual_model: str
     db_path: Path
     workdir: Path
     model: str
@@ -72,6 +78,12 @@ class Settings:
             openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             openai_sub_module=os.environ.get("OPENAI_SUB_MODULE", ""),
+            openai_api_mode=os.environ.get("MAXREAD_OPENAI_API_MODE", "responses"),
+            visual_openai_api_key=os.environ.get("MAXREAD_VISUAL_OPENAI_API_KEY", ""),
+            visual_openai_base_url=os.environ.get("MAXREAD_VISUAL_OPENAI_BASE_URL", ""),
+            visual_openai_sub_module=os.environ.get("MAXREAD_VISUAL_OPENAI_SUB_MODULE", ""),
+            visual_openai_api_mode=os.environ.get("MAXREAD_VISUAL_OPENAI_API_MODE", ""),
+            visual_model=os.environ.get("MAXREAD_VISUAL_MODEL", ""),
             db_path=db_path,
             workdir=workdir,
             model=os.environ.get("MAXREAD_MODEL", "gpt-4.1"),

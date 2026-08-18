@@ -18,6 +18,7 @@ deploy/windows/README.md
 ```bash
 OPENAI_API_KEY=<openai-api-key>
 OPENAI_BASE_URL=https://api.openai.com/v1
+MAXREAD_OPENAI_API_MODE=responses
 MAXREAD_MODEL=gpt-5.5
 MAXREAD_FEISHU_AS=bot
 MAXREAD_LARK_CLI=lark-cli
@@ -117,6 +118,13 @@ MAXREAD_VISUAL_QA_REPAIR_ROUNDS=3
 ```
 
 The worker is read-only. After publishing, MaxRead performs up to three inspect -> repair -> screenshot recheck cycles. Deterministic block repairs run first; if a formula still fails, the configured model may return a strictly validated block-level repair. Each visual round, screenshot path, finding, and model response is saved as `09-visual-qa.json`. If MaxRead itself runs on `ziplab-5090`, keep this option disabled unless that machine has a working SSH alias back to itself.
+
+Set `MAXREAD_OPENAI_API_MODE=chat` for OpenAI-compatible gateways whose
+`/chat/completions` implementation follows instructions more reliably than
+their `/responses` implementation. If that gateway cannot accept local base64
+screenshots, keep visual repair on a separate compatible model with
+`MAXREAD_VISUAL_OPENAI_API_KEY`, `MAXREAD_VISUAL_OPENAI_BASE_URL`,
+`MAXREAD_VISUAL_OPENAI_API_MODE`, and `MAXREAD_VISUAL_MODEL`.
 
 ## Current Scope
 

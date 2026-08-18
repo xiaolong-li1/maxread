@@ -16,6 +16,7 @@ MODULES = [
     "tests.test_formula_compiler",
     "tests.test_help",
     "tests.test_job_queue",
+    "tests.test_openai_client",
     "tests.test_db",
     "tests.test_duty",
     "tests.test_pipeline",

@@ -116,6 +116,7 @@ class QueueManager:
                 base_url=self.settings.openai_base_url,
                 sub_module=self.settings.openai_sub_module,
                 reasoning_effort=self.settings.openai_reasoning_effort,
+                api_mode=self.settings.openai_api_mode,
             ),
             self.llm_sem,
             lambda: progress(f"[在做了] 正在读{'论文' if source_kind == 'paper' else '文章'}：{source_id}", "reading", "job-reading"),

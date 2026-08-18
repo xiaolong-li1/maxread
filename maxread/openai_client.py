@@ -27,6 +27,7 @@ class OpenAIClient:
         base_url: str = "https://api.openai.com/v1",
         sub_module: str = "",
         reasoning_effort: str = "",
+        api_mode: str = "responses",
     ):
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required for real summaries")
@@ -36,11 +37,15 @@ class OpenAIClient:
         self.base_url = base_url.rstrip("/")
         self.sub_module = sub_module
         self.reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+        self.api_mode = _normalize_api_mode(api_mode)
 
     def responses_text(self, system: str, user: str, reasoning_effort: str | None = None) -> str:
+        if self.api_mode == "chat":
+            return self.chat_completions_text(system, user, reasoning_effort=reasoning_effort)
         base_payload = {
             "model": self.model,
-            "input": _combined_prompt(system, user),
+            "instructions": system.strip(),
+            "input": user.strip(),
             "text": {"verbosity": "medium"},
             "stream": True,
         }
@@ -56,7 +61,7 @@ class OpenAIClient:
                 break
             except OpenAIRequestError as exc:
                 if exc.status in {400, 404}:
-                    return self.chat_completions_text(system, user)
+                    return self.chat_completions_text(system, user, reasoning_effort=current_effort)
                 if exc.status == 524 and current_effort != _reasoning_attempts(effort)[-1]:
                     continue
                 raise
@@ -73,15 +78,17 @@ class OpenAIClient:
         image_url = _image_data_url(Path(image_path))
         payload = {
             "model": self.model,
+            "instructions": system.strip(),
             "input": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": _combined_prompt(system, user)},
-                        {"type": "input_image", "image_url": image_url},
+                        {"type": "input_text", "text": user.strip()},
+                        {"type": "input_image", "image_url": image_url, "detail": "high"},
                     ],
                 },
             ],
+            "reasoning": {"effort": self.reasoning_effort} if self.reasoning_effort else {},
         }
         data = self._post("/responses", payload)
         text = _extract_output_text(data)
@@ -89,7 +96,12 @@ class OpenAIClient:
             raise RuntimeError(f"OpenAI image response had no output text: {data}")
         return text
 
-    def chat_completions_text(self, system: str, user: str) -> str:
+    def chat_completions_text(
+        self,
+        system: str,
+        user: str,
+        reasoning_effort: str | None = None,
+    ) -> str:
         payload = {
             "model": self.model,
             "messages": [
@@ -97,6 +109,9 @@ class OpenAIClient:
                 {"role": "user", "content": user},
             ],
         }
+        effort = self.reasoning_effort if reasoning_effort is None else _normalize_reasoning_effort(reasoning_effort)
+        if effort:
+            payload["reasoning_effort"] = effort
         data = self._post("/chat/completions", payload)
         try:
             return data["choices"][0]["message"]["content"].strip()
@@ -199,10 +214,6 @@ def _extract_output_text(data: Dict[str, Any]) -> str:
     return "\n".join(chunks).strip()
 
 
-def _combined_prompt(system: str, user: str) -> str:
-    return f"{system.strip()}\n\n---\n\n{user.strip()}"
-
-
 def _normalize_reasoning_effort(value: str) -> str:
     text = str(value or "").strip().lower().replace("-", "_")
     aliases = {
@@ -213,6 +224,11 @@ def _normalize_reasoning_effort(value: str) -> str:
         "middle": "medium",
     }
     return aliases.get(text, text)
+
+
+def _normalize_api_mode(value: str) -> str:
+    text = str(value or "responses").strip().lower().replace("-", "_")
+    return "chat" if text in {"chat", "chat_completions", "chatcompletion"} else "responses"
 
 
 def _reasoning_attempts(effort: str) -> list[str]:

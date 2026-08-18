@@ -119,7 +119,7 @@ def main(argv: List[str] | None = None) -> int:
     llm = None if getattr(args, "no_openai", False) else _maybe_llm(settings)
     feedback_llm = None
     if args.cmd in {"listen", "handle-event"} and not getattr(args, "no_openai", False):
-        feedback_llm = _maybe_llm(settings, timeout=min(settings.openai_timeout, 20), reasoning_effort="minimal")
+        feedback_llm = _maybe_llm(settings, timeout=min(settings.openai_timeout, 20), reasoning_effort="low")
     visual_qa = VisualQAController.from_settings(settings, llm=llm)
     pipeline = MaxReadPipeline(
         store,
@@ -235,6 +235,7 @@ def _maybe_llm(settings: Settings, timeout: int | None = None, reasoning_effort:
         base_url=settings.openai_base_url,
         sub_module=settings.openai_sub_module,
         reasoning_effort=reasoning_effort or settings.openai_reasoning_effort,
+        api_mode=settings.openai_api_mode,
     )
 
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 from .feishu import normalize_doc_url
+from .openai_client import OpenAIClient
 from .render import _is_valid_latex_body, _normalize_latex_body, _strip_latex_for_text
 
 
@@ -149,6 +150,17 @@ class VisualQAController:
 
     @classmethod
     def from_settings(cls, settings, llm=None) -> "VisualQAController":
+        visual_key = str(getattr(settings, "visual_openai_api_key", "") or "").strip()
+        if visual_key:
+            llm = OpenAIClient(
+                visual_key,
+                getattr(settings, "visual_model", "") or getattr(settings, "model", "gpt-4.1"),
+                timeout=getattr(settings, "openai_timeout", 180),
+                base_url=getattr(settings, "visual_openai_base_url", "") or getattr(settings, "openai_base_url", "https://api.openai.com/v1"),
+                sub_module=getattr(settings, "visual_openai_sub_module", "") or getattr(settings, "openai_sub_module", ""),
+                reasoning_effort=getattr(settings, "openai_reasoning_effort", "high"),
+                api_mode=getattr(settings, "visual_openai_api_mode", "") or getattr(settings, "openai_api_mode", "responses"),
+            )
         return cls(
             enabled=getattr(settings, "visual_qa_enabled", False),
             host=getattr(settings, "visual_qa_host", "ziplab-5090"),
