@@ -186,6 +186,14 @@ def paper_markdown_completeness_errors(markdown: str, expected_markers: Iterable
         errors.append("missing-h1")
     if first_line.startswith("```"):
         errors.append("leading-code-fence")
+    if re.search(
+        r"(?i)(?:the user wants me to|let me carefully follow(?: all)? the rules|i(?:'|’)m instructed to generate)",
+        text,
+    ):
+        errors.append("prompt-leak")
+    h1_lines = re.findall(r"(?m)^\s*#\s+\S", text)
+    if len(h1_lines) > 1 or len(re.findall(r"#\s+\[[^\]\n]+\]", text)) > 1:
+        errors.append("duplicate-h1")
     if "TL;DR" not in text:
         errors.append("missing-tldr")
     for number in range(1, 8):
