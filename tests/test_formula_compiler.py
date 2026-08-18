@@ -33,6 +33,14 @@ def test_unknown_html_in_formula_is_diagnosed_and_retained():
     assert any(item.code == "unknown-html-in-formula" and item.severity == "high" for item in result.diagnostics)
 
 
+def test_compiler_recovers_overescaped_latex_commands_but_keeps_row_breaks():
+    result = compile_formula_markup(
+        r"<latex>\\mathbf{x}=\\mathcal{N}(x)\\mathrm{d}x\\begin{aligned}a\\ b\\j\\le i</latex>"
+    )
+
+    assert result.text == r"<latex>\mathbf{x}=\mathcal{N}(x)\mathrm{d}x\begin{aligned}a\\ b\\j\le i</latex>"
+
+
 def test_polish_markdown_handles_legacy_formula_wrappers():
     output = polish_markdown("公式：<p><latex>V=[T;F;M]</latex></p>")
 

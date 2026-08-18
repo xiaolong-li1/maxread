@@ -59,6 +59,21 @@ _FORMULA_WRAPPER_RE = re.compile(
     r"<\s*p\b[^>]*>\s*<latex>.*?</latex>\s*</\s*p\s*>",
     re.I | re.S,
 )
+_OVERESCAPED_COMMAND_RE = re.compile(r"\\\\([A-Za-z]+)")
+_OVERESCAPED_DELIMITER_RE = re.compile(r"\\\\(?=[{}\[\]()])")
+_KNOWN_LATEX_COMMANDS = frozenset(
+    {
+        "alpha", "approx", "bar", "begin", "beta", "bmatrix", "cdot", "chi", "circ",
+        "cos", "cup", "delta", "dot", "doteq", "dots", "ell", "end", "epsilon", "eta",
+        "frac", "gamma", "ge", "geq", "hat", "in", "infty", "int", "kappa", "lambda",
+        "Lambda", "le", "leq", "left", "log", "mathbb", "mathbf", "mathcal", "mathrm",
+        "mathsf", "mathit", "max", "mu", "nabla", "neg", "neq", "notin", "nu", "omega",
+        "operatorname", "overline", "partial", "phi", "pi", "pm", "psi", "qquad", "quad",
+        "rho", "right", "rightarrow", "rm", "sigma", "sin", "sqrt", "star", "substack",
+        "sum", "tau", "text", "textbf", "textit", "textnormal", "theta", "times", "to",
+        "top", "triangleq", "varphi", "vartheta", "vec", "xi", "zeta",
+    }
+)
 
 
 def compile_formula_markup(markdown: str) -> FormulaCompilation:
@@ -152,6 +167,11 @@ def _compile_formula_body(body: str, offset: int) -> tuple[str, List[FormulaDiag
         )
     value = _KNOWN_WRAPPER_RE.sub(lambda match: " " if re.match(r"<\s*br", match.group(0), re.I) else "", value)
     value = re.sub(r"<\s*/?\s*latex\b[^>]*>", "", value, flags=re.I)
+    # Review models sometimes double-escape LaTeX commands inside a JSON
+    # string. Recover only known commands; an unknown ``\\`` before a letter
+    # may be a genuine aligned-row separator such as ``\\j``.
+    value = _OVERESCAPED_COMMAND_RE.sub(_recover_overescaped_command, value)
+    value = _OVERESCAPED_DELIMITER_RE.sub(lambda _match: "\\", value)
     if not _balanced_braces(value):
         diagnostics.append(
             FormulaDiagnostic(
@@ -163,6 +183,13 @@ def _compile_formula_body(body: str, offset: int) -> tuple[str, List[FormulaDiag
             )
         )
     return value, diagnostics
+
+
+def _recover_overescaped_command(match: re.Match[str]) -> str:
+    command = match.group(1)
+    if command in _KNOWN_LATEX_COMMANDS:
+        return "\\" + command
+    return match.group(0)
 
 
 def _unwrap_formula_paragraphs(text: str, source: str) -> tuple[str, List[FormulaDiagnostic]]:
