@@ -25,6 +25,9 @@ def main() -> int:
     parser.add_argument("--url", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--max-sections", type=int, default=12)
+    parser.add_argument("--expected-images", type=int, default=0)
+    parser.add_argument("--expected-formulas", type=int, default=0)
+    parser.add_argument("--expected-tables", type=int, default=0)
     parser.add_argument("--viewport-width", type=int, default=1440)
     parser.add_argument("--viewport-height", type=int, default=1000)
     args = parser.parse_args()
@@ -57,7 +60,15 @@ def main() -> int:
                 report["status"] = "auth_required"
                 report["findings"].append(_finding("auth-required", "high", "文档访问跳转到登录页"))
             else:
-                _inspect_document(page, output_dir, report, max(1, args.max_sections))
+                _inspect_document(
+                    page,
+                    output_dir,
+                    report,
+                    max(1, args.max_sections),
+                    expected_images=max(0, args.expected_images),
+                    expected_formulas=max(0, args.expected_formulas),
+                    expected_tables=max(0, args.expected_tables),
+                )
             browser.close()
     except Exception as exc:
         report["status"] = "error"
@@ -70,10 +81,19 @@ def main() -> int:
     return 0 if report["status"] in {"ok", "issues"} else 2
 
 
-def _inspect_document(page: Page, output_dir: Path, report: Dict[str, Any], max_sections: int) -> None:
+def _inspect_document(
+    page: Page,
+    output_dir: Path,
+    report: Dict[str, Any],
+    max_sections: int,
+    expected_images: int = 0,
+    expected_formulas: int = 0,
+    expected_tables: int = 0,
+) -> None:
     scroller = _main_scroller(page)
     editor = _editor_box(page)
     _stabilize_document_height(page, scroller)
+    inventory = _rendered_object_inventory(page, scroller)
     catalogue = _catalogue_links(page, max_sections)
     catalogue_budget = min(len(catalogue), max(0, (max_sections - 1) // 2))
     catalogue = _select_evenly(catalogue, catalogue_budget)
@@ -84,7 +104,10 @@ def _inspect_document(page: Page, output_dir: Path, report: Dict[str, Any], max_
             targets.append(catalogue[index])
         if index < len(scroll_targets):
             targets.append(scroll_targets[index])
-    image_sections = _image_section_targets(page, scroller)
+    image_sections = [
+        {"section": f"图片-{index}", "scroll_top": str(item.get("scroll_top", 0))}
+        for index, item in enumerate(inventory["images"], start=1)
+    ]
     targets.extend(_select_evenly(image_sections, min(6, len(image_sections))))
     targets = _dedupe_targets(targets)
 
@@ -117,6 +140,8 @@ def _inspect_document(page: Page, output_dir: Path, report: Dict[str, Any], max_
 
         visible_text = _visible_text(page)
         current_invalid = sum(visible_text.count(text) for text in INVALID_TEXTS)
+        invalid_contexts = _visible_invalid_formula_contexts(page)
+        current_invalid = max(current_invalid, len(invalid_contexts))
         invalid_count += current_invalid
         if current_invalid:
             findings.append(
@@ -126,6 +151,7 @@ def _inspect_document(page: Page, output_dir: Path, report: Dict[str, Any], max_
                     f"章节视口出现 {current_invalid} 个无效公式提示",
                     section=target.get("section", ""),
                     autofixable=True,
+                    data={"contexts": invalid_contexts[:8]},
                 )
             )
         raw_artifacts = _raw_formatting_artifacts(visible_text)
@@ -213,6 +239,48 @@ def _inspect_document(page: Page, output_dir: Path, report: Dict[str, Any], max_
         for finding in findings[finding_start:]:
             finding.setdefault("screenshot", str(shot_path))
 
+    rendered_images = len(inventory["images"])
+    rendered_formulas = len(inventory["formulas"])
+    rendered_tables = len(inventory["tables"])
+    count_screenshot = screenshots[0] if screenshots else ""
+    for kind, actual, expected, label in (
+        ("missing-image", rendered_images, expected_images, "图片"),
+        ("missing-formula", rendered_formulas, expected_formulas, "公式"),
+        ("missing-table", rendered_tables, expected_tables, "表格"),
+    ):
+        if expected and actual < expected:
+            findings.append(
+                _finding(
+                    kind,
+                    "high",
+                    f"真实页面只渲染出 {actual}/{expected} 个{label}",
+                    screenshot=count_screenshot,
+                    data={"actual": actual, "expected": expected},
+                )
+            )
+    for table in inventory["tables"]:
+        if int(table.get("rows", 0)) < 1 or int(table.get("cells", 0)) < 1:
+            findings.append(
+                _finding(
+                    "table-render-failed",
+                    "high",
+                    "表格节点存在，但没有渲染出有效行列",
+                    screenshot=count_screenshot,
+                    data={"rows": table.get("rows", 0), "cells": table.get("cells", 0)},
+                )
+            )
+        overflow = float(table.get("right", 0)) - float(editor.get("right", 0))
+        if overflow > 12 or float(table.get("left", 0)) < float(editor.get("left", 0)) - 12:
+            findings.append(
+                _finding(
+                    "table-overflow",
+                    "high",
+                    f"表格超出正文区域 {round(max(overflow, 0))}px",
+                    screenshot=count_screenshot,
+                    data={"editor_width": round(float(editor.get("width", 0))), "render_width": round(float(table.get("width", 0)))},
+                )
+            )
+
     report["findings"] = _dedupe_findings(findings)
     report["status"] = "issues" if report["findings"] else "ok"
     report["metrics"] = {
@@ -220,6 +288,12 @@ def _inspect_document(page: Page, output_dir: Path, report: Dict[str, Any], max_
         "raw_formatting_count": raw_formatting_count,
         "overlap_count": overlap_count,
         "image_observations": image_count,
+        "rendered_image_count": rendered_images,
+        "rendered_formula_count": rendered_formulas,
+        "rendered_table_count": rendered_tables,
+        "expected_image_min": expected_images,
+        "expected_formula_min": expected_formulas,
+        "expected_table_min": expected_tables,
         "max_image_overflow_px": round(max_overflow, 1),
         "scroll_height": round(_scroll_height(scroller)),
         "scroll_client_height": round(_scroll_client_height(scroller)),
@@ -356,6 +430,94 @@ def _visible_images(page: Page) -> List[Dict[str, Any]]:
           block_id:u.searchParams.get('mount_node_token') || '', src:e.src};
         }).filter(x => x.width > 20 && x.height > 20 && x.bottom > 64 && x.top < window.innerHeight)"""
     )
+
+
+def _visible_formulas(page: Page) -> List[Dict[str, Any]]:
+    editor = page.locator(".page-main-item.editor, .editor-container").first
+    if not editor.count():
+        return []
+    # Feishu renders a formula as one equation block containing a KaTeX tree.
+    # Count the block, not its internal .mord/.mrel spans.
+    return editor.locator(".docx-equation-block").evaluate_all(
+        """els => els.map(e => { const r=e.getBoundingClientRect();
+          const rendered = e.querySelector('.katex, .katex-html, .equation-katex-span');
+          return {
+          left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,
+          text:String(e.textContent || '').trim().slice(0,200),
+          html:String(e.outerHTML || '').slice(0,500),
+          rendered:Boolean(rendered && rendered.getBoundingClientRect().width > 1 && rendered.getBoundingClientRect().height > 1)};
+        }).filter(x => x.rendered && x.width > 1 && x.height > 1 && x.bottom > 64 && x.top < window.innerHeight)"""
+    )
+
+
+def _visible_invalid_formula_contexts(page: Page) -> List[Dict[str, str]]:
+    editor = page.locator(".page-main-item.editor, .editor-container").first
+    if not editor.count():
+        return []
+    return editor.locator("*").evaluate_all(
+        """els => { const rows = els.filter(el => String(el.textContent || '').trim() === '无效公式' ||
+          String(el.textContent || '').trim() === 'Invalid formula').map(el => {
+          let current = el;
+          let block = '';
+          let context = '';
+          for (let i = 0; i < 6 && current; i++, current = current.parentElement) {
+            for (const key of ['data-block-id','data-block-token','data-node-id','data-token','data-mount-node-token']) {
+              if (!block && current.getAttribute && current.getAttribute(key)) block = current.getAttribute(key);
+            }
+            if (!context && current.parentElement) context = String(current.parentElement.innerText || '').trim().slice(0, 360);
+          }
+          return {block_id: block, context};
+        }); return rows.filter((row, index) => rows.findIndex(other =>
+          other.block_id === row.block_id && other.context === row.context) === index).slice(0, 8); }"""
+    )
+
+
+def _visible_tables(page: Page) -> List[Dict[str, Any]]:
+    editor = page.locator(".page-main-item.editor, .editor-container").first
+    if not editor.count():
+        return []
+    return editor.locator("table").evaluate_all(
+        """els => els.map(e => { const r=e.getBoundingClientRect(); return {
+          left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,
+          rows:e.querySelectorAll('tr').length,cells:e.querySelectorAll('th,td').length,
+          text:String(e.innerText || e.textContent || '').trim().slice(0,300)};
+        }).filter(x => x.width > 1 && x.height > 1 && x.bottom > 64 && x.top < window.innerHeight)"""
+    )
+
+
+def _rendered_object_inventory(page: Page, scroller: Locator) -> Dict[str, List[Dict[str, Any]]]:
+    height = _scroll_height(scroller)
+    client_height = _scroll_client_height(scroller) or 900.0
+    max_top = max(0.0, height - client_height)
+    steps = min(48, max(4, math.ceil(max_top / max(320.0, client_height * 0.55))))
+    images: Dict[str, Dict[str, Any]] = {}
+    formulas: Dict[str, Dict[str, Any]] = {}
+    tables: Dict[str, Dict[str, Any]] = {}
+    for index in range(steps + 1):
+        requested_top = round(max_top * index / max(1, steps))
+        _set_scroll(scroller, requested_top)
+        page.wait_for_timeout(180)
+        scroll_top = _scroll_top(scroller)
+        for item in _visible_images(page):
+            key = str(item.get("block_id") or item.get("src") or _object_position_key("image", item, scroll_top))
+            images[key] = {**item, "scroll_top": round(scroll_top)}
+        for item in _visible_formulas(page):
+            key = _object_position_key("formula", item, scroll_top)
+            formulas[key] = {**item, "scroll_top": round(scroll_top)}
+        for item in _visible_tables(page):
+            key = _object_position_key("table", item, scroll_top)
+            tables[key] = {**item, "scroll_top": round(scroll_top)}
+    _set_scroll(scroller, 0)
+    page.wait_for_timeout(240)
+    return {"images": list(images.values()), "formulas": list(formulas.values()), "tables": list(tables.values())}
+
+
+def _object_position_key(kind: str, item: Dict[str, Any], scroll_top: float) -> str:
+    absolute_top = round((float(item.get("top", 0)) + scroll_top) / 4) * 4
+    left = round(float(item.get("left", 0)) / 4) * 4
+    content = str(item.get("text") or item.get("html") or item.get("src") or "")[:120]
+    digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
+    return f"{kind}:{absolute_top}:{left}:{digest}"
 
 
 def _has_document_editor(page: Page) -> bool:

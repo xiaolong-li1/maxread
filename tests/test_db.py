@@ -33,6 +33,27 @@ def test_store_tracks_intro_and_feedback(tmp_path):
     store.close()
 
 
+def test_store_persists_ai_feedback_classification(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    store.add_feedback(
+        "evt",
+        "om",
+        "oc",
+        "p2p",
+        "ou_1",
+        "方法框架图不见了",
+        source="ai",
+        category="quality",
+        confidence=0.94,
+    )
+
+    row = store.list_feedback()[0]
+    assert row["feedback_source"] == "ai"
+    assert row["feedback_category"] == "quality"
+    assert row["feedback_confidence"] == 0.94
+    store.close()
+
+
 def test_store_tracks_usage_events(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     usage_id = store.add_usage_event("evt", "om", "oc", "p2p", "ou_1", "paper", "2604.12946", "https://arxiv.org/abs/2604.12946")

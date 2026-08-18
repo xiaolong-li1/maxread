@@ -49,6 +49,28 @@ def review_markdown(llm: OpenAIClient, markdown: str, markers: Iterable[str], ki
 def review_markdown_with_report(llm: OpenAIClient, markdown: str, markers: Iterable[str], kind: str = "paper", reasoning_effort: str | None = None) -> ReviewResult:
     markers = list(markers)
     raw = llm.responses_text(REVIEW_SYSTEM_PROMPT, build_review_user_prompt(markdown, markers, kind), reasoning_effort=reasoning_effort)
+    return _review_result_or_original(markdown, raw, markers)
+
+
+def repair_markdown_with_quality_report(
+    llm: OpenAIClient,
+    markdown: str,
+    markers: Iterable[str],
+    quality_warnings: Iterable[str],
+    kind: str = "paper",
+    reasoning_effort: str | None = None,
+) -> ReviewResult:
+    markers = list(markers)
+    raw = llm.responses_text(
+        REVIEW_SYSTEM_PROMPT,
+        build_quality_repair_user_prompt(markdown, markers, quality_warnings, kind),
+        reasoning_effort=reasoning_effort,
+    )
+    return _review_result_or_original(markdown, raw, markers)
+
+
+def _review_result_or_original(markdown: str, raw: str, markers: Iterable[str]) -> ReviewResult:
+    markers = list(markers)
     result = parse_review_response(raw)
     if _has_non_json_review_issue(result):
         issues = list(result.issues)
@@ -81,6 +103,39 @@ def build_review_user_prompt(markdown: str, markers: Iterable[str], kind: str = 
 {marker_text}
 
 待检查 Markdown：
+```markdown
+{markdown}
+```
+"""
+
+
+def build_quality_repair_user_prompt(
+    markdown: str,
+    markers: Iterable[str],
+    quality_warnings: Iterable[str],
+    kind: str = "paper",
+) -> str:
+    marker_text = "\n".join(f"- {marker}" for marker in markers) or "- 无"
+    warning_text = "\n".join(f"- {warning}" for warning in quality_warnings) or "- 无"
+    return rf"""请修复下面这份 MaxRead {'论文' if kind == 'paper' else '网页文章'} Markdown 的发布前质检错误。
+
+硬约束：
+- 输出完整文档，不要只输出修改片段。
+- 只输出 JSON，格式为 {{"markdown":"修复后的完整 Markdown", "issues":[]}}；不要代码围栏、解释或额外字段。
+- 不得新增原文或给定材料没有的事实、数字、结论。
+- 原稿中已经出现的图片 marker 必须逐字保留并独立成行；不要把图片集中到文末，也不要凭空新增候选 marker。
+- 保持 H1、TL;DR、章节、表格、列表、公式和图注内容；只修复下面列出的结构/格式问题。
+- 公式必须保持为 <latex>...</latex>。不要改动没有报错的公式；如果质检明确指出公式内有不支持的宏、HTML/CJK 混入或非法格式命令，只做等价的最小修复。
+- 修复公式时不得改变变量、上下标、运算关系或数值；不确定等价写法时保持原文，并在 issues 中说明风险。
+- 如果问题已经修好，issues 必须为空数组。
+
+本轮确定性质检错误：
+{warning_text}
+
+允许保留的图片 marker：
+{marker_text}
+
+待修复 Markdown：
 ```markdown
 {markdown}
 ```

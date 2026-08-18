@@ -140,7 +140,7 @@ def test_polish_markdown_removes_escaped_html_inside_formula_in_one_pass():
     assert "&lt;br" not in out
     assert "<br" not in out
     assert "</p>" not in out
-    assert r"<latex>x   y  </latex>" in out
+    assert r"<latex>x   y</latex>" in out
 
 
 def test_polish_markdown_flattens_backticked_and_nested_latex_wrappers():
@@ -538,6 +538,51 @@ def test_prepare_key_figures_prefers_main_text_figures_over_appendix(tmp_path):
     figures = prepare_key_figures(bundle, max_figures=2)
 
     assert [path.name for path, _caption in figures] == ["introfig.png", "fig1.png"]
+
+
+def test_markdown_to_docx_xml_keeps_structure_after_leading_inline_formula():
+    markdown = """# T
+
+<latex>\\Omega</latex> excludes the prefix.
+
+### 3.4 World state
+
+Details.
+
+| Metric | Value |
+| --- | ---: |
+| Score | 1 |
+
+[MaxReadFigure:1:framework]
+"""
+
+    xml = markdown_to_docx_xml(markdown)
+
+    assert "<h3>3.4 World state</h3>" in xml
+    assert "<table>" in xml
+    assert "<p>[MaxReadFigure:1:framework]</p>" in xml
+    assert "<br/>### 3.4" not in xml
+
+
+def test_prepare_key_figures_prioritizes_training_and_inference_schematics(tmp_path):
+    from PIL import Image
+
+    source_dir = tmp_path / "source"
+    (source_dir / "fig").mkdir(parents=True)
+    figures = []
+    for index, name in enumerate(("result_a", "result_b", "result_c", "teacher_training", "inference")):
+        path = source_dir / "fig" / f"{name}.png"
+        Image.new("RGB", (160, 100), "white").save(path)
+        caption = {
+            "teacher_training": "A schematic of the sparse-attention teacher backbone and student training stages.",
+            "inference": "The inference pipeline reads a world state bank and runs coarse-to-fine generation.",
+        }.get(name, f"Experiment result {index}.")
+        figures.append(PaperFigure(asset=f"fig/{name}.png", caption=caption, tex_file="method.tex", figure_index=index))
+    bundle = _bundle(source_dir=source_dir, source_figures=figures)
+
+    rendered = prepare_key_figures(bundle, max_figures=2)
+
+    assert {path.name for path, _caption in rendered} == {"teacher_training.png", "inference.png"}
 
 def test_remove_false_material_warning_when_source_has_tables():
     bundle = _bundle(source_tables=["table"])

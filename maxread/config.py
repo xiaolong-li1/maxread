@@ -34,6 +34,7 @@ class Settings:
     openai_timeout: int
     openai_reasoning_effort: str
     openai_review_reasoning_effort: str
+    quality_repair_rounds: int
     require_source: bool
     batch_workers: int
     batch_llm_concurrency: int
@@ -50,6 +51,7 @@ class Settings:
     visual_qa_timeout: int
     visual_qa_max_sections: int
     visual_qa_max_repairs: int
+    visual_qa_repair_rounds: int
     duty_timezone: str
     duty_chat_id: str
     duty_hour: int
@@ -81,6 +83,7 @@ class Settings:
             openai_timeout=int(os.environ.get("MAXREAD_OPENAI_TIMEOUT", "180")),
             openai_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REASONING_EFFORT", "high"),
             openai_review_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REVIEW_REASONING_EFFORT", "low"),
+            quality_repair_rounds=max(0, int(os.environ.get("MAXREAD_QUALITY_REPAIR_ROUNDS", "3"))),
             require_source=os.environ.get("MAXREAD_REQUIRE_SOURCE", "true").lower() in {"1", "true", "yes", "on"},
             batch_workers=int(os.environ.get("MAXREAD_BATCH_WORKERS", "3")),
             batch_llm_concurrency=int(os.environ.get("MAXREAD_LLM_CONCURRENCY", "2")),
@@ -103,6 +106,7 @@ class Settings:
             visual_qa_timeout=int(os.environ.get("MAXREAD_VISUAL_QA_TIMEOUT", "90")),
             visual_qa_max_sections=int(os.environ.get("MAXREAD_VISUAL_QA_MAX_SECTIONS", "12")),
             visual_qa_max_repairs=int(os.environ.get("MAXREAD_VISUAL_QA_MAX_REPAIRS", "2")),
+            visual_qa_repair_rounds=max(0, int(os.environ.get("MAXREAD_VISUAL_QA_REPAIR_ROUNDS", "3"))),
             duty_timezone=os.environ.get("MAXREAD_DUTY_TIMEZONE", "Asia/Shanghai"),
             duty_chat_id=os.environ.get("MAXREAD_DUTY_CHAT_ID", "").strip(),
             duty_hour=int(os.environ.get("MAXREAD_DUTY_HOUR", "7")),

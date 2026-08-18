@@ -12,7 +12,7 @@ from .arxiv import ArxivClient, extract_arxiv_refs
 from .article_pipeline import ArticlePipeline
 from .config import Settings
 from .db import Store
-from .feedback import is_feedback_text as _is_feedback_text
+from .feedback import classify_feedback_text, is_feedback_text as _is_feedback_text
 from .feishu import FeishuClient, parse_event
 from .help import group_intro_message, intro_message, plain_message_text, should_send_intro
 from .job_queue import QueueManager, enqueue_event_items, run_worker_forever
@@ -117,7 +117,10 @@ def main(argv: List[str] | None = None) -> int:
     web = WebArticleClient(settings.workdir, timeout=settings.arxiv_timeout)
     feishu = FeishuClient(settings.lark_cli, settings.feishu_as)
     llm = None if getattr(args, "no_openai", False) else _maybe_llm(settings)
-    visual_qa = VisualQAController.from_settings(settings)
+    feedback_llm = None
+    if args.cmd in {"listen", "handle-event"} and not getattr(args, "no_openai", False):
+        feedback_llm = _maybe_llm(settings, timeout=min(settings.openai_timeout, 20), reasoning_effort="minimal")
+    visual_qa = VisualQAController.from_settings(settings, llm=llm)
     pipeline = MaxReadPipeline(
         store,
         arxiv,
@@ -126,6 +129,7 @@ def main(argv: List[str] | None = None) -> int:
         require_source=settings.require_source,
         review_reasoning_effort=settings.openai_review_reasoning_effort,
         visual_qa=visual_qa,
+        quality_repair_rounds=settings.quality_repair_rounds,
     )
     article_pipeline = ArticlePipeline(
         store,
@@ -134,6 +138,7 @@ def main(argv: List[str] | None = None) -> int:
         llm,
         review_reasoning_effort=settings.openai_review_reasoning_effort,
         visual_qa=visual_qa,
+        quality_repair_rounds=settings.quality_repair_rounds,
     )
 
     if args.cmd == "import-source":
@@ -158,7 +163,7 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.cmd == "handle-event":
         event = parse_event(json.loads(sys.stdin.read()))
-        _handle_event(pipeline, article_pipeline, event)
+        _handle_event(pipeline, article_pipeline, event, feedback_llm)
         return 0
 
     if args.cmd == "usage":
@@ -214,26 +219,26 @@ def main(argv: List[str] | None = None) -> int:
         manager = QueueManager(settings, no_openai=getattr(args, "no_openai", False))
         manager.start_background_workers()
         for event in feishu.event_stream():
-            _handle_event(pipeline, article_pipeline, event)
+            _handle_event(pipeline, article_pipeline, event, feedback_llm)
         return 0
 
     return 2
 
 
-def _maybe_llm(settings: Settings) -> OpenAIClient | None:
+def _maybe_llm(settings: Settings, timeout: int | None = None, reasoning_effort: str | None = None) -> OpenAIClient | None:
     if not settings.openai_api_key:
         return None
     return OpenAIClient(
         settings.openai_api_key,
         settings.model,
-        timeout=settings.openai_timeout,
+        timeout=timeout or settings.openai_timeout,
         base_url=settings.openai_base_url,
         sub_module=settings.openai_sub_module,
-        reasoning_effort=settings.openai_reasoning_effort,
+        reasoning_effort=reasoning_effort or settings.openai_reasoning_effort,
     )
 
 
-def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, event) -> None:
+def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, event, feedback_llm=None) -> None:
     settings = Settings.load(Path.cwd())
     store = pipeline.store
 
@@ -248,10 +253,10 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
 
     if not refs and not web_refs:
         if _is_private_chat(event):
+            if _record_feedback(store, article_pipeline.feishu, event, feedback_llm):
+                return
             if should_send_intro(event.content):
                 _reply_intro(article_pipeline.feishu, event, settings.feedback_url)
-            else:
-                _record_feedback(store, article_pipeline.feishu, event)
         elif getattr(event, "mentioned_bot", False):
             _reply_group_intro(article_pipeline.feishu, event)
         return
@@ -330,16 +335,30 @@ def _attach_user_names(settings: Settings, rows):
     return rows
 
 
-def _record_feedback(store: Store, feishu: FeishuClient, event) -> None:
+def _record_feedback(store: Store, feishu: FeishuClient, event, feedback_llm=None) -> bool:
     text = plain_message_text(str(event.content or "")).strip()
-    if not text or not _is_feedback_text(text):
-        return
-    feedback_id = store.add_feedback(event.event_id, event.message_id, event.chat_id, event.chat_type, event.sender_id, text)
+    if not text:
+        return False
+    decision = classify_feedback_text(feedback_llm, text)
+    if not decision.is_feedback:
+        return False
+    feedback_id = store.add_feedback(
+        event.event_id,
+        event.message_id,
+        event.chat_id,
+        event.chat_type,
+        event.sender_id,
+        text,
+        source=decision.source,
+        category=decision.category,
+        confidence=decision.confidence,
+    )
     key = sha256(f"feedback:{event.event_id}:{feedback_id}".encode("utf-8")).hexdigest()[:32]
     try:
         feishu.reply_text(event.message_id, f"收到，我先记下这条反馈了（#{feedback_id}）。", idempotency_key=key, reply_in_thread=False)
     except Exception:
         pass
+    return True
 
 
 if __name__ == "__main__":

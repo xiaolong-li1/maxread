@@ -4,11 +4,13 @@ import html
 import json
 import re
 import shlex
+import socket
 import subprocess
 import threading
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 from .render import _is_valid_latex_body, _normalize_latex_body, _strip_latex_for_text
@@ -64,6 +66,51 @@ class VisualRepairResult:
     warnings: List[str] = field(default_factory=list)
     repaired_blocks: List[str] = field(default_factory=list)
     remote: Optional[RemoteVisualResult] = None
+    rounds: List["VisualRepairRound"] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return self.remote is None or bool(not self.remote.error and not self.remote.findings)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "changed": self.changed,
+            "warnings": list(self.warnings),
+            "repaired_blocks": list(self.repaired_blocks),
+            "remote": _remote_to_dict(self.remote) if self.remote else None,
+            "rounds": [item.to_dict() for item in self.rounds],
+        }
+
+
+@dataclass
+class VisualRepairRound:
+    round_index: int
+    status: str
+    findings: List[Dict[str, Any]] = field(default_factory=list)
+    screenshots: List[str] = field(default_factory=list)
+    repair_strategy: str = ""
+    changed: bool = False
+    repaired_blocks: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    model_used: bool = False
+    model_response: str = ""
+    error: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "round": self.round_index,
+            "status": self.status,
+            "findings": list(self.findings),
+            "screenshots": list(self.screenshots),
+            "repair_strategy": self.repair_strategy,
+            "changed": self.changed,
+            "repaired_blocks": list(self.repaired_blocks),
+            "warnings": list(self.warnings),
+            "model_used": self.model_used,
+            "model_response": self.model_response,
+            "error": self.error,
+        }
 
 
 _QA_LOCK = threading.BoundedSemaphore(1)
@@ -73,7 +120,7 @@ _FORMULA_RE = re.compile(r"<latex>(.*?)</latex>", flags=re.S | re.I)
 
 
 class VisualQAController:
-    """Run remote browser QA and apply only deterministic, bounded repairs."""
+    """Run screenshot QA, repair the published document, and verify the repair."""
 
     def __init__(
         self,
@@ -84,6 +131,9 @@ class VisualQAController:
         timeout: int = 90,
         max_sections: int = 12,
         max_repairs: int = 2,
+        repair_rounds: int = 3,
+        llm=None,
+        reasoning_effort: str = "high",
     ):
         self.enabled = bool(enabled)
         self.host = str(host or "ziplab-5090")
@@ -92,9 +142,12 @@ class VisualQAController:
         self.timeout = max(15, int(timeout or 90))
         self.max_sections = max(1, int(max_sections or 12))
         self.max_repairs = max(0, int(max_repairs or 2))
+        self.repair_rounds = max(0, int(repair_rounds if repair_rounds is not None else 3))
+        self.llm = llm
+        self.reasoning_effort = str(reasoning_effort or "high")
 
     @classmethod
-    def from_settings(cls, settings) -> "VisualQAController":
+    def from_settings(cls, settings, llm=None) -> "VisualQAController":
         return cls(
             enabled=getattr(settings, "visual_qa_enabled", False),
             host=getattr(settings, "visual_qa_host", "ziplab-5090"),
@@ -103,6 +156,9 @@ class VisualQAController:
             timeout=getattr(settings, "visual_qa_timeout", 90),
             max_sections=getattr(settings, "visual_qa_max_sections", 12),
             max_repairs=getattr(settings, "visual_qa_max_repairs", 2),
+            repair_rounds=getattr(settings, "visual_qa_repair_rounds", 3),
+            llm=llm,
+            reasoning_effort=getattr(settings, "openai_reasoning_effort", "high"),
         )
 
     def run(
@@ -111,6 +167,9 @@ class VisualQAController:
         doc_url: str,
         initial_warnings: Iterable[str] = (),
         source_id: str = "",
+        expected_image_min: int = 0,
+        expected_formula_min: int = 0,
+        expected_table_min: int = 0,
     ) -> VisualRepairResult:
         result = VisualRepairResult()
         initial = list(initial_warnings)
@@ -126,61 +185,100 @@ class VisualQAController:
         if not self.enabled:
             return result
 
-        remote = self.inspect_remote(doc_url, source_id=source_id)
-        result.remote = remote
-        if remote.error:
-            result.warnings.append(f"visual-qa:remote-error:{_clip(remote.error)}")
-            return result
-        structural_findings = [
-            finding for finding in remote.findings if finding.kind in {"invalid-formula", "raw-formatting"}
-        ]
-        if structural_findings and len(result.repaired_blocks) < self.max_repairs:
-            changed, structural_warnings, repaired = repair_structural_blocks(
-                feishu,
+        # A visual repair round always has the same shape: inspect the real
+        # document, make at most one bounded patch, then inspect again. Older
+        # code mixed the first and second pass, which left stale findings in
+        # the final warning list and made the configured retry count ineffective.
+        for round_index in range(self.repair_rounds + 1):
+            suffix = source_id if round_index == 0 else f"{source_id}-visual-r{round_index}"
+            remote = self.inspect_remote(
                 doc_url,
-                ["visual-qa:repairable-structural"],
-                max_repairs=self.max_repairs - len(result.repaired_blocks),
+                source_id=suffix,
+                expected_image_min=expected_image_min,
+                expected_formula_min=expected_formula_min,
+                expected_table_min=expected_table_min,
             )
-            result.warnings.extend(structural_warnings)
+            result.remote = remote
+            audit_round = VisualRepairRound(
+                round_index=round_index,
+                status=remote.status,
+                findings=[_finding_to_dict(item) for item in remote.findings],
+                screenshots=list(remote.screenshots),
+                error=remote.error,
+            )
+            result.rounds.append(audit_round)
+            if remote.error:
+                result.warnings.append(f"visual-qa:remote-error:{_clip(remote.error)}")
+                break
+            if not remote.findings:
+                audit_round.status = "passed"
+                break
+            if round_index >= self.repair_rounds:
+                result.warnings.extend(_finding_warning("visual-qa", finding) for finding in remote.findings)
+                break
+
+            changed, repair_warnings, repaired, strategy, model_response = self._repair_remote_findings(
+                feishu, doc_url, remote.findings
+            )
+            audit_round.repair_strategy = strategy
+            audit_round.changed = changed
+            audit_round.repaired_blocks = list(repaired)
+            audit_round.warnings = list(repair_warnings)
+            audit_round.model_used = bool(model_response)
+            audit_round.model_response = model_response
+            result.warnings.extend(
+                warning for warning in repair_warnings if warning.startswith("visual-repair:")
+            )
             if changed:
                 result.changed = True
                 result.repaired_blocks.extend(repaired)
-                remote = self.inspect_remote(doc_url, source_id=f"{source_id}-formula-recheck")
-                result.remote = remote
-                if remote.error:
-                    result.warnings.append(f"visual-qa:recheck-error:{_clip(remote.error)}")
-                    return result
-        result.warnings.extend(
-            _finding_warning("visual-qa", finding)
-            for finding in remote.findings
-        )
 
-        image_changed, image_warnings, image_blocks = repair_image_findings(
-            feishu,
-            doc_url,
-            remote.findings,
-            max_repairs=max(0, self.max_repairs - len(result.repaired_blocks)),
-        )
-        if image_changed:
-            result.changed = True
-            result.repaired_blocks.extend(image_blocks)
-            # A second browser pass is mandatory after a visual patch. This
-            # prevents reporting success based on the pre-patch screenshot.
-            second = self.inspect_remote(doc_url, source_id=f"{source_id}-recheck")
-            result.remote = second
-            if second.error:
-                result.warnings.append(f"visual-qa:recheck-error:{_clip(second.error)}")
-            elif second.findings:
-                result.warnings.extend(
-                    _finding_warning("visual-qa:recheck", finding)
-                    for finding in second.findings
-                )
-            else:
-                result.warnings.append("visual-qa:recheck:passed")
-        result.warnings.extend(image_warnings)
         return result
 
-    def inspect_remote(self, doc_url: str, source_id: str = "") -> RemoteVisualResult:
+    def _repair_remote_findings(
+        self,
+        feishu: VisualFeishuClient,
+        doc_url: str,
+        findings: List[VisualFinding],
+    ) -> tuple[bool, List[str], List[str], str, str]:
+        structural = [item for item in findings if item.kind in {"invalid-formula", "raw-formatting"}]
+        if structural:
+            changed, warnings, blocks = repair_structural_blocks(
+                feishu,
+                doc_url,
+                ["visual-qa:repairable-structural"],
+                max_repairs=self.max_repairs,
+            )
+            if changed:
+                return True, warnings, blocks, "deterministic-structural", ""
+            if self.llm is not None:
+                changed, warnings, blocks, raw = repair_formula_blocks_with_llm(
+                    self.llm,
+                    feishu,
+                    doc_url,
+                    findings,
+                    max_repairs=self.max_repairs,
+                    reasoning_effort=self.reasoning_effort,
+                )
+                return changed, warnings, blocks, "model-formula" if raw else "model-formula-unavailable", raw
+            return False, warnings, blocks, "deterministic-structural-no-change", ""
+
+        changed, warnings, blocks = repair_image_findings(
+            feishu,
+            doc_url,
+            findings,
+            max_repairs=self.max_repairs,
+        )
+        return changed, warnings, blocks, "deterministic-image" if changed else "deterministic-image-no-change", ""
+
+    def inspect_remote(
+        self,
+        doc_url: str,
+        source_id: str = "",
+        expected_image_min: int = 0,
+        expected_formula_min: int = 0,
+        expected_table_min: int = 0,
+    ) -> RemoteVisualResult:
         if not self.enabled:
             return RemoteVisualResult(status="disabled")
         tag = _safe_tag(source_id or doc_url)
@@ -195,12 +293,21 @@ class VisualQAController:
                 shlex.quote(remote_dir),
                 "--max-sections",
                 str(self.max_sections),
+                "--expected-images",
+                str(max(0, int(expected_image_min or 0))),
+                "--expected-formulas",
+                str(max(0, int(expected_formula_min or 0))),
+                "--expected-tables",
+                str(max(0, int(expected_table_min or 0))),
             ]
         )
         try:
             with _QA_LOCK:
-                completed = subprocess.run(
-                    [
+                local_hosts = {"", "local", "localhost", "127.0.0.1", "::1", socket.gethostname().lower()}
+                if self.host.strip().lower() in local_hosts:
+                    argv = shlex.split(command)
+                else:
+                    argv = [
                         "ssh",
                         "-o",
                         "BatchMode=yes",
@@ -212,7 +319,9 @@ class VisualQAController:
                         "ServerAliveCountMax=1",
                         self.host,
                         command,
-                    ],
+                    ]
+                completed = subprocess.run(
+                    argv,
                     text=True,
                     capture_output=True,
                     timeout=self.timeout,
@@ -226,11 +335,14 @@ class VisualQAController:
         payload = _last_json_object(completed.stdout)
         if not payload:
             return RemoteVisualResult(status="error", error="remote runner returned no JSON")
+        screenshots = [str(item) for item in payload.get("screenshots", [])]
+        if str(payload.get("status") or "") == "ok" and not screenshots:
+            return RemoteVisualResult(status="error", error="remote runner returned no screenshots")
         findings = [VisualFinding.from_dict(item) for item in payload.get("findings", []) if isinstance(item, dict)]
         return RemoteVisualResult(
             status=str(payload.get("status") or "ok"),
             findings=findings,
-            screenshots=[str(item) for item in payload.get("screenshots", [])],
+            screenshots=screenshots,
             raw=payload,
         )
 
@@ -278,6 +390,220 @@ def repair_structural_blocks(
         except Exception as exc:
             audit.append(f"visual-repair:block-failed:{block_id}:{_clip(str(exc))}")
     return changed, audit, repaired_blocks
+
+
+_VISUAL_FORMULA_REPAIR_SYSTEM = """你是飞书文档的公式和格式字符修复器。你只负责修复浏览器截图已经确认的“无效公式”或直接显示出来的 TeX/Markdown 控制字符。
+
+只输出一个 JSON 对象，不要解释，不要代码围栏：
+{"repairs":[{"id":"已提供的 block id","mode":"latex|text|plain","value":"修复后的内容"}]}
+
+硬约束：
+1. 只能使用输入中出现的 block id；不确定就返回空 repairs。
+2. mode=latex 时 value 只能是公式体，不要包 <latex>，不得包含 HTML、中文、Markdown 或美元符号。
+3. mode=text 时把公式降级为短文本/代码，只有原内容明显是代码或无法保持数学含义时才使用。
+4. mode=plain 只用于 KIND=raw 的正文 block，返回去掉控制命令后的可读纯文本，不要返回 Markdown、TeX 或 HTML。
+5. 不改变变量、上下标、数值、运算关系和语义；只修复不支持的宏、粘连命令、HTML/CJK 混入或非法转义。
+6. 不要返回 XML，不要修改未发现问题的 block。
+"""
+
+
+def repair_formula_blocks_with_llm(
+    llm,
+    feishu: VisualFeishuClient,
+    doc_url: str,
+    findings: Iterable[VisualFinding],
+    max_repairs: int = 2,
+    reasoning_effort: str = "high",
+) -> tuple[bool, List[str], List[str], str]:
+    """Use the model only after deterministic XML repair made no progress.
+
+    The model returns formula bodies keyed by fresh Feishu block IDs. We still
+    validate the IDs and the resulting LaTeX locally before touching the doc.
+    This keeps model output from becoming arbitrary document XML.
+    """
+    if max_repairs <= 0 or not hasattr(feishu, "block_replace"):
+        return False, [], [], ""
+    findings = list(findings)
+    try:
+        content = _fetch_xml(feishu, doc_url)
+        root = ET.fromstring(f"<root>{content}</root>")
+    except Exception as exc:
+        return False, [f"visual-repair:model-fetch-failed:{_clip(str(exc))}"], [], ""
+
+    candidates = _structural_block_candidates(root, max_candidates=max(64, max_repairs * 16))
+    if not candidates:
+        return False, ["visual-repair:model-no-structural-block"], [], ""
+    hinted_ids = _finding_block_ids(findings)
+    if hinted_ids:
+        candidates.sort(key=lambda item: (item["id"] not in hinted_ids, item["id"]))
+    candidate_by_id = {item["id"]: item for item in candidates}
+    finding_text = "\n".join(
+        f"- {finding.kind}: {finding.detail} [section={finding.section}] "
+        f"[dom={json.dumps(finding.data, ensure_ascii=False)}]"
+        for finding in findings
+        if finding.kind in {"invalid-formula", "raw-formatting"}
+    ) or "- 浏览器发现公式或格式控制字符无法正常渲染"
+    formula_text = "\n".join(
+        f"BLOCK id={item['id']}\nKIND={item['kind']}\nFORMULA={item['formula']}\nCONTEXT={item['context']}"
+        for item in candidates
+    )
+    user = f"""浏览器截图质检发现以下问题：
+{finding_text}
+
+下面是当前文档中可疑的公式 block。只修复确实相关的 block：
+{formula_text}
+"""
+
+    raw = ""
+    try:
+        screenshot = next(
+            (Path(finding.screenshot) for finding in findings if finding.screenshot and Path(finding.screenshot).exists()),
+            None,
+        )
+        if screenshot is not None and hasattr(llm, "responses_image_text"):
+            raw = llm.responses_image_text(_VISUAL_FORMULA_REPAIR_SYSTEM, user, screenshot)
+        else:
+            raw = llm.responses_text(
+                _VISUAL_FORMULA_REPAIR_SYSTEM,
+                user,
+                reasoning_effort=reasoning_effort,
+            )
+    except Exception as exc:
+        return False, [f"visual-repair:model-call-failed:{_clip(str(exc))}"], [], ""
+
+    payload = _parse_model_json(raw)
+    if not isinstance(payload, dict):
+        return False, ["visual-repair:model-invalid-json"], [], raw[:20000]
+    repairs = payload.get("repairs")
+    if not isinstance(repairs, list):
+        return False, ["visual-repair:model-invalid-schema"], [], raw[:20000]
+
+    changed = False
+    warnings: List[str] = []
+    repaired_blocks: List[str] = []
+    for item in repairs[:max_repairs]:
+        if not isinstance(item, dict):
+            continue
+        block_id = str(item.get("id") or "")
+        candidate = candidate_by_id.get(block_id)
+        if candidate is None:
+            warnings.append(f"visual-repair:model-unknown-block:{_clip(block_id)}")
+            continue
+        mode = str(item.get("mode") or "latex").strip().lower()
+        value = html.unescape(str(item.get("value") or "")).strip()
+        value = re.sub(r"</?latex[^>]*>", "", value, flags=re.I).strip()
+        if mode == "plain" and candidate["kind"] == "raw":
+            plain = re.sub(r"<[^>]+>", "", value)
+            plain = " ".join(plain.split())
+            if not plain or _raw_block_has_formatting_artifact(plain):
+                warnings.append(f"visual-repair:model-invalid-plain:{block_id}")
+                continue
+            replacement = _plain_block_xml(candidate, plain)
+        elif mode == "text" and candidate["kind"] == "formula":
+            replacement = re.sub(
+                _FORMULA_RE,
+                lambda _match: f"<code>{html.escape(_strip_latex_for_text(value), quote=False)}</code>",
+                candidate["xml"],
+                count=1,
+            )
+        elif mode == "latex" and candidate["kind"] == "formula":
+            body = _normalize_latex_body(value)
+            if not _is_valid_latex_body(body):
+                warnings.append(f"visual-repair:model-invalid-latex:{block_id}")
+                continue
+            replacement = re.sub(
+                _FORMULA_RE,
+                lambda _match: f"<latex>{html.escape(body, quote=False)}</latex>",
+                candidate["xml"],
+                count=1,
+            )
+        else:
+            warnings.append(f"visual-repair:model-invalid-mode:{block_id}")
+            continue
+        if replacement == candidate["xml"]:
+            continue
+        replacement = re.sub(r'\s+id="[^"]+"', "", replacement, count=1)
+        try:
+            feishu.block_replace(doc_url, block_id, replacement)
+            changed = True
+            repaired_blocks.append(block_id)
+            warnings.append(f"visual-repair:model-block:{block_id}")
+        except Exception as exc:
+            warnings.append(f"visual-repair:model-block-failed:{block_id}:{_clip(str(exc))}")
+    if not changed and not warnings:
+        warnings.append("visual-repair:model-no-change")
+    return changed, warnings, repaired_blocks, raw[:20000]
+
+
+def _structural_block_candidates(root: ET.Element, max_candidates: int = 24) -> List[Dict[str, str]]:
+    candidates: List[Dict[str, str]] = []
+    for element in root.iter():
+        block_id = str(element.attrib.get("id") or "")
+        if not block_id or element.tag.lower() not in _BLOCK_TAGS:
+            continue
+        if any(child.tag.lower() in _RESOURCE_TAGS for child in element.iter() if child is not element):
+            continue
+        serialized = ET.tostring(element, encoding="unicode", short_empty_elements=True)
+        match = _FORMULA_RE.search(serialized)
+        context = " ".join(str(text or "") for text in element.itertext())
+        kind = "formula" if match else "raw"
+        if not match and not _raw_block_has_formatting_artifact(context):
+            continue
+        formula = html.unescape(match.group(1)) if match else ""
+        formula = re.sub(r"<[^>]+>", " ", formula)
+        attrs = " ".join(
+            f'{key}="{html.escape(str(value), quote=True)}"'
+            for key, value in element.attrib.items()
+            if key != "id"
+        )
+        candidates.append(
+            {
+                "id": block_id,
+                "kind": kind,
+                "formula": _clip(formula, 600),
+                "context": _clip(context, 360),
+                "xml": serialized,
+                "tag": element.tag,
+                "attrs": attrs,
+            }
+        )
+        if len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
+def _raw_block_has_formatting_artifact(text: str) -> bool:
+    value = html.unescape(str(text or ""))
+    return bool(
+        re.search(
+            r"\\(?:textbf|textit|textsc|mathrm|operatorname|mathbf|mathcal)(?:\b|(?=[A-Z]))"
+            r"|(?<!\\)\$\$|\\\(|\\\)|\\\[|\\\]"
+            r"|^\s*\|\s*[-:]+(?:\s*\|\s*[-:]+)+\s*\|?\s*$",
+            value,
+            flags=re.M,
+        )
+    )
+
+
+def _plain_block_xml(candidate: Dict[str, str], value: str) -> str:
+    tag = candidate.get("tag") or "p"
+    attrs = candidate.get("attrs") or ""
+    suffix = f" {attrs}" if attrs else ""
+    return f"<{tag}{suffix}>{html.escape(value, quote=False)}</{tag}>"
+
+
+def _finding_block_ids(findings: Iterable[VisualFinding]) -> set[str]:
+    output: set[str] = set()
+    for finding in findings:
+        if finding.block_id:
+            output.add(finding.block_id)
+        contexts = finding.data.get("contexts") if isinstance(finding.data, dict) else None
+        if not isinstance(contexts, list):
+            continue
+        for item in contexts:
+            if isinstance(item, dict) and item.get("block_id"):
+                output.add(str(item["block_id"]))
+    return output
 
 
 def repair_image_findings(
@@ -421,6 +747,49 @@ def _fetch_xml(feishu: VisualFeishuClient, doc_url: str) -> str:
     payload = feishu.fetch_docx(doc_url, doc_format="xml", detail="with-ids")
     document = payload.get("data", {}).get("document", {}) if isinstance(payload, dict) else {}
     return str(document.get("content") or "") if isinstance(document, dict) else ""
+
+
+def _finding_to_dict(finding: VisualFinding) -> Dict[str, Any]:
+    return {
+        "kind": finding.kind,
+        "severity": finding.severity,
+        "detail": finding.detail,
+        "section": finding.section,
+        "image_name": finding.image_name,
+        "block_id": finding.block_id,
+        "screenshot": finding.screenshot,
+        "autofixable": finding.autofixable,
+        "data": dict(finding.data),
+    }
+
+
+def _remote_to_dict(remote: RemoteVisualResult) -> Dict[str, Any]:
+    return {
+        "status": remote.status,
+        "findings": [_finding_to_dict(item) for item in remote.findings],
+        "screenshots": list(remote.screenshots),
+        "raw": dict(remote.raw),
+        "error": remote.error,
+    }
+
+
+def _parse_model_json(text: str) -> Dict[str, Any]:
+    stripped = str(text or "").strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", stripped, flags=re.I | re.S).strip()
+    candidates = [stripped]
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(stripped[start : end + 1])
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
 
 
 def _last_json_object(stdout: str) -> Dict[str, Any]:

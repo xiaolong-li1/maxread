@@ -83,7 +83,8 @@ class BatchProcessor:
                     llm,
                     require_source=self.settings.require_source,
                     review_reasoning_effort=self.settings.openai_review_reasoning_effort,
-                    visual_qa=VisualQAController.from_settings(self.settings),
+                    visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
+                    quality_repair_rounds=self.settings.quality_repair_rounds,
                 )
                 result = pipeline.process_ref(ref, send_progress=False)
                 return BatchItemResult(ref.paper_id, result.doc_url, result.error)
@@ -93,7 +94,8 @@ class BatchProcessor:
                 feishu,
                 llm,
                 review_reasoning_effort=self.settings.openai_review_reasoning_effort,
-                visual_qa=VisualQAController.from_settings(self.settings),
+                visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
+                quality_repair_rounds=self.settings.quality_repair_rounds,
             )
             result = pipeline.process_ref(ref, send_progress=False)
             return BatchItemResult(ref.url, result.doc_url, result.error)

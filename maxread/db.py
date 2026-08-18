@@ -84,6 +84,12 @@ class Store:
                 updated_at datetime not null default current_timestamp
             );
 
+            create table if not exists user_identity_cache (
+                sender_id text primary key,
+                display_name text not null default '',
+                updated_at datetime not null default current_timestamp
+            );
+
             create table if not exists feedback (
                 id integer primary key autoincrement,
                 event_id text not null default '',
@@ -93,6 +99,9 @@ class Store:
                 sender_id text not null default '',
                 content text not null default '',
                 status text not null default 'new',
+                feedback_source text not null default '',
+                feedback_category text not null default '',
+                feedback_confidence real not null default 0,
                 created_at datetime not null default current_timestamp
             );
 
@@ -214,6 +223,9 @@ class Store:
         self._ensure_column("queue_jobs", "heartbeat_at", "datetime")
         self._ensure_column("queue_jobs", "stage", "text not null default ''")
         self._ensure_column("queue_jobs", "stage_updated_at", "datetime")
+        self._ensure_column("feedback", "feedback_source", "text not null default ''")
+        self._ensure_column("feedback", "feedback_category", "text not null default ''")
+        self._ensure_column("feedback", "feedback_confidence", "real not null default 0")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in self.conn.execute(f"pragma table_info({table})").fetchall()}
@@ -309,13 +321,54 @@ class Store:
         )
         self.conn.commit()
 
-    def add_feedback(self, event_id: str, message_id: str, chat_id: str, chat_type: str, sender_id: str, content: str) -> int:
+    def get_user_names(self, sender_ids):
+        ids = sorted({str(sender_id) for sender_id in sender_ids if str(sender_id)})
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.conn.execute(
+            f"select sender_id, display_name from user_identity_cache where sender_id in ({placeholders})",
+            ids,
+        ).fetchall()
+        return {row["sender_id"]: row["display_name"] for row in rows if row["display_name"]}
+
+    def save_user_names(self, names) -> None:
+        clean = {
+            str(sender_id): str(display_name).strip()
+            for sender_id, display_name in names.items()
+            if str(sender_id).strip() and str(display_name).strip()
+        }
+        if not clean:
+            return
+        self.conn.executemany(
+            """
+            insert into user_identity_cache (sender_id, display_name)
+            values (?, ?)
+            on conflict(sender_id) do update set display_name = excluded.display_name,
+                updated_at = current_timestamp
+            """,
+            clean.items(),
+        )
+        self.conn.commit()
+
+    def add_feedback(
+        self,
+        event_id: str,
+        message_id: str,
+        chat_id: str,
+        chat_type: str,
+        sender_id: str,
+        content: str,
+        source: str = "",
+        category: str = "",
+        confidence: float = 0.0,
+    ) -> int:
         cur = self.conn.execute(
             """
-            insert into feedback (event_id, message_id, chat_id, chat_type, sender_id, content)
-            values (?, ?, ?, ?, ?, ?)
+            insert into feedback (event_id, message_id, chat_id, chat_type, sender_id, content, feedback_source, feedback_category, feedback_confidence)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (event_id, message_id, chat_id, chat_type, sender_id, content),
+            (event_id, message_id, chat_id, chat_type, sender_id, content, source, category, float(confidence)),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -328,7 +381,7 @@ class Store:
         if status:
             rows = self.conn.execute(
                 """
-                select id, event_id, message_id, chat_id, chat_type, sender_id, content, status, created_at
+                select id, event_id, message_id, chat_id, chat_type, sender_id, content, status, feedback_source, feedback_category, feedback_confidence, created_at
                 from feedback
                 where status = ?
                 order by id desc
@@ -339,7 +392,7 @@ class Store:
         else:
             rows = self.conn.execute(
                 """
-                select id, event_id, message_id, chat_id, chat_type, sender_id, content, status, created_at
+                select id, event_id, message_id, chat_id, chat_type, sender_id, content, status, feedback_source, feedback_category, feedback_confidence, created_at
                 from feedback
                 order by id desc
                 limit ?

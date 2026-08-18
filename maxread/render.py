@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .models import PaperBundle, PaperFigure
+from .formula_compiler import compile_formula_markup
 
 
 PREFERRED_FIGURE_NAMES = [
@@ -19,6 +20,10 @@ PREFERRED_FIGURE_NAMES = [
     "main",
     "framework",
     "overall",
+    "teacher_training",
+    "inference",
+    "world_state",
+    "sparse_attention",
     "blade",
     "workflow",
     "asav3",
@@ -46,6 +51,7 @@ def polish_markdown(
     latex_macros: Optional[Dict[str, str]] = None,
     latex_arg_macros: Optional[Dict[str, str]] = None,
 ) -> str:
+    markdown = compile_formula_markup(markdown).text
     markdown = _flatten_nested_latex_wrappers(markdown)
     markdown = _normalize_backticked_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _normalize_display_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
@@ -54,6 +60,7 @@ def polish_markdown(
     markdown = _replace_breaks_outside_latex(markdown)
     markdown = _expand_text_macros_outside_latex(markdown, custom_macros or {})
     markdown = _sanitize_visible_text_macros(markdown)
+    markdown = compile_formula_markup(markdown).text
     markdown = _flatten_nested_latex_wrappers(markdown)
     markdown = re.sub(r"\n{3,}", "\n\n", markdown)
     return markdown.strip() + "\n"
@@ -188,6 +195,9 @@ def markdown_to_docx_xml(
     latex_macros: Optional[Dict[str, str]] = None,
     latex_arg_macros: Optional[Dict[str, str]] = None,
 ) -> str:
+    # Keep this boundary defensive: repair scripts and older artifacts can call
+    # the XML renderer directly without going through polish_markdown().
+    markdown = compile_formula_markup(markdown).text
     markdown = _sanitize_latex_blocks(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _sanitize_visible_text_macros(markdown)
     markdown = re.sub(
@@ -320,21 +330,24 @@ def _is_priority_figure(path: Path, caption: str = "", visual_description: str =
     path_tokens = set(re.split(r"[^a-z0-9]+", path_text.replace("_", "-")))
     priority_path_tokens = {
         "introfig", "fig1", "arch", "architecture", "overview", "pipeline",
-        "workflow", "framework", "teaser", "overall", "method",
+        "workflow", "framework", "teaser", "overall", "method", "inference",
+        "teacher", "student", "world", "state",
     }
     priority_path_phrases = ("model_arch", "model-arch", "method_overview", "method-overview")
     has_priority_path = bool(path_tokens & priority_path_tokens) or any(phrase in path_text for phrase in priority_path_phrases)
-    metric_words = ("training", "pretrain", "loss", "perplexity", "ppl", "benchmark", "accuracy")
-    if any(word in evidence_text for word in metric_words):
-        return False
     evidence_keywords = (
         "architecture", "overview", "pipeline", "workflow", "framework",
         "model architecture", "method overview", "overall design", "block diagram",
+        "schematic", "sparse attention", "world state bank", "inference pipeline",
+        "teacher backbone", "student generator", "coarse-to-fine",
         "流程", "架构", "框架", "模块", "箭头", "输入", "输出",
     )
     if any(keyword in evidence_text for keyword in evidence_keywords):
         return True
-    return has_priority_path and not evidence_text
+    metric_words = ("pretrain loss", "training loss", "perplexity", "ppl", "benchmark", "accuracy")
+    if any(word in evidence_text for word in metric_words):
+        return False
+    return has_priority_path
 
 
 def _short_caption(caption: str, max_chars: int = 180) -> str:
@@ -434,7 +447,7 @@ def _normalize_display_math(
 def _markdown_blocks(markdown: str) -> List[str]:
     blocks: List[str] = []
     current: List[str] = []
-    latex_unclosed = False
+    latex_depth = 0
 
     def flush() -> None:
         if current:
@@ -453,17 +466,17 @@ def _markdown_blocks(markdown: str) -> List[str]:
 
     for line in markdown.splitlines():
         stripped = line.strip()
-        if latex_unclosed:
+        if latex_depth > 0:
             current.append(line.rstrip())
-            if re.search(r"</latex>\s*$", stripped, flags=re.I):
-                latex_unclosed = False
+            latex_depth += _latex_tag_delta(stripped)
+            latex_depth = max(0, latex_depth)
             continue
         if not stripped:
             flush()
             continue
-        if re.match(r"^<latex\b", stripped, flags=re.I) and not re.search(r"</latex>\s*$", stripped, flags=re.I):
+        if re.match(r"^<latex\b", stripped, flags=re.I):
             current.append(line.rstrip())
-            latex_unclosed = True
+            latex_depth = max(0, _latex_tag_delta(stripped))
             continue
         # Markdown producers often omit the blank line before a heading, table,
         # or list. Split those structural boundaries before XML conversion.
@@ -483,6 +496,12 @@ def _markdown_blocks(markdown: str) -> List[str]:
         current.append(line.rstrip())
     flush()
     return blocks
+
+
+def _latex_tag_delta(text: str) -> int:
+    openings = len(re.findall(r"<latex\b[^>]*>", text or "", flags=re.I))
+    closings = len(re.findall(r"</latex\s*>", text or "", flags=re.I))
+    return openings - closings
 
 
 def _is_latex_block(text: str) -> bool:
@@ -1553,6 +1572,8 @@ def _figure_rank(path: Path, figure: Optional[PaperFigure]) -> Tuple[int, int, s
         rank = 10
     if figure and not _is_appendix_asset(path, figure):
         rank = min(rank, 6 + min(max(int(figure.figure_index), 0), 20))
+    if _is_priority_figure(path, caption):
+        rank = min(rank, 3)
     for i, preferred in enumerate(PREFERRED_FIGURE_NAMES):
         if preferred in text or preferred in label or preferred in caption:
             preferred_rank = 2 + i
@@ -1662,9 +1683,12 @@ def _render_asset(path: Path, output_dir: Path) -> Optional[Path]:
 
 def _render_pdf_with_pymupdf(path: Path, out_png: Path) -> Optional[Path]:
     try:
-        import fitz  # type: ignore
+        import pymupdf as fitz  # type: ignore
     except Exception:
-        return None
+        try:
+            import fitz  # type: ignore
+        except Exception:
+            return None
     try:
         doc = fitz.open(str(path))
         if len(doc) < 1:

@@ -17,7 +17,8 @@ from .models import ArxivMetadata, FeishuEvent, PaperBundle, PaperRef
 from .openai_client import OpenAIClient
 from .prompts import FINAL_SYSTEM_PROMPT, build_final_user_prompt
 from .publishing import publish_marker_image
-from .quality import PrePublishQualityError, blocking_quality_warnings, paper_markdown_completeness_errors, pre_publish_quality_warnings, verify_published_docx
+from .quality import PrePublishQualityError, blocking_quality_warnings, paper_markdown_completeness_errors, verify_published_docx
+from .quality_repair import QualityRepairResult, repair_until_quality_passes
 from .repository import find_repository_url
 from .render import ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning
 from .review import review_markdown_with_report
@@ -51,6 +52,7 @@ class MaxReadPipeline:
         require_source: bool = True,
         review_reasoning_effort: str = "",
         visual_qa: Optional[VisualQAController] = None,
+        quality_repair_rounds: int = 3,
     ):
         self.store = store
         self.arxiv = arxiv
@@ -59,10 +61,17 @@ class MaxReadPipeline:
         self.require_source = require_source
         self.review_reasoning_effort = review_reasoning_effort
         self.visual_qa = visual_qa
+        self.quality_repair_rounds = max(0, int(quality_repair_rounds))
 
-    def process_ref(self, ref: PaperRef, event: Optional[FeishuEvent] = None, send_progress: bool = True) -> ProcessResult:
+    def process_ref(
+        self,
+        ref: PaperRef,
+        event: Optional[FeishuEvent] = None,
+        send_progress: bool = True,
+        force: bool = False,
+    ) -> ProcessResult:
         record = self.store.get_paper(ref.paper_id)
-        if record and record.status == "done" and record.doc_url:
+        if not force and record and record.status == "done" and record.doc_url:
             if event and send_progress:
                 self._reply(event, f"哥，之前的文档在这里 {record.doc_url}", "cached", ref.paper_id)
             return ProcessResult(ref.paper_id, record.doc_url, cached=True)
@@ -121,10 +130,12 @@ class MaxReadPipeline:
                 if not self.llm:
                     raise RuntimeError("OPENAI_API_KEY not configured or --no-openai was used")
                 figures = prepare_key_figures(bundle)
+                _require_renderable_source_figures(bundle, figures)
                 figure_inserts = figure_placeholders(figures)
                 figure_visuals, figure_visual_warnings = _describe_figures_for_prompt(self.llm, figure_inserts)
                 macro_kwargs = _paper_macro_kwargs(bundle)
                 markers = [marker for marker, _path, _caption in figure_inserts]
+                repository_url = find_repository_url(bundle)
                 generation_run = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                 markdown = _generate_complete_paper_markdown(
                     self.llm,
@@ -137,7 +148,7 @@ class MaxReadPipeline:
                     ),
                 )
                 _write_paper_artifact(bundle, "01-generated.md", markdown)
-                markdown = _sanitize_repository_markdown(markdown, find_repository_url(bundle))
+                markdown = _sanitize_repository_markdown(markdown, repository_url)
                 markdown = polish_markdown(markdown, **macro_kwargs)
                 markdown = remove_false_material_warning(markdown, bundle)
                 markdown = ensure_priority_figure_markers(markdown, figure_inserts, visual_descriptions=figure_visuals)
@@ -155,34 +166,68 @@ class MaxReadPipeline:
                         review_warnings.append(f"review:{issue.category}:{issue.severity}:{issue.detail}")
                 except Exception as review_exc:
                     review_warnings.append(f"Review pass failed: {review_exc}")
-                markdown = polish_markdown(markdown, **macro_kwargs)
-                markdown = remove_false_material_warning(markdown, bundle)
-                markdown = ensure_priority_figure_markers(markdown, figure_inserts, visual_descriptions=figure_visuals)
-                markdown = ensure_referenced_figure_markers(markdown, figure_inserts, visual_descriptions=figure_visuals)
-                _write_paper_artifact(bundle, "05-final.md", markdown)
-                completeness_errors = paper_markdown_completeness_errors(markdown, markers)
-                if completeness_errors:
-                    raise IncompleteGenerationError(completeness_errors, attempts=0)
-                missing_markers = [marker for marker in markers if marker not in markdown]
-                publish_warnings = review_warnings + [f"missing-marker:{marker}" for marker in missing_markers]
-                xml = markdown_to_docx_xml(
+                def normalize_for_quality(candidate: str) -> str:
+                    candidate = _sanitize_repository_markdown(candidate, repository_url)
+                    candidate = polish_markdown(candidate, **macro_kwargs)
+                    candidate = remove_false_material_warning(candidate, bundle)
+                    candidate = ensure_priority_figure_markers(
+                        candidate,
+                        figure_inserts,
+                        visual_descriptions=figure_visuals,
+                    )
+                    return ensure_referenced_figure_markers(
+                        candidate,
+                        figure_inserts,
+                        visual_descriptions=figure_visuals,
+                    )
+
+                quality_result = repair_until_quality_passes(
+                    self.llm,
                     markdown,
-                    latex_macros=bundle.source_latex_macros,
-                    latex_arg_macros=bundle.source_latex_arg_macros,
+                    markers,
+                    render_xml=lambda candidate: markdown_to_docx_xml(
+                        candidate,
+                        latex_macros=bundle.source_latex_macros,
+                        latex_arg_macros=bundle.source_latex_arg_macros,
+                    ),
+                    normalize_markdown=normalize_for_quality,
+                    max_repair_rounds=self.quality_repair_rounds,
+                    kind="paper",
+                    reasoning_effort=self.review_reasoning_effort,
+                    completeness_check=lambda candidate: paper_markdown_completeness_errors(candidate, markers),
                 )
+                _write_quality_repair_artifacts(bundle, quality_result)
+                markdown = quality_result.markdown
+                xml = quality_result.xml
+                _write_paper_artifact(bundle, "05-final.md", markdown)
                 _write_paper_artifact(bundle, "06-document.xml", xml)
+                missing_markers = [marker for marker in markers if marker not in markdown]
+                publish_warnings = (
+                    review_warnings
+                    + quality_result.repair_warnings
+                    + [f"missing-marker:{marker}" for marker in missing_markers]
+                )
                 expected_image_count = sum(1 for marker in markers if marker in markdown)
                 expected_latex_count = xml.count("<latex>")
-                quality_warnings = pre_publish_quality_warnings(markdown, xml)
+                expected_table_count = xml.count("<table>")
                 _write_paper_artifact(
                     bundle,
                     "07-quality.json",
-                    json.dumps({"warnings": quality_warnings}, ensure_ascii=False, indent=2),
+                    json.dumps(
+                        {
+                            "passed": quality_result.passed,
+                            "warnings": quality_result.warnings,
+                            "blocking_warnings": quality_result.blocking_warnings,
+                            "repair_warnings": quality_result.repair_warnings,
+                            "rounds": len(quality_result.attempts) - 1,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
                 )
-                publish_warnings.extend(quality_warnings)
-                blocking_warnings = blocking_quality_warnings(quality_warnings)
-                if blocking_warnings:
-                    raise PrePublishQualityError("; ".join(blocking_warnings))
+                publish_warnings.extend(quality_result.warnings)
+                if quality_result.blocking_warnings:
+                    raise PrePublishQualityError("; ".join(quality_result.blocking_warnings))
             except PrePublishQualityError as exc:
                 message = f"论文已读完，但发布前格式质检未通过，未发布文档：{exc}"
                 _write_paper_artifact(bundle, "08-failure.txt", message)
@@ -223,6 +268,7 @@ class MaxReadPipeline:
                 expected_title=bundle.metadata.title or ref.paper_id,
                 expected_image_min=expected_image_count,
                 expected_latex_min=expected_latex_count,
+                expected_table_min=expected_table_count,
             )
             if self.visual_qa:
                 visual_result = self.visual_qa.run(
@@ -230,7 +276,11 @@ class MaxReadPipeline:
                     doc["url"],
                     initial_warnings=post_publish_warnings,
                     source_id=ref.paper_id,
+                    expected_image_min=expected_image_count,
+                    expected_formula_min=expected_latex_count,
+                    expected_table_min=expected_table_count,
                 )
+                _write_visual_qa_artifact(bundle, visual_result)
                 figure_warnings.extend(visual_result.warnings)
                 if visual_result.changed:
                     figure_warnings.extend(
@@ -239,7 +289,8 @@ class MaxReadPipeline:
                             doc["url"],
                             expected_title=bundle.metadata.title or ref.paper_id,
                             expected_image_min=expected_image_count,
-                            expected_latex_min=0,
+                            expected_latex_min=expected_latex_count,
+                            expected_table_min=expected_table_count,
                         )
                     )
                 else:
@@ -301,6 +352,11 @@ def _paper_macro_kwargs(bundle: PaperBundle) -> dict:
     }
 
 
+def _require_renderable_source_figures(bundle: PaperBundle, figures) -> None:
+    if bundle.source_figures and not figures:
+        raise PrePublishQualityError("quality:figure:source:high:no-renderable-source-figure")
+
+
 def _write_paper_artifact(bundle: PaperBundle, name: str, content: str) -> None:
     """Persist pipeline stages without making diagnostics part of the happy path."""
     candidates = [bundle.pdf_path, bundle.source_path]
@@ -349,6 +405,42 @@ def _write_generation_attempt(bundle: PaperBundle, run_id: str, attempt: int, ma
         bundle,
         f"01-{run_id}-attempt-{attempt}.json",
         json.dumps({"attempt": attempt, "errors": list(errors)}, ensure_ascii=False, indent=2),
+    )
+
+
+def _write_quality_repair_artifacts(bundle: PaperBundle, result: QualityRepairResult) -> None:
+    for attempt in result.attempts:
+        round_label = f"round-{attempt.round_index}"
+        _write_paper_artifact(bundle, f"05-quality-{round_label}.md", attempt.markdown)
+        _write_paper_artifact(bundle, f"06-quality-{round_label}.xml", attempt.xml)
+        _write_paper_artifact(
+            bundle,
+            f"07-quality-{round_label}.json",
+            json.dumps(
+                {
+                    "round": attempt.round_index,
+                    "warnings": attempt.warnings,
+                    "blocking_warnings": attempt.blocking_warnings,
+                    "repair_warnings": attempt.repair_warnings,
+                    "changed": attempt.changed,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+        if attempt.model_response:
+            _write_paper_artifact(
+                bundle,
+                f"05-quality-{round_label}-response.txt",
+                attempt.model_response,
+            )
+
+
+def _write_visual_qa_artifact(bundle: PaperBundle, result) -> None:
+    _write_paper_artifact(
+        bundle,
+        "09-visual-qa.json",
+        json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
     )
 
 

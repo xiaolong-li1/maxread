@@ -13,7 +13,7 @@ def test_blocking_quality_warnings_selects_high_severity_only():
         "quality:xml:xml:high:latex-downgraded-to-code",
         "post-publish:quality:formula:xml:high:joined-spacing-command",
         "quality:text:markdown:medium:source-truncated-marker",
-        "image-anchor-missing:figure.png:[marker]",
+        "image-caption-short:figure.png",
     ]
 
     assert blocking_quality_warnings(warnings) == warnings[:2]
@@ -27,7 +27,31 @@ def test_blocking_quality_warnings_includes_visual_high_severity():
         "visual-qa:remote-error:ssh unavailable",
     ]
 
-    assert blocking_quality_warnings(warnings) == warnings[:2]
+    assert blocking_quality_warnings(warnings) == warnings[:2] + [warnings[3]]
+
+
+def test_blocking_quality_warnings_includes_failed_image_publication():
+    warnings = [
+        "image-anchor-missing:framework.png:[MaxReadFigure:1:framework]",
+        "post-publish:marker-left-after-publish",
+        "image-anchor-missing:plot.png:[MaxReadFigure:2:plot]",
+    ]
+
+    assert blocking_quality_warnings(warnings) == warnings
+
+
+def test_quality_flags_markdown_structure_swallowed_inside_xml_paragraph():
+    xml = (
+        "<p><latex>\\Omega</latex> text<br/>### 3.4 Method<br/>"
+        "| Metric | Value |<br/>| --- | --- |<br/>"
+        "[MaxReadFigure:1:framework]</p>"
+    )
+
+    warnings = quality_warnings("", xml)
+
+    assert "quality:format:xml:high:markdown-heading-inside-paragraph" in warnings
+    assert "quality:format:xml:high:markdown-table-inside-paragraph" in warnings
+    assert "quality:format:xml:high:figure-marker-inside-paragraph" in warnings
 
 
 def test_paper_completeness_requires_all_sections_and_three_selected_figures():
@@ -114,6 +138,12 @@ def test_quality_formula_agent_blocks_nested_latex_tags():
     warnings = quality_warnings(r"<latex><latex>x+y</latex></latex>")
 
     assert "quality:formula:markdown:high:nested-latex-tag" in warnings
+
+
+def test_quality_formula_agent_blocks_unknown_html_from_compiler_frontend():
+    warnings = quality_warnings(r"<latex>x<span>y</span></latex>")
+
+    assert "quality:formula:markdown:high:unknown-html-in-formula" in warnings
 
 
 def test_quality_text_agent_flags_unresolved_placeholders_and_truncated_tails():

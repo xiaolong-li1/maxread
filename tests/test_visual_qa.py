@@ -29,9 +29,18 @@ class StubVisualQA(VisualQAController):
         self.results = list(results)
         self.calls = []
 
-    def inspect_remote(self, doc_url: str, source_id: str = "") -> RemoteVisualResult:
+    def inspect_remote(self, doc_url: str, source_id: str = "", **kwargs) -> RemoteVisualResult:
         self.calls.append(source_id)
         return self.results.pop(0)
+
+
+class FormulaRepairLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def responses_text(self, system, user, **kwargs):
+        self.calls += 1
+        return '{"repairs":[{"id":"formula","mode":"latex","value":"a=1\\\\text{ok}"}]}'
 
 
 def test_repair_structural_blocks_downgrades_code_like_formula():
@@ -127,8 +136,56 @@ def test_controller_rechecks_after_remote_structural_repair():
 
     assert result.changed is True
     assert result.repaired_blocks == ["caption"]
-    assert controller.calls == ["paper", "paper-formula-recheck"]
+    assert controller.calls == ["paper", "paper-visual-r1"]
     assert not any(warning.startswith("visual-qa:high:") for warning in result.warnings)
+
+
+def test_controller_retries_visual_repair_for_three_rounds_and_uses_final_pass():
+    feishu = FakeVisualFeishu('<title>T</title><p id="caption">\\textbfThe pipeline</p>')
+    controller = StubVisualQA(
+        [
+            RemoteVisualResult(
+                status="issues",
+                findings=[VisualFinding(kind="raw-formatting", severity="high", autofixable=True)],
+            ),
+            RemoteVisualResult(status="issues", findings=[VisualFinding(kind="invalid-formula", severity="high")]),
+            RemoteVisualResult(status="issues", findings=[VisualFinding(kind="invalid-formula", severity="high")]),
+            RemoteVisualResult(status="ok"),
+        ]
+    )
+
+    result = controller.run(feishu, "doc", source_id="paper")
+
+    assert result.passed is True
+    assert len(result.rounds) == 4
+    assert controller.calls == ["paper", "paper-visual-r1", "paper-visual-r2", "paper-visual-r3"]
+    assert result.rounds[-1].status == "passed"
+    assert result.rounds[0].changed is True
+    assert not any(warning.startswith("visual-qa:high:") for warning in result.warnings)
+
+
+def test_controller_uses_model_after_deterministic_formula_repair_makes_no_change():
+    feishu = FakeVisualFeishu('<title>T</title><p id="formula"><latex>\\unsupportedmacro{x}</latex></p>')
+    llm = FormulaRepairLLM()
+    controller = StubVisualQA(
+        [
+            RemoteVisualResult(
+                status="issues",
+                findings=[VisualFinding(kind="invalid-formula", severity="high", autofixable=True)],
+            ),
+            RemoteVisualResult(status="ok"),
+        ]
+    )
+    controller.llm = llm
+
+    result = controller.run(feishu, "doc", source_id="paper")
+
+    assert result.passed is True
+    assert llm.calls == 1
+    assert result.rounds[0].repair_strategy == "model-formula"
+    assert result.rounds[0].model_used is True
+    assert feishu.replacements[0][1] == "formula"
+    assert "<latex>a=1" in feishu.replacements[0][2]
 
 
 def test_last_json_object_ignores_ssh_banner():

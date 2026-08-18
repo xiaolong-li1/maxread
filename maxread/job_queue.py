@@ -140,9 +140,15 @@ class QueueManager:
                     llm,
                     require_source=self.settings.require_source,
                     review_reasoning_effort=self.settings.openai_review_reasoning_effort,
-                    visual_qa=VisualQAController.from_settings(self.settings),
+                    visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
+                    quality_repair_rounds=self.settings.quality_repair_rounds,
                 )
-                result = pipeline.process_ref(PaperRef(source_id, source_url), event=None, send_progress=False)
+                result = pipeline.process_ref(
+                    PaperRef(source_id, source_url),
+                    event=None,
+                    send_progress=False,
+                    force=int(job.get("attempts") or 0) > 1,
+                )
                 record = store.get_paper(source_id)
                 title = record.title if record else ""
             else:
@@ -152,7 +158,8 @@ class QueueManager:
                     feishu,
                     llm,
                     review_reasoning_effort=self.settings.openai_review_reasoning_effort,
-                    visual_qa=VisualQAController.from_settings(self.settings),
+                    visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
+                    quality_repair_rounds=self.settings.quality_repair_rounds,
                 )
                 result = pipeline.process_ref(WebRef(source_url), event=None, send_progress=False)
                 record = store.get_document(result.article_id)

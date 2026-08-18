@@ -105,7 +105,7 @@ The listener ignores ordinary messages with no supported input. It replies with 
 
 ## Quality Gates and Visual QA
 
-Before publishing, MaxRead sanitizes LaTeX/Markdown formatting, checks required paper sections and figure references, and blocks documents with high-severity formula or raw-formatting errors. After publishing, it fetches the document again for a post-publish quality check.
+Before publishing, MaxRead sanitizes LaTeX/Markdown formatting, checks required paper sections and figure references, and blocks documents with high-severity formula or raw-formatting errors. A blocked document is sent back to the review model with the exact quality findings and re-rendered; this repeats for `MAXREAD_QUALITY_REPAIR_ROUNDS` rounds (default `3`) before the job is marked failed. Every round's Markdown, XML, quality report, and model response is saved under `pipeline_artifacts`. After publishing, it fetches the document again for a post-publish quality check.
 
 An optional browser worker can inspect the published Feishu document for invalid formulas, leaked formatting commands, image overflow, excessive image whitespace, and blank sections. Enable it only when the coordinator can SSH to the worker host:
 
@@ -113,9 +113,10 @@ An optional browser worker can inspect the published Feishu document for invalid
 MAXREAD_VISUAL_QA_ENABLED=true
 MAXREAD_VISUAL_QA_HOST=ziplab-5090
 MAXREAD_VISUAL_QA_RUNNER=/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh
+MAXREAD_VISUAL_QA_REPAIR_ROUNDS=3
 ```
 
-The worker is read-only. Only bounded deterministic repairs are applied by MaxRead, and every repair is checked again. If MaxRead itself runs on `ziplab-5090`, keep this option disabled unless that machine has a working SSH alias back to itself.
+The worker is read-only. After publishing, MaxRead performs up to three inspect -> repair -> screenshot recheck cycles. Deterministic block repairs run first; if a formula still fails, the configured model may return a strictly validated block-level repair. Each visual round, screenshot path, finding, and model response is saved as `09-visual-qa.json`. If MaxRead itself runs on `ziplab-5090`, keep this option disabled unless that machine has a working SSH alias back to itself.
 
 ## Current Scope
 

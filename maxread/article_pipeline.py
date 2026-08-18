@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import traceback
 from dataclasses import dataclass
 from hashlib import sha256
@@ -13,7 +14,8 @@ from .feishu import FeishuClient
 from .models import ArticleBundle, FeishuEvent
 from .openai_client import OpenAIClient
 from .publishing import publish_marker_image
-from .quality import PrePublishQualityError, blocking_quality_warnings, pre_publish_quality_warnings, verify_published_docx
+from .quality import PrePublishQualityError, blocking_quality_warnings, verify_published_docx
+from .quality_repair import QualityRepairResult, repair_until_quality_passes
 from .render import markdown_to_docx_xml, polish_markdown
 from .review import review_markdown_with_report
 from .sources import WebRef
@@ -38,6 +40,7 @@ class ArticlePipeline:
         llm: Optional[OpenAIClient],
         review_reasoning_effort: str = "",
         visual_qa: Optional[VisualQAController] = None,
+        quality_repair_rounds: int = 3,
     ):
         self.store = store
         self.web = web
@@ -45,6 +48,7 @@ class ArticlePipeline:
         self.llm = llm
         self.review_reasoning_effort = review_reasoning_effort
         self.visual_qa = visual_qa
+        self.quality_repair_rounds = max(0, int(quality_repair_rounds))
 
     def process_ref(self, ref: WebRef, event: Optional[FeishuEvent] = None, send_progress: bool = True) -> ArticleProcessResult:
         article_id = sha256(ref.url.encode("utf-8")).hexdigest()[:16]
@@ -82,17 +86,31 @@ class ArticlePipeline:
                         review_warnings.append(f"review:{issue.category}:{issue.severity}:{issue.detail}")
                 except Exception as review_exc:
                     review_warnings.append(f"Review pass failed: {review_exc}")
-                markdown = polish_markdown(markdown)
+                quality_result = repair_until_quality_passes(
+                    self.llm,
+                    markdown,
+                    markers,
+                    render_xml=markdown_to_docx_xml,
+                    normalize_markdown=polish_markdown,
+                    max_repair_rounds=self.quality_repair_rounds,
+                    kind="article",
+                    reasoning_effort=self.review_reasoning_effort,
+                )
+                _write_article_quality_artifacts(image_inserts, quality_result)
+                markdown = quality_result.markdown
+                xml = quality_result.xml
                 missing_markers = [marker for marker in markers if marker not in markdown]
-                publish_warnings = review_warnings + [f"missing-marker:{marker}" for marker in missing_markers]
-                xml = markdown_to_docx_xml(markdown)
+                publish_warnings = (
+                    review_warnings
+                    + quality_result.repair_warnings
+                    + [f"missing-marker:{marker}" for marker in missing_markers]
+                )
                 expected_image_count = sum(1 for marker in markers if marker in markdown)
                 expected_latex_count = xml.count("<latex>")
-                quality_warnings = pre_publish_quality_warnings(markdown, xml)
-                publish_warnings.extend(quality_warnings)
-                blocking_warnings = blocking_quality_warnings(quality_warnings)
-                if blocking_warnings:
-                    raise PrePublishQualityError("; ".join(blocking_warnings))
+                expected_table_count = xml.count("<table>")
+                publish_warnings.extend(quality_result.warnings)
+                if quality_result.blocking_warnings:
+                    raise PrePublishQualityError("; ".join(quality_result.blocking_warnings))
             except PrePublishQualityError as exc:
                 message = f"文章已读完，但发布前格式质检未通过，未发布文档：{exc}"
                 self.store.upsert_document(article_id, "quality_failed", error=message)
@@ -124,6 +142,7 @@ class ArticlePipeline:
                 expected_title=bundle.title or ref.url,
                 expected_image_min=expected_image_count,
                 expected_latex_min=expected_latex_count,
+                expected_table_min=expected_table_count,
             )
             if self.visual_qa:
                 visual_result = self.visual_qa.run(
@@ -131,7 +150,11 @@ class ArticlePipeline:
                     doc["url"],
                     initial_warnings=post_publish_warnings,
                     source_id=article_id,
+                    expected_image_min=expected_image_count,
+                    expected_formula_min=expected_latex_count,
+                    expected_table_min=expected_table_count,
                 )
+                _write_article_visual_qa_artifact(image_inserts, visual_result)
                 warnings.extend(visual_result.warnings)
                 if visual_result.changed:
                     warnings.extend(
@@ -140,7 +163,8 @@ class ArticlePipeline:
                             doc["url"],
                             expected_title=bundle.title or ref.url,
                             expected_image_min=expected_image_count,
-                            expected_latex_min=0,
+                            expected_latex_min=expected_latex_count,
+                            expected_table_min=expected_table_count,
                         )
                     )
                 else:
@@ -215,6 +239,67 @@ def _replace_article_image_markers(text: str, image_inserts) -> str:
         return f"{marker}\n**图：{real_caption or fallback_caption}**"
 
     return __import__("re").sub(r"\[ArticleImage:(\d+)\]\s*(.*)", repl, text)
+
+
+def _write_article_quality_artifacts(image_inserts, result: QualityRepairResult) -> None:
+    image_paths = [Path(path) for _marker, path, _caption, _source_index in image_inserts if path]
+    if not image_paths:
+        return
+    root = image_paths[0].parent
+    if root.name in {"images", "rendered"}:
+        root = root.parent
+    try:
+        artifact_dir = root / "pipeline_artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        for attempt in result.attempts:
+            round_label = f"round-{attempt.round_index}"
+            _atomic_write(artifact_dir / f"05-quality-{round_label}.md", attempt.markdown)
+            _atomic_write(artifact_dir / f"06-quality-{round_label}.xml", attempt.xml)
+            _atomic_write(
+                artifact_dir / f"07-quality-{round_label}.json",
+                json.dumps(
+                    {
+                        "round": attempt.round_index,
+                        "warnings": attempt.warnings,
+                        "blocking_warnings": attempt.blocking_warnings,
+                        "repair_warnings": attempt.repair_warnings,
+                        "changed": attempt.changed,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+            if attempt.model_response:
+                _atomic_write(
+                    artifact_dir / f"05-quality-{round_label}-response.txt",
+                    attempt.model_response,
+                )
+    except Exception:
+        return
+
+
+def _write_article_visual_qa_artifact(image_inserts, result) -> None:
+    image_paths = [Path(path) for _marker, path, _caption, _source_index in image_inserts if path]
+    if not image_paths:
+        return
+    root = image_paths[0].parent
+    if root.name in {"images", "rendered"}:
+        root = root.parent
+    try:
+        artifact_dir = root / "pipeline_artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(
+            artifact_dir / "09-visual-qa.json",
+            json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
+        )
+    except Exception:
+        return
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(str(content or ""), encoding="utf-8")
+    temporary.replace(path)
 
 
 def _host(url: str) -> str:

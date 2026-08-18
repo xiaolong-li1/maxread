@@ -50,3 +50,28 @@ def test_attach_user_names_uses_contact_search():
 
     assert rows[0]['sender_name'] == '李晓龙'
     assert calls[0][0] == ['lark-cli', 'contact', '+search-user', '--as', 'user', '--user-ids', 'ou_1', '--format', 'json']
+
+
+def test_attach_user_names_persists_contact_mapping(tmp_path):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"data":{"users":[{"open_id":"ou_1","localized_name":"李晓龙"}]}}',
+        )
+
+    original_run = admin_server.subprocess.run
+    admin_server.subprocess.run = fake_run
+    store = Store(tmp_path / 'maxread.sqlite3')
+    try:
+        settings = SimpleNamespace(lark_cli='lark-cli')
+        _attach_user_names(settings, [{'sender_id': 'ou_1'}], store)
+        rows = _attach_user_names(settings, [{'sender_id': 'ou_1'}], store)
+    finally:
+        admin_server.subprocess.run = original_run
+        store.close()
+
+    assert rows[0]['sender_name'] == '李晓龙'
+    assert calls == [['lark-cli', 'contact', '+search-user', '--as', 'user', '--user-ids', 'ou_1', '--format', 'json']]

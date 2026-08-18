@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import subprocess
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +17,7 @@ from .review import visible_review_issues
 
 
 DEFAULT_LIMIT = 80
+CONTACT_LOOKUP_TIMEOUT_SECONDS = 5
 
 
 class AdminServer(ThreadingHTTPServer):
@@ -51,13 +53,13 @@ class AdminHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/usage":
             limit = _limit(parsed.query)
-            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_usage_events(limit))))
+            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_usage_events(limit), store)))
             return
         if parsed.path == "/api/feedback":
             query = parse_qs(parsed.query)
             limit = _limit(parsed.query)
             status = query.get("status", [""])[0]
-            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, visible_feedback_rows(store.list_feedback(limit, status)))))
+            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, visible_feedback_rows(store.list_feedback(limit, status)), store)))
             return
         if parsed.path == "/api/jobs":
             query = parse_qs(parsed.query)
@@ -125,7 +127,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_header("content-type", "text/html; charset=utf-8")
         self.send_header("content-length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._write_body(data)
 
     def _json_response(self, payload: Any) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -134,7 +136,19 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_header("cache-control", "no-store")
         self.send_header("content-length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._write_body(data)
+
+    def _write_body(self, data: bytes) -> None:
+        # The ZeroTier bridge can black-hole larger coalesced writes. Keep
+        # dashboard responses in small flushed segments without changing the
+        # host-wide interface MTU.
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        for offset in range(0, len(data), 1024):
+            self.wfile.write(data[offset : offset + 1024])
+            self.wfile.flush()
 
     def _error(self, status: HTTPStatus, message: str) -> None:
         data = json.dumps({"ok": False, "error": message}, ensure_ascii=False).encode("utf-8")
@@ -153,9 +167,15 @@ def _admin_summary(store: Store):
     return summary
 
 
-def _attach_user_names(settings: Settings, rows):
+def _attach_user_names(settings: Settings, rows, store=None):
     sender_ids = sorted({row.get("sender_id", "") for row in rows if row.get("sender_id", "")})
     if not sender_ids:
+        return rows
+    names = store.get_user_names(sender_ids) if store else {}
+    unresolved_ids = [sender_id for sender_id in sender_ids if sender_id not in names]
+    if not unresolved_ids:
+        for row in rows:
+            row["sender_name"] = names.get(row.get("sender_id", ""), "")
         return rows
     try:
         result = subprocess.run(
@@ -166,27 +186,39 @@ def _attach_user_names(settings: Settings, rows):
                 "--as",
                 "user",
                 "--user-ids",
-                ",".join(sender_ids),
+                ",".join(unresolved_ids),
                 "--format",
                 "json",
             ],
             text=True,
             capture_output=True,
             check=False,
-            timeout=20,
+            timeout=CONTACT_LOOKUP_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
-            return rows
+            raise RuntimeError(result.stderr.strip() or "contact lookup failed")
         payload = json.loads(result.stdout or "{}")
-        users = payload.get("data", {}).get("users", [])
-        names = {
-            user.get("open_id", ""): user.get("localized_name", "") or user.get("name", "")
-            for user in users
-        }
-        for row in rows:
-            row["sender_name"] = names.get(row.get("sender_id", ""), "")
+        data = payload.get("data", {})
+        users = data.get("users", []) or data.get("items", [])
+        resolved = {}
+        for user in users:
+            sender_id = user.get("open_id", "") or user.get("user_id", "")
+            display_name = (
+                user.get("localized_name", "")
+                or user.get("name", "")
+                or user.get("display_name", "")
+                or user.get("zh_name", "")
+                or user.get("en_name", "")
+            )
+            if sender_id and display_name:
+                resolved[sender_id] = display_name
+        names.update(resolved)
+        if store:
+            store.save_user_names(resolved)
     except Exception:
-        return rows
+        pass
+    for row in rows:
+        row["sender_name"] = names.get(row.get("sender_id", ""), "")
     return rows
 
 def _limit(query: str) -> int:
@@ -262,7 +294,7 @@ INDEX_HTML = r'''
     <header>
       <div>
         <h1>MaxRead 控制台</h1>
-        <div class="sub">查看使用记录、反馈、队列和 AI review 问题。默认只服务本机。</div>
+        <div class="sub">查看使用记录、反馈、队列和 AI review 问题。仅监听 5090 ZeroTier 内网地址。</div>
       </div>
       <div class="actions"><button class="primary" onclick="refreshAll()">刷新</button></div>
     </header>
@@ -321,13 +353,23 @@ function metric(label, value) { return `<div class="card metric"><div class="lab
 function kv(obj) { const keys = Object.keys(obj); if (!keys.length) return '<div class="empty">暂无数据</div>'; return keys.map(k => `<div style="display:flex;justify-content:space-between;border-bottom:1px dashed var(--soft);padding:8px 0"><span>${esc(k)}</span><b>${esc(obj[k])}</b></div>`).join(''); }
 
 async function renderUsage() {
-  const rows = await api('/api/usage?limit=120');
-  $('usage').innerHTML = table(['时间','用户','来源','状态','标题','文档'], rows.map(r => [r.created_at, userCell(r), `${r.source_kind}<br><span class="mono">${esc(r.source_id || r.source_url)}</span>`, pill(r.status), esc(r.title || r.error || ''), link(r.doc_url)]));
+  $('usage').innerHTML = '<div class="card empty">正在加载使用记录...</div>';
+  try {
+    const rows = await api('/api/usage?limit=120');
+    $('usage').innerHTML = table(['时间','用户','来源','状态','标题','文档'], rows.map(r => [r.created_at, userCell(r), `${r.source_kind}<br><span class="mono">${esc(r.source_id || r.source_url)}</span>`, pill(r.status), esc(r.title || r.error || ''), link(r.doc_url)]));
+  } catch (error) {
+    $('usage').innerHTML = '<div class="card empty">使用记录加载失败，请稍后刷新。</div>';
+  }
 }
 
 async function renderFeedback() {
   const rows = await api('/api/feedback?limit=160');
-  $('feedback').innerHTML = table(['时间','用户','状态','内容','操作'], rows.map(r => [r.created_at, userCell(r), pill(r.status), esc(r.content), feedbackActions(r)]));
+  $('feedback').innerHTML = table(['时间','用户','识别','状态','内容','操作'], rows.map(r => [r.created_at, userCell(r), feedbackOrigin(r), pill(r.status), esc(r.content), feedbackActions(r)]));
+}
+function feedbackOrigin(r) {
+  if (r.feedback_source === 'ai') return `AI · ${esc(r.feedback_category || 'other')}<br><span class="mono muted">${Number(r.feedback_confidence || 0).toFixed(2)}</span>`;
+  if (r.feedback_source === 'rule') return '规则';
+  return '<span class="muted">历史记录</span>';
 }
 function feedbackActions(r) {
   return `<select onchange="setFeedback(${r.id}, this.value)">
@@ -352,7 +394,7 @@ function table(headers, rows) {
   if (!rows.length) return '<div class="card empty">暂无数据</div>';
   return `<div class="card wide"><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
-function userCell(r) { const name = r.sender_name || ''; const id = r.sender_id || ''; return name ? `<strong>${esc(name)}</strong><br><span class="mono muted">${esc(id)}</span>` : `<span class="mono">${esc(id)}</span>`; }
+function userCell(r) { const name = r.sender_name || '未解析用户'; const id = r.sender_id || ''; return `<strong>${esc(name)}</strong><br><span class="mono muted">${esc(id)}</span>`; }
 function small(v) { return `<span class="mono">${esc(v)}</span>`; }
 refreshAll();
 </script>

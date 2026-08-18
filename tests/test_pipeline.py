@@ -1,8 +1,10 @@
+import json
 from pathlib import Path
 
 from maxread.db import Store
-from maxread.models import ArxivMetadata, PaperBundle, PaperRef
-from maxread.pipeline import MaxReadPipeline, _describe_figures_for_prompt, _generate_complete_paper_markdown, _sanitize_repository_markdown, _write_paper_artifact
+from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
+from maxread.pipeline import MaxReadPipeline, _describe_figures_for_prompt, _generate_complete_paper_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _write_paper_artifact
+from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 
 
@@ -121,6 +123,20 @@ class BadQualityLLM(FakeLLM):
         return body + r"\n\n公式：<latex>\newcommand{\RR}{\mathbb{R}} x\in\RR</latex>"
 
 
+class RepairingQualityLLM(BadQualityLLM):
+    def __init__(self):
+        self.repair_calls = 0
+
+    def responses_text(self, system, user, **kwargs):
+        if "本轮确定性质检错误" in user:
+            self.repair_calls += 1
+            return json.dumps(
+                {"markdown": FakeLLM().responses_text(system, user, **kwargs), "issues": []},
+                ensure_ascii=False,
+            )
+        return super().responses_text(system, user, **kwargs)
+
+
 class MissingH1LLM(FakeLLM):
     def responses_text(self, system, user, **kwargs):
         return super().responses_text(system, user, **kwargs).replace("# Fake Paper\n", "前置说明\n")
@@ -151,6 +167,11 @@ def test_pipeline_process_and_cache(tmp_path):
     assert second.doc_url == first.doc_url
     assert second.cached is True
     assert feishu.published == ["doc123"]
+
+    forced = pipeline.process_ref(ref, force=True)
+    assert forced.doc_url == first.doc_url
+    assert forced.cached is False
+    assert feishu.published == ["doc123", "doc123"]
     store.close()
 
 
@@ -233,6 +254,22 @@ def test_pipeline_classifies_pre_publish_gate_as_quality_failure(tmp_path):
     store.close()
 
 
+def test_pipeline_repairs_blocking_quality_errors_before_publishing(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    feishu = FakeFeishu()
+    llm = RepairingQualityLLM()
+    pipeline = MaxReadPipeline(store, FakeArxiv(), feishu, llm, require_source=True)
+
+    result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
+
+    assert result.error == ""
+    assert result.doc_url == "https://tenant.feishu.cn/docx/doc123"
+    assert llm.repair_calls == 1
+    assert feishu.published == ["doc123"]
+    assert store.get_paper("2604.12946").status == "done"
+    store.close()
+
+
 def test_write_paper_artifact_uses_paper_directory(tmp_path):
     bundle = FakeArxiv().fetch("2604.12946")
     paper_dir = tmp_path / "paper"
@@ -266,6 +303,20 @@ def test_describe_figures_for_prompt_uses_image_reader(tmp_path):
 
     assert warnings == []
     assert descriptions[marker] == "图中显示两个相连模块和一条从输入到输出的箭头。"
+
+
+def test_require_renderable_source_figures_blocks_silent_missing_images():
+    bundle = FakeArxiv().fetch("2604.12946")
+    bundle.source_figures = [PaperFigure(asset="figures/overview.pdf", caption="Method overview")]
+
+    try:
+        _require_renderable_source_figures(bundle, [])
+    except PrePublishQualityError as exc:
+        assert "no-renderable-source-figure" in str(exc)
+    else:
+        raise AssertionError("missing rendered figures should block publication")
+
+    _require_renderable_source_figures(bundle, [(Path("overview.png"), "Method overview")])
 
 
 def test_sanitize_repository_markdown_removes_unverified_repository():

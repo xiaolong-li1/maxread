@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import time
 from typing import Any, Iterable, List
 
+from .formula_compiler import compile_formula_markup
+
 
 @dataclass(frozen=True)
 class QualityIssue:
@@ -33,6 +35,9 @@ class FormulaQualityAgent(QualityAgent):
 
     def inspect(self, markdown: str, xml: str = "") -> List[QualityIssue]:
         issues: List[QualityIssue] = []
+        for diagnostic in compile_formula_markup(markdown or "").diagnostics:
+            if diagnostic.severity == "high":
+                issues.append(QualityIssue(self.name, "markdown", diagnostic.severity, diagnostic.code))
         for stage, text in (("markdown", markdown or ""), ("xml", xml or "")):
             for body in _latex_bodies(text):
                 issues.extend(_inspect_latex_body(stage, body))
@@ -60,10 +65,32 @@ class FormattingQualityAgent(QualityAgent):
 
     def inspect(self, markdown: str, xml: str = "") -> List[QualityIssue]:
         issues: List[QualityIssue] = []
-        command_pattern = r"\\(?:textnormal|operatorname|textbf|textit|textsc|textrm|emph|mathrm|mathbf|mathtt)"
+        command_pattern = r"\\(?:textnormal|operatorname|textbf|textit|textsc|textrm|emph|mathcal|mathbb|mathsf|mathit|mathrm|mathbf|mathtt)"
         for stage, text in (("markdown", markdown or ""), ("xml", xml or "")):
             if any(re.search(command_pattern, segment) for segment in _unprotected_text_segments(text)):
                 issues.append(QualityIssue(self.name, stage, "high", "raw-tex-formatting-command"))
+            if stage == "markdown" and re.search(r"</?p(?:\s[^>]*)?>", text, flags=re.I):
+                issues.append(QualityIssue(self.name, stage, "high", "raw-html-paragraph-tag"))
+            if stage == "xml" and re.search(r"&lt;/?p(?:\s[^&]*)&gt;", text, flags=re.I):
+                issues.append(QualityIssue(self.name, stage, "high", "escaped-html-paragraph-tag"))
+            if stage == "xml" and re.search(
+                r"<p(?:\s[^>]*)?>.*?<br\s*/?>\s*#{2,6}\s+",
+                text,
+                flags=re.S | re.I,
+            ):
+                issues.append(QualityIssue(self.name, stage, "high", "markdown-heading-inside-paragraph"))
+            if stage == "xml" and re.search(
+                r"<p(?:\s[^>]*)?>.*?<br\s*/?>\s*\|[^\n<]*\|\s*<br\s*/?>\s*\|[\s:|\-]+\|",
+                text,
+                flags=re.S | re.I,
+            ):
+                issues.append(QualityIssue(self.name, stage, "high", "markdown-table-inside-paragraph"))
+            if stage == "xml" and re.search(
+                r"<p(?:\s[^>]*)?>.*?<br\s*/?>\s*\[MaxReadFigure:[^\]]+\]",
+                text,
+                flags=re.S | re.I,
+            ):
+                issues.append(QualityIssue(self.name, stage, "high", "figure-marker-inside-paragraph"))
         return _dedupe_issues(issues)
 
 
@@ -131,6 +158,21 @@ def blocking_quality_warnings(warnings: Iterable[str]) -> List[str]:
             continue
         if warning.startswith("visual-qa:high:") or warning.startswith("visual-qa:recheck:high:"):
             blocking.append(warning)
+            continue
+        if warning.startswith(("visual-qa:remote-error:", "visual-qa:recheck-error:")):
+            blocking.append(warning)
+            continue
+        if warning.startswith((
+            "image-anchor-lookup-failed:",
+            "image-anchor-missing:",
+            "image-insert-failed:",
+            "image-block-id-missing:",
+            "image-anchor-refresh-failed:",
+            "image-move-failed:",
+            "image-marker-remove-failed:",
+            "post-publish:marker-left-after-publish",
+        )):
+            blocking.append(warning)
     return blocking
 
 
@@ -172,6 +214,7 @@ def verify_published_docx(
     required_terms: Iterable[str] = (),
     expected_image_min: int = 0,
     expected_latex_min: int = 0,
+    expected_table_min: int = 0,
     attempts: int = 2,
 ) -> List[str]:
     last_error = ""
@@ -185,6 +228,7 @@ def verify_published_docx(
                 required_terms=required_terms,
                 expected_image_min=expected_image_min,
                 expected_latex_min=expected_latex_min,
+                expected_table_min=expected_table_min,
             )
             warnings.extend(quality_warnings("", content))
             return [f"post-publish:{warning}" for warning in _dedupe_strings(warnings)]
@@ -201,6 +245,7 @@ def validate_fetched_docx_content(
     required_terms: Iterable[str] = (),
     expected_image_min: int = 0,
     expected_latex_min: int = 0,
+    expected_table_min: int = 0,
 ) -> List[str]:
     warnings: List[str] = []
     text = str(content or "")
@@ -226,6 +271,9 @@ def validate_fetched_docx_content(
     latex_count = len(re.findall(r"<latex>", text))
     if expected_latex_min and latex_count < expected_latex_min:
         warnings.append(f"missing-latex:{latex_count}/{expected_latex_min}")
+    table_count = len(re.findall(r"<table(?:\s|>)", text, flags=re.I))
+    if expected_table_min and table_count < expected_table_min:
+        warnings.append(f"missing-tables:{table_count}/{expected_table_min}")
     return _dedupe_strings(warnings)
 
 
