@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol
 
+from .feishu import normalize_doc_url
 from .render import _is_valid_latex_body, _normalize_latex_body, _strip_latex_for_text
 
 
@@ -281,6 +282,10 @@ class VisualQAController:
     ) -> RemoteVisualResult:
         if not self.enabled:
             return RemoteVisualResult(status="disabled")
+        normalized_url = normalize_doc_url(doc_url)
+        if not normalized_url:
+            return RemoteVisualResult(status="error", error=f"invalid Feishu doc URL: {_clip(doc_url)}")
+        doc_url = normalized_url
         tag = _safe_tag(source_id or doc_url)
         run_id = f"{tag}-{uuid.uuid4().hex[:8]}"
         remote_dir = f"{self.remote_root}/runs/{run_id}"

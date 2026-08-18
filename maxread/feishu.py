@@ -16,6 +16,7 @@ from .models import FeishuEvent
 
 
 DOCX_TOKEN_RE = re.compile(r"/docx/([A-Za-z0-9]+)")
+DOCX_URL_RE = re.compile(r"https?://[^\s<>()]+/docx/[A-Za-z0-9]+(?:\?[^\s<>()]*)?")
 
 
 PROGRESS_STAGES = (
@@ -162,7 +163,7 @@ class FeishuClient:
             f"<title>{_xml_escape(title)}</title>",
         ]).data
         doc = created.get("data", {}).get("document", {})
-        url = doc.get("url", "")
+        url = normalize_doc_url(doc.get("url", ""))
         token = doc.get("document_id") or doc_token_from_url(url)
         if not url or not token:
             raise LarkCliError(f"Unable to parse created document: {created}")
@@ -758,6 +759,15 @@ def _message_texts_from_payload(payload: Any) -> List[str]:
 def doc_token_from_url(url: str) -> str:
     match = DOCX_TOKEN_RE.search(url)
     return match.group(1) if match else ""
+
+
+def normalize_doc_url(value: Any) -> str:
+    """Extract a plain Feishu docx URL from CLI text or Markdown links."""
+    text = str(value or "").strip()
+    match = DOCX_URL_RE.search(text)
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,;!?")
 
 
 def _safe_relative_path(path: str) -> str:

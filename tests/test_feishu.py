@@ -2,7 +2,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from maxread.feishu import FeishuClient, _related_message_ids, _related_thread_ids, _retry_attempts, _safe_relative_path, doc_token_from_url, parse_event, progress_emoji_type
+from maxread.feishu import FeishuClient, _related_message_ids, _related_thread_ids, _retry_attempts, _safe_relative_path, doc_token_from_url, normalize_doc_url, parse_event, progress_emoji_type
 
 
 class CapturingFeishu(FeishuClient):
@@ -13,6 +13,25 @@ class CapturingFeishu(FeishuClient):
     def _json(self, args):
         self.args = args
         return type("Result", (), {"data": {"ok": True}, "stdout": "{}"})()
+
+
+class MarkdownCreateUrlFeishu(FeishuClient):
+    def _json(self, args):
+        return type(
+            "Result",
+            (),
+            {
+                "data": {
+                    "data": {
+                        "document": {
+                            "url": "[Generated title](https://x.feishu.cn/docx/DocToken123?from=create)",
+                            "document_id": "DocToken123",
+                        }
+                    }
+                },
+                "stdout": "{}",
+            },
+        )()
 
 
 class ThreadContextFeishu(FeishuClient):
@@ -97,6 +116,21 @@ class DelayedMarkerFeishu(FeishuClient):
 
 def test_doc_token_from_url():
     assert doc_token_from_url("https://x.feishu.cn/docx/DKHQd7L2NoDWlRxXEE0cCTTdnEg") == "DKHQd7L2NoDWlRxXEE0cCTTdnEg"
+
+
+def test_normalize_doc_url_extracts_markdown_wrapped_link():
+    wrapped = "[Generated title](https://x.feishu.cn/docx/DocToken123?from=create)"
+
+    assert normalize_doc_url(wrapped) == "https://x.feishu.cn/docx/DocToken123?from=create"
+
+
+def test_create_docx_returns_plain_url_when_cli_returns_markdown_link():
+    created = MarkdownCreateUrlFeishu().create_docx("Generated title")
+
+    assert created == {
+        "url": "https://x.feishu.cn/docx/DocToken123?from=create",
+        "token": "DocToken123",
+    }
 
 
 def test_fetch_docx_passes_format_scope_and_detail():
