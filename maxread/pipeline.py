@@ -587,6 +587,11 @@ def _generate_complete_paper_markdown(
             attempt_writer(attempt + 1, raw_markdown, errors)
         if not errors:
             return markdown
+        repaired = _extract_complete_document_suffix(markdown, markers, paper_id)
+        if repaired:
+            if attempt_writer:
+                attempt_writer(attempt + 2, repaired, ["deterministic-repair:concatenated-document"])
+            return repaired
         last_markdown = markdown
         last_errors = errors
         prompt = user_prompt + contract + (
@@ -644,6 +649,18 @@ def _repair_missing_h1(markdown: str, paper_id: str, title: str) -> str:
         return text + ("\n" if text else "")
     prefix = f"# [{paper_id}] {clean_title}" if paper_id else f"# {clean_title}"
     return f"{prefix}\n\n{text}\n"
+
+
+def _extract_complete_document_suffix(markdown: str, markers, paper_id: str = "") -> str:
+    """Recover a complete final document appended after model narration or a partial draft."""
+    text = _unwrap_outer_markdown_fence(markdown)
+    identifier = re.escape(str(paper_id).strip()) if paper_id else r"[^\]\n]+"
+    starts = [match.start() for match in re.finditer(rf"#\s+\[{identifier}\]", text)]
+    for start in reversed(starts):
+        candidate = text[start:].strip() + "\n"
+        if not paper_markdown_completeness_errors(candidate, markers):
+            return candidate
+    return ""
 
 
 def _sanitize_repository_markdown(markdown: str, repository_url: str) -> str:

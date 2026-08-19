@@ -206,7 +206,9 @@ class QueueManager:
 
         def run() -> None:
             while not stop.wait(interval):
-                hb_store = Store(self.settings.db_path)
+                # The worker already initialized the schema. Heartbeats must
+                # stay lightweight and must not contend on repeated DDL.
+                hb_store = Store(self.settings.db_path, initialize=False)
                 try:
                     if not hb_store.heartbeat_queue_job(job_id, worker_id):
                         stop.set()

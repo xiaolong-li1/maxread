@@ -44,12 +44,13 @@ class DocumentRecord:
 
 
 class Store:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, initialize: bool = True):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path), timeout=30)
         self.conn.row_factory = sqlite3.Row
-        self.init()
+        if initialize:
+            self.init()
 
     def init(self) -> None:
         self.conn.executescript(

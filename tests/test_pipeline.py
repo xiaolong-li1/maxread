@@ -143,6 +143,22 @@ class MissingH1LLM(FakeLLM):
         return super().responses_text(system, user, **kwargs).replace("# Fake Paper\n", "前置说明\n")
 
 
+class ConcatenatedDocumentLLM(FakeLLM):
+    def __init__(self):
+        self.calls = 0
+
+    def responses_text(self, system, user, **kwargs):
+        self.calls += 1
+        complete = FakeLLM().responses_text(system, user, **kwargs).replace(
+            "# Fake Paper", "# [2604.12946] Complete Paper", 1
+        )
+        return (
+            "The user wants me to generate a Feishu document.\n"
+            "# [2604.12946] Partial Draft\n\nThis fragment is incomplete."
+            + complete
+        )
+
+
 class FakeArxivNoSource(FakeArxiv):
     def fetch(self, paper_id):
         bundle = super().fetch(paper_id)
@@ -254,6 +270,25 @@ def test_generation_repairs_only_missing_h1_from_metadata():
     assert result.startswith("# [2604.12946] Fake Paper\n")
     assert attempts[0][1].startswith("前置说明")
     assert attempts[-1][2] == ["deterministic-repair:missing-h1"]
+
+
+def test_generation_extracts_complete_document_appended_after_partial_draft():
+    llm = ConcatenatedDocumentLLM()
+    attempts = []
+
+    result = _generate_complete_paper_markdown(
+        llm,
+        "生成文档",
+        [],
+        paper_id="2604.12946",
+        title="Complete Paper",
+        attempt_writer=lambda number, raw, errors: attempts.append((number, raw, errors)),
+    )
+
+    assert llm.calls == 1
+    assert result.startswith("# [2604.12946] Complete Paper\n")
+    assert "The user wants me" not in result
+    assert attempts[-1][2] == ["deterministic-repair:concatenated-document"]
 
 
 def test_pipeline_post_publish_fetch_failure_is_warning(tmp_path):
