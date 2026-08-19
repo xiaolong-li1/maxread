@@ -111,6 +111,8 @@ def test_architecture_html_is_self_contained_and_uses_workflow_api():
     assert 'class="terminal-edge-grid"' in html
     assert "isTerminalTransition" in html
     assert "selectedTransitionKey" in html
+    assert "renderNextHopSummary" in html
+    assert "下一步：" in html
     assert 'id="quality-gate-list"' in html
     assert "renderQualityGates" in html
     assert "renderPolicyRail" in html

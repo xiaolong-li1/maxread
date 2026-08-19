@@ -110,6 +110,25 @@
       box-shadow: var(--shadow);
       overflow: hidden;
     }
+    .next-hop-summary {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      margin-bottom: 12px; padding: 10px 12px;
+      background: #f7f9f6; border: 1px solid var(--line); border-radius: 7px;
+    }
+    .next-hop-kicker {
+      color: var(--green); font-size: 10px; font-weight: 760;
+      letter-spacing: .04em; white-space: nowrap;
+    }
+    .next-hop-current { font-weight: 760; white-space: nowrap; }
+    .next-hop-rule { color: var(--muted); font-size: 12px; }
+    .next-hop-options { display: flex; flex: 1 1 420px; flex-wrap: wrap; gap: 6px; }
+    .next-hop-option {
+      display: inline-flex; align-items: center; gap: 6px;
+      min-height: 28px; padding: 4px 8px; border: 1px solid #cbd6cd;
+      border-radius: 5px; background: var(--surface); font-size: 12px;
+    }
+    .next-hop-condition { color: var(--muted); }
+    .next-hop-arrow { color: var(--green); font-weight: 760; }
     .graph-scroll {
       width: 100%; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain;
       border-bottom: 1px solid var(--line); scrollbar-color: #aeb6ae transparent;
@@ -147,6 +166,13 @@
     .edge-label-svg.next text { fill: #754316; }
     .edge-label-svg.selected rect { fill: var(--blue-soft); stroke: var(--blue); }
     .edge-label-svg.selected text { fill: #284f69; }
+    .edge-label-svg .edge-target-svg {
+      fill: #7b857d; font-size: 8px; font-weight: 650;
+    }
+    .edge-label-svg.scenario .edge-target-svg { fill: #9a6536; }
+    .edge-label-svg.traversed .edge-target-svg { fill: var(--green); }
+    .edge-label-svg.next .edge-target-svg { fill: #754316; }
+    .edge-label-svg.selected .edge-target-svg { fill: #284f69; }
     .graph-node {
       cursor: pointer;
       opacity: .82; transition: opacity .18s;
@@ -664,8 +690,9 @@
       const edgePathSvg = renderedEdges.map(item => item.path).join('');
       const edgeLabelSvg = renderedEdges.map(item => item.label).join('');
       const nodeSvg = spec.states.map(item => stateNodeSvg(item, path, visited, current)).join('');
+      const focusedState = states.get(selectedState) || states.get(current);
       byId('machine-root').className = 'machine';
-      byId('machine-root').innerHTML = '<div class="flow-surface"><div class="graph-scroll"><svg class="state-graph" viewBox="0 0 ' + GRAPH.width + ' ' + GRAPH.height + '" role="img" aria-label="MaxRead workflow state transition graph">' +
+      byId('machine-root').innerHTML = '<div class="flow-surface">' + renderNextHopSummary(focusedState) + '<div class="graph-scroll"><svg class="state-graph" viewBox="0 0 ' + GRAPH.width + ' ' + GRAPH.height + '" role="img" aria-label="MaxRead workflow state transition graph">' +
         '<defs><marker id="arrow-default" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 9 4.5 0 9z" fill="#7f8c82"/></marker>' +
         '<marker id="arrow-path" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 9 4.5 0 9z" fill="#c48a52"/></marker>' +
         '<marker id="arrow-done" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 9 4.5 0 9z" fill="#25634f"/></marker></defs>' +
@@ -687,6 +714,18 @@
         });
       });
       renderInspector(states.get(selectedState) || states.get(current));
+    }
+
+    function renderNextHopSummary(item) {
+      if (!item) return '';
+      const outgoing = spec.transitions.filter(edge => edge.from === item.id);
+      if (!outgoing.length) return '';
+      const options = outgoing.map(edge =>
+        '<span class="next-hop-option"><span class="next-hop-condition">' + esc(edge.condition) + '</span>' +
+        '<span class="next-hop-arrow">→</span><strong>' + esc(labelOf(edge.to)) + '</strong></span>'
+      ).join('');
+      const rule = outgoing.length > 1 ? '下一跳由条件决定' : '固定下一跳';
+      return '<div class="next-hop-summary" aria-label="' + esc(item.label) + ' 的下一跳判断"><span class="next-hop-kicker">下一跳判断</span><span class="next-hop-current">当前：' + esc(item.label) + '</span><span class="next-hop-rule">' + rule + '</span><div class="next-hop-options">' + options + '</div></div>';
     }
 
     function stateNodeSvg(item, path, visited, current) {
@@ -720,11 +759,18 @@
         return { path: '', label: '' };
       }
       const route = edgeRoute(edge, index);
-      const width = Math.max(58, Math.min(100, 18 + Array.from(edge.label || '').length * 10));
+      const crossPhase = GRAPH.positions[edge.from][0] !== GRAPH.positions[edge.to][0];
+      const width = crossPhase
+        ? Math.max(118, Math.min(154, 50 + Array.from(edge.label || '').length * 8 + Array.from(labelOf(edge.to) || '').length * 4))
+        : Math.max(58, Math.min(100, 18 + Array.from(edge.label || '').length * 10));
+      const labelHeight = crossPhase ? 32 : 20;
       const description = esc(edge.event + '：' + edge.condition);
+      const targetLabel = crossPhase
+        ? '<tspan class="edge-target-svg" x="0" dy="11">下一步：' + esc(labelOf(edge.to)) + '</tspan>'
+        : '';
       return {
         path: '<path class="' + classes.join(' ') + '" d="' + route.d + '" marker-end="url(#' + marker + ')" aria-label="' + description + '"></path>',
-        label: '<g class="' + labelClasses.join(' ') + '" transform="translate(' + route.labelX + ' ' + route.labelY + ')" aria-label="' + description + '"><rect x="' + (-width / 2) + '" y="-10" width="' + width + '" height="20" rx="5"/><text y="3">' + esc(edge.label) + '</text></g>',
+        label: '<g class="' + labelClasses.join(' ') + '" transform="translate(' + route.labelX + ' ' + route.labelY + ')" aria-label="' + description + '"><rect x="' + (-width / 2) + '" y="-' + (labelHeight / 2) + '" width="' + width + '" height="' + labelHeight + '" rx="5"/><text y="' + (crossPhase ? '-3' : '3') + '">' + esc(edge.label) + targetLabel + '</text></g>',
       };
     }
 
@@ -733,6 +779,10 @@
       const target = GRAPH.positions[edge.to];
       const sourceRight = source[0] + GRAPH.nodeWidth;
       const targetLeft = target[0];
+      // End arrows just before the target node. The node layer is rendered
+      // above the edge layer, so an endpoint on the node boundary would hide
+      // the marker and make cross-phase transitions look unfinished.
+      const targetApproachX = targetLeft - 9;
       const sourceCenter = source[1] + GRAPH.nodeHeight / 2;
       const targetCenter = target[1] + GRAPH.nodeHeight / 2;
       const sameColumn = source[0] === target[0];
@@ -751,7 +801,7 @@
         const busX = targetLeft - 22;
         const startX = sourceRight + 10;
         return {
-          d: 'M ' + sourceRight + ' ' + sourceCenter + ' L ' + startX + ' ' + terminalLane + ' L ' + busX + ' ' + terminalLane + ' L ' + busX + ' ' + targetCenter + ' L ' + targetLeft + ' ' + targetCenter,
+          d: 'M ' + sourceRight + ' ' + sourceCenter + ' L ' + startX + ' ' + terminalLane + ' L ' + busX + ' ' + terminalLane + ' L ' + busX + ' ' + targetCenter + ' L ' + targetApproachX + ' ' + targetCenter,
           labelX: (startX + busX) / 2, labelY: terminalLane - 12,
         };
       }
@@ -759,13 +809,13 @@
         const lane = 235;
         const busX = targetLeft - 22;
         return {
-          d: 'M ' + sourceRight + ' ' + sourceCenter + ' L ' + (sourceRight + 16) + ' ' + lane + ' L ' + busX + ' ' + lane + ' L ' + busX + ' ' + targetCenter + ' L ' + targetLeft + ' ' + targetCenter,
+          d: 'M ' + sourceRight + ' ' + sourceCenter + ' L ' + (sourceRight + 16) + ' ' + lane + ' L ' + busX + ' ' + lane + ' L ' + busX + ' ' + targetCenter + ' L ' + targetApproachX + ' ' + targetCenter,
           labelX: 540, labelY: lane - 12,
         };
       }
       if (edge.event === 'source_missing') {
         return {
-          d: 'M ' + sourceRight + ' ' + sourceCenter + ' C ' + (sourceRight + 120) + ' ' + sourceCenter + ', ' + (targetLeft - 120) + ' ' + targetCenter + ', ' + targetLeft + ' ' + targetCenter,
+          d: 'M ' + sourceRight + ' ' + sourceCenter + ' C ' + (sourceRight + 120) + ' ' + sourceCenter + ', ' + (targetLeft - 120) + ' ' + targetCenter + ', ' + targetApproachX + ' ' + targetCenter,
           labelX: (sourceRight + targetLeft) / 2, labelY: sourceCenter - 12,
         };
       }
@@ -773,7 +823,7 @@
         const upward = target[1] < source[1];
         const x = source[0] + GRAPH.nodeWidth / 2;
         const startY = upward ? source[1] : source[1] + GRAPH.nodeHeight;
-        const endY = upward ? target[1] + GRAPH.nodeHeight : target[1];
+        const endY = upward ? target[1] + GRAPH.nodeHeight + 9 : target[1] - 9;
         const isRecheck = edge.event.endsWith('_recheck');
         const isRepair = edge.event.endsWith('_repair_required');
         const laneOffset = isRecheck ? -52 : (isRepair ? 52 : 0);
@@ -785,7 +835,7 @@
       }
       const middleX = (sourceRight + targetLeft) / 2;
       return {
-        d: 'M ' + sourceRight + ' ' + sourceCenter + ' C ' + middleX + ' ' + sourceCenter + ', ' + middleX + ' ' + targetCenter + ', ' + targetLeft + ' ' + targetCenter,
+        d: 'M ' + sourceRight + ' ' + sourceCenter + ' C ' + middleX + ' ' + sourceCenter + ', ' + middleX + ' ' + targetCenter + ', ' + targetApproachX + ' ' + targetCenter,
         labelX: middleX, labelY: (sourceCenter + targetCenter) / 2 - 12,
       };
     }
