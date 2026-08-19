@@ -208,6 +208,7 @@ def test_controller_retries_visual_repair_for_three_rounds_and_uses_final_pass()
             RemoteVisualResult(status="ok"),
         ]
     )
+    controller.repair_rounds = 3
 
     result = controller.run(feishu, "doc", source_id="paper")
 
@@ -217,6 +218,39 @@ def test_controller_retries_visual_repair_for_three_rounds_and_uses_final_pass()
     assert result.rounds[-1].status == "passed"
     assert result.rounds[0].changed is True
     assert not any(warning.startswith("visual-qa:high:") for warning in result.warnings)
+
+
+def test_controller_repairs_structural_and_image_findings_in_one_round():
+    feishu = FakeVisualFeishu(
+        '<title>T</title><p id="caption">\\textbfThe pipeline</p>'
+        '<img id="image-block" name="figure.png" width="900" height="450"/>'
+    )
+    controller = StubVisualQA(
+        [
+            RemoteVisualResult(
+                status="issues",
+                findings=[
+                    VisualFinding(kind="raw-formatting", severity="high", autofixable=True),
+                    VisualFinding(
+                        kind="image-overflow",
+                        severity="high",
+                        image_name="figure.png",
+                        block_id="image-block",
+                        autofixable=True,
+                        data={"editor_width": 820},
+                    ),
+                ],
+            ),
+            RemoteVisualResult(status="ok"),
+        ]
+    )
+
+    result = controller.run(feishu, "doc", source_id="paper")
+
+    assert result.passed is True
+    assert result.rounds[0].changed is True
+    assert result.rounds[0].repair_strategy == "deterministic-structural+deterministic-image"
+    assert {block_id for _url, block_id, _content in feishu.replacements} == {"caption", "image-block"}
 
 
 def test_controller_uses_model_after_deterministic_formula_repair_makes_no_change():

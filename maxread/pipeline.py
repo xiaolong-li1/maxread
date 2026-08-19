@@ -62,7 +62,7 @@ class MaxReadPipeline:
         review_reasoning_effort: str = "",
         visual_qa: Optional[VisualQAController] = None,
         generation_repair_rounds: int = 2,
-        quality_repair_rounds: int = 3,
+        quality_repair_rounds: int = 2,
         on_workflow_event=None,
     ):
         self.store = store
@@ -254,7 +254,7 @@ class MaxReadPipeline:
                             "warnings": quality_result.warnings,
                             "blocking_warnings": quality_result.blocking_warnings,
                             "repair_warnings": quality_result.repair_warnings,
-                            "rounds": len(quality_result.attempts) - 1,
+                            "rounds": sum(1 for attempt in quality_result.attempts if attempt.model_response),
                         },
                         ensure_ascii=False,
                         indent=2,

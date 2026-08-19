@@ -238,7 +238,7 @@ FAILURE_MODES = [
         "trigger": "Markdown/XML 出现高严重度公式、格式字符、表格或完整性问题。",
         "handling": "bounded",
         "outcome_state": "quality_failed",
-        "automatic": "按 quality_repair_rounds 循环模型修复、重新规范化、重新编译并复检。",
+        "automatic": "先规范化、重新编译；最多执行 2 次定点模型修复，发现无进展立即停止。",
         "next_action": "检查 05/06/07 quality artifacts；修正规则或模型后 retry-job。",
         "side_effect": "未创建飞书文档",
     },
@@ -271,7 +271,7 @@ FAILURE_MODES = [
         "trigger": "标题、图片、公式、表格数量不足，或截图发现无效公式、裸格式字符和错位图片。",
         "handling": "bounded",
         "outcome_state": "quality_failed",
-        "automatic": "按 block_id 做确定性修复，必要时调用模型修公式，并在每轮后重新截图。",
+        "automatic": "按 block_id 做确定性修复，必要时调用模型修公式；最多 2 次文档变更并执行最终截图验收。",
         "next_action": "预算耗尽后查看 visual QA 截图；retry-job 从原文档复检，不重跑正文生成。",
         "side_effect": "文档已存在但暂不交付",
     },
@@ -282,7 +282,7 @@ FAILURE_MODES = [
         "trigger": "SSH、浏览器、登录态、runner 超时、无 JSON 或没有生成截图。",
         "handling": "bounded",
         "outcome_state": "quality_failed",
-        "automatic": "基础设施检查最多执行 3 次，后续尝试使用更长超时；全部失败才阻断交付。",
+        "automatic": "基础设施检查最多执行 3 次，后续尝试使用更长超时；这些不改变文档，不计入修复轮次。",
         "next_action": "恢复 runner、网络或登录态后在话题中回复重试；已有 checkpoint 时复用原文档。",
         "side_effect": "文档已存在但暂不交付",
     },
@@ -354,6 +354,58 @@ LAYERS = [
 ]
 
 
+QUALITY_GATES = [
+    {
+        "id": "generation-contract",
+        "order": 1,
+        "title": "生成契约门",
+        "state": "generation_checking",
+        "owner": "pipeline.py",
+        "purpose": "确认模型交付的是完整 Markdown，而不是半截回答、代码围栏或缺图草稿。",
+        "checks": "H1、TL;DR、章节、长度、图片 marker、截断尾巴",
+        "mutation": "先确定性补齐；仍失败才携带原稿和精确错误重试。",
+        "budget": "初稿 + 最多 2 次生成修复",
+        "pass": "满足文档契约，进入内容审阅。",
+    },
+    {
+        "id": "editorial-review",
+        "order": 2,
+        "title": "编辑审阅门",
+        "state": "reviewing",
+        "owner": "review.py",
+        "purpose": "让方法、上下文、因果链和图文位置对读者可理解，不承担编译器工作。",
+        "checks": "事实风险、方法完整性、公式解释、图文语义、表达与结构",
+        "mutation": "一次全局审阅；输出结构不可信时保留原稿并记录 warning。",
+        "budget": "1 次审阅，不循环重写",
+        "pass": "进入 Markdown/XML 编译质量门。",
+    },
+    {
+        "id": "compile-quality",
+        "order": 3,
+        "title": "编译质量门",
+        "state": "quality_checking",
+        "owner": "quality.py + quality_repair.py",
+        "purpose": "保证中间表示可安全写入飞书，阻断公式和格式控制字符泄漏。",
+        "checks": "Markdown 结构、LaTeX 子集、Docx XML、表格与 marker",
+        "mutation": "规范化和编译先行；模型只按确定性告警做定点修复。",
+        "budget": "初检 + 最多 2 次格式修复；无进展立即停止",
+        "pass": "不存在阻断级格式问题，才允许创建文档。",
+    },
+    {
+        "id": "delivery-visual",
+        "order": 4,
+        "title": "交付实页门",
+        "state": "post_publish_checking / visual_checking",
+        "owner": "quality.py + visual_qa.py",
+        "purpose": "以飞书真实回读和浏览器截图作为最终金标准，检查用户真正看到的页面。",
+        "checks": "标题、图片/公式/表格数量、截图中的公式、图片、裁切与布局",
+        "mutation": "只修复可定位 block；结构修复和图片尺寸修复可在同一轮完成。",
+        "budget": "发布后最多 2 次文档修复 + 1 次最终验收",
+        "pass": "真实页面无阻断问题，交付；SSH/浏览器重试不计入修复轮次。",
+    },
+]
+
+
 INVARIANTS = [
     {"title": "单一状态来源", "detail": "业务状态只由 workflow.py 的 transition() 推进；stage 仅用于进度展示。"},
     {"title": "副作用有边界", "detail": "发布成功先持久化 checkpoint；崩溃恢复只复检原文档，不重复创建。"},
@@ -394,11 +446,13 @@ def architecture_spec() -> dict:
             "failure_modes": FAILURE_MODES,
             "recovery_rules": RECOVERY_RULES,
             "layers": LAYERS,
+            "quality_gates": QUALITY_GATES,
             "invariants": INVARIANTS,
             "metrics": {
                 "states": len(spec["states"]),
                 "transitions": len(spec["transitions"]),
                 "repair_loops": 3,
+                "quality_gates": len(QUALITY_GATES),
                 "retryable_terminals": sum(1 for state in spec["states"] if state["terminal"] and state["retryable"]),
                 "failure_modes": len(FAILURE_MODES),
             },
@@ -448,6 +502,14 @@ def _validate_architecture_spec(spec: dict) -> None:
         outcome_state = failure.get("outcome_state")
         if outcome_state and outcome_state not in state_ids:
             raise RuntimeError(f"unknown failure outcome state: {failure['id']} -> {outcome_state}")
+
+    gates = spec.get("quality_gates") or []
+    if [item.get("order") for item in gates] != list(range(1, len(gates) + 1)):
+        raise RuntimeError("quality gates must have contiguous order")
+    for gate in gates:
+        for field in ("id", "title", "state", "owner", "purpose", "checks", "mutation", "budget", "pass"):
+            if not str(gate.get(field) or "").strip():
+                raise RuntimeError(f"missing quality gate field: {gate.get('id') or '<unknown>'}.{field}")
 
 
 def _transition_matches(source: str, event: str, target: str) -> bool:

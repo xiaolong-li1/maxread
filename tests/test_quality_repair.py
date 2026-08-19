@@ -88,12 +88,9 @@ def test_quality_repair_stops_after_configured_rounds_when_model_makes_no_change
     )
 
     assert result.passed is False
-    assert len(result.attempts) == 3
-    assert llm.calls == 2
-    assert result.repair_warnings == [
-        "quality-repair:round-1:no-change",
-        "quality-repair:round-2:no-change",
-    ]
+    assert len(result.attempts) == 1
+    assert llm.calls == 1
+    assert result.repair_warnings == ["quality-repair:round-1:no-change"]
 
 
 def test_quality_repair_can_fix_structural_completeness_errors():

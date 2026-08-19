@@ -217,6 +217,20 @@
     .terminal-target { text-align: right; }
     .terminal-condition { margin: 5px 0 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
 
+    .quality-gate-grid {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+      border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    }
+    .quality-gate { min-width: 0; padding: 15px 14px 16px 0; }
+    .quality-gate + .quality-gate { border-left: 1px solid var(--line); padding-left: 14px; }
+    .quality-gate-index { color: var(--blue); font: 11px/1.2 "JetBrains Mono", ui-monospace, monospace; }
+    .quality-gate h3 { margin: 8px 0 4px; font-size: 15px; line-height: 1.3; }
+    .quality-gate-owner { color: var(--muted); font: 10px/1.4 "JetBrains Mono", ui-monospace, monospace; }
+    .quality-gate p { margin: 10px 0 0; font-size: 11px; line-height: 1.55; }
+    .quality-gate-label { margin-top: 12px; color: var(--muted); font-size: 9px; font-weight: 720; }
+    .quality-gate .gate-budget { color: #7f4819; }
+    .quality-gate .gate-pass { color: var(--green); }
+
     .policy-rail { padding: 14px 4px 2px; }
     .policy-rail-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
     .policy-rail-head strong { font-size: 12px; }
@@ -360,6 +374,8 @@
       .policy-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .terminal-edge-grid { grid-template-columns: 1fr; }
       .terminal-edge:nth-child(even) { border-left: 0; padding-left: 0; }
+      .quality-gate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .quality-gate:nth-child(3) { border-left: 0; padding-left: 0; }
       .policy-edge:nth-child(4) { border-left: 0; padding-left: 0; }
       .handling-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .handling-item:nth-child(3) { border-left: 0; padding-left: 0; }
@@ -381,6 +397,8 @@
       .state-graph { width: 1160px; min-width: 1160px; height: 980px; }
       .policy-grid { grid-template-columns: 1fr; }
       .policy-edge + .policy-edge { border-left: 0; padding-left: 0; }
+      .quality-gate-grid { grid-template-columns: 1fr; }
+      .quality-gate + .quality-gate { border-left: 0; padding-left: 0; }
       .architecture-grid { grid-template-columns: 1fr; }
       .handling-overview { grid-template-columns: 1fr; }
       .handling-item + .handling-item { border-left: 0; padding-left: 0; }
@@ -454,6 +472,17 @@
           <div class="trace-meta"><span>事件轨迹</span><span id="trace-counter"></span></div>
           <div class="trace" id="trace"></div>
         </div>
+      </section>
+
+      <section class="band" id="quality-gates">
+        <div class="section-head">
+          <div>
+            <h2>四道质量门</h2>
+            <p>四道门各自回答一个问题；“检查轮次”与“网络重试”分开，修复无进展时提前结束。</p>
+          </div>
+          <div class="failure-heading-meta"><strong id="quality-gate-count">0</strong><span>独立质量门</span></div>
+        </div>
+        <div class="quality-gate-grid" id="quality-gate-list"></div>
       </section>
 
       <section class="band" id="failure-map">
@@ -575,6 +604,7 @@
       renderScenarios();
       renderMachine();
       renderTrace();
+      renderQualityGates();
       renderFailures();
       renderArchitecture();
     }
@@ -857,6 +887,20 @@
       ).join('');
       byId('invariants').innerHTML = spec.invariants.map(item =>
         '<div class="invariant"><strong>' + esc(item.title) + '</strong><p>' + esc(item.detail) + '</p></div>'
+      ).join('');
+    }
+
+    function renderQualityGates() {
+      const gates = [...(spec.quality_gates || [])].sort((a, b) => a.order - b.order);
+      byId('quality-gate-count').textContent = gates.length;
+      byId('quality-gate-list').innerHTML = gates.map(gate =>
+        '<article class="quality-gate"><div class="quality-gate-index">0' + esc(gate.order) + ' / ' + esc(gate.state) + '</div>' +
+        '<h3>' + esc(gate.title) + '</h3><div class="quality-gate-owner">' + esc(gate.owner) + '</div>' +
+        '<p>' + esc(gate.purpose) + '</p>' +
+        '<div class="quality-gate-label">检查范围</div><p>' + esc(gate.checks) + '</p>' +
+        '<div class="quality-gate-label">修复边界</div><p>' + esc(gate.mutation) + '</p>' +
+        '<div class="quality-gate-label gate-budget">预算</div><p class="gate-budget">' + esc(gate.budget) + '</p>' +
+        '<div class="quality-gate-label gate-pass">通过条件</div><p class="gate-pass">' + esc(gate.pass) + '</p></article>'
       ).join('');
     }
 

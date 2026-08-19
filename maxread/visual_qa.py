@@ -141,7 +141,7 @@ class VisualQAController:
         inspect_retries: int = 2,
         max_sections: int = 12,
         max_repairs: int = 2,
-        repair_rounds: int = 3,
+        repair_rounds: int = 2,
         llm=None,
         reasoning_effort: str = "high",
     ):
@@ -153,7 +153,7 @@ class VisualQAController:
         self.inspect_retries = max(0, int(inspect_retries or 0))
         self.max_sections = max(1, int(max_sections or 12))
         self.max_repairs = max(0, int(max_repairs or 2))
-        self.repair_rounds = max(0, int(repair_rounds if repair_rounds is not None else 3))
+        self.repair_rounds = max(0, int(repair_rounds if repair_rounds is not None else 2))
         self.llm = llm
         self.reasoning_effort = str(reasoning_effort or "high")
 
@@ -179,7 +179,7 @@ class VisualQAController:
             inspect_retries=getattr(settings, "visual_qa_inspect_retries", 2),
             max_sections=getattr(settings, "visual_qa_max_sections", 12),
             max_repairs=getattr(settings, "visual_qa_max_repairs", 2),
-            repair_rounds=getattr(settings, "visual_qa_repair_rounds", 3),
+            repair_rounds=getattr(settings, "visual_qa_repair_rounds", 2),
             llm=llm,
             reasoning_effort=getattr(settings, "openai_reasoning_effort", "high"),
         )
@@ -279,6 +279,10 @@ class VisualQAController:
             )
             if on_workflow_event is not None:
                 on_workflow_event(WorkflowEvent.VISUAL_RECHECK, f"round={round_index + 1}")
+            if not changed:
+                result.warnings.extend(_finding_warning("visual-qa", finding) for finding in remote.findings)
+                audit_round.status = "stalled"
+                break
 
         return result
 
@@ -290,17 +294,26 @@ class VisualQAController:
         previous_feedback: Iterable[str] = (),
     ) -> tuple[bool, List[str], List[str], str, str]:
         structural = [item for item in findings if item.kind in {"invalid-formula", "raw-formatting"}]
+        image_findings = [item for item in findings if item.kind == "image-overflow"]
+        changed = False
+        warnings: List[str] = []
+        blocks: List[str] = []
+        strategies: List[str] = []
+        model_response = ""
         if structural:
-            changed, warnings, blocks = repair_structural_blocks(
+            structural_changed, structural_warnings, structural_blocks = repair_structural_blocks(
                 feishu,
                 doc_url,
                 ["visual-qa:repairable-structural"],
                 max_repairs=self.max_repairs,
             )
-            if changed:
-                return True, warnings, blocks, "deterministic-structural", ""
-            if self.llm is not None:
-                changed, warnings, blocks, raw = repair_formula_blocks_with_llm(
+            changed = changed or structural_changed
+            warnings.extend(structural_warnings)
+            blocks.extend(structural_blocks)
+            if structural_changed:
+                strategies.append("deterministic-structural")
+            elif self.llm is not None:
+                model_changed, model_warnings, model_blocks, model_response = repair_formula_blocks_with_llm(
                     self.llm,
                     feishu,
                     doc_url,
@@ -309,16 +322,28 @@ class VisualQAController:
                     reasoning_effort=self.reasoning_effort,
                     previous_feedback=previous_feedback,
                 )
-                return changed, warnings, blocks, "model-formula" if raw else "model-formula-unavailable", raw
-            return False, warnings, blocks, "deterministic-structural-no-change", ""
+                changed = changed or model_changed
+                warnings.extend(model_warnings)
+                blocks.extend(model_blocks)
+                strategies.append("model-formula" if model_response else "model-formula-unavailable")
+            else:
+                strategies.append("deterministic-structural-no-change")
 
-        changed, warnings, blocks = repair_image_findings(
-            feishu,
-            doc_url,
-            findings,
-            max_repairs=self.max_repairs,
-        )
-        return changed, warnings, blocks, "deterministic-image" if changed else "deterministic-image-no-change", ""
+        if image_findings:
+            image_changed, image_warnings, image_blocks = repair_image_findings(
+                feishu,
+                doc_url,
+                image_findings,
+                max_repairs=self.max_repairs,
+            )
+            changed = changed or image_changed
+            warnings.extend(image_warnings)
+            blocks.extend(image_blocks)
+            strategies.append("deterministic-image" if image_changed else "deterministic-image-no-change")
+
+        if not strategies:
+            strategies.append("no-supported-repair")
+        return changed, warnings, _dedupe_text(blocks), "+".join(strategies), model_response
 
     def inspect_remote(
         self,

@@ -113,7 +113,9 @@ The listener ignores ordinary messages with no supported input. It replies with 
 
 ## Quality Gates and Visual QA
 
-Before publishing, MaxRead sanitizes LaTeX/Markdown formatting, checks required paper sections and figure references, and blocks documents with high-severity formula or raw-formatting errors. A blocked document is sent back to the review model with the exact quality findings and re-rendered; this repeats for `MAXREAD_QUALITY_REPAIR_ROUNDS` rounds (default `3`) before the job is marked failed. Every round's Markdown, XML, quality report, and model response is saved under `pipeline_artifacts`. After publishing, it fetches the document again for a post-publish quality check.
+MaxRead has four distinct quality gates: (1) the generation contract checks that the model returned a complete document; (2) one editorial review checks facts, context, method completeness, and figure meaning; (3) the compile gate checks Markdown and Docx XML formulas, tables, and formatting; (4) the delivery gate checks the fetched Feishu document and the real browser-rendered page. The gates do not repeat each other's work: the editor does not act as a compiler, and visual QA does not re-generate the paper.
+
+Before publishing, MaxRead sanitizes LaTeX/Markdown formatting, checks required paper sections and figure references, and blocks documents with high-severity formula or raw-formatting errors. A blocked document is sent back to the review model with the exact quality findings and re-rendered for at most `MAXREAD_QUALITY_REPAIR_ROUNDS` repair rounds (default `2`). A no-change repair stops immediately. Every Markdown, XML, quality report, and model response is saved under `pipeline_artifacts`.
 
 Paper generation is also a bounded state-machine loop: each output enters `generation_checking`, deterministic cleanup runs first, and a failed check enters `generation_repairing` with the previous output and exact errors included in the next model prompt. `MAXREAD_GENERATION_REPAIR_ROUNDS` controls model repair rounds (default `2`, three total generation opportunities). Exhausting the budget enters the retryable `generation_incomplete` terminal state without publishing.
 
@@ -126,10 +128,10 @@ MAXREAD_VISUAL_QA_ENABLED=true
 MAXREAD_VISUAL_QA_HOST=ziplab-5090
 MAXREAD_VISUAL_QA_RUNNER=/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh
 MAXREAD_VISUAL_QA_INSPECT_RETRIES=2
-MAXREAD_VISUAL_QA_REPAIR_ROUNDS=3
+MAXREAD_VISUAL_QA_REPAIR_ROUNDS=2
 ```
 
-The worker is read-only. Browser-runner infrastructure failures are retried twice by default (three attempts total); later attempts use twice the base timeout. Only after a screenshot inspection succeeds does MaxRead enter up to three inspect -> repair -> screenshot recheck cycles. Deterministic block repairs run first; if a formula still fails, the configured model may return a strictly validated block-level repair. Each infrastructure attempt, visual round, screenshot path, finding, and model response is saved as `09-visual-qa.json`. If MaxRead itself runs on `ziplab-5090`, keep this option disabled unless that machine has a working SSH alias back to itself.
+The browser worker is isolated; the coordinator changes only explicitly identified Feishu blocks. Browser-runner infrastructure failures are retried twice by default (three attempts total), later attempts use twice the base timeout, and these retries never count as document repairs. After a successful screenshot inspection, MaxRead performs at most two inspect -> targeted repair -> inspect cycles, then the final screenshot is the acceptance result. Structural formula/format fixes and image-size fixes can happen in the same cycle; a no-change cycle stops immediately. Each infrastructure attempt, visual round, screenshot path, finding, and model response is saved as `09-visual-qa.json`. If MaxRead itself runs on `ziplab-5090`, keep this option disabled unless that machine has a working SSH alias back to itself.
 
 Set `MAXREAD_OPENAI_API_MODE=chat` for OpenAI-compatible gateways whose
 `/chat/completions` implementation follows instructions more reliably than

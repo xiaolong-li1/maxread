@@ -85,6 +85,8 @@ def test_architecture_spec_covers_states_and_scenarios_follow_real_transitions()
     assert spec["metrics"]["states"] == len(state_ids)
     assert spec["metrics"]["repair_loops"] == 3
     assert spec["metrics"]["failure_modes"] == len(spec["failure_modes"])
+    assert spec["metrics"]["quality_gates"] == 4
+    assert [item["order"] for item in spec["quality_gates"]] == [1, 2, 3, 4]
     assert {item["handling"] for item in spec["failure_modes"]} <= {item["id"] for item in spec["handling_types"]}
     assert all(edge["label"] and edge["condition"] for edge in spec["transitions"])
     assert all(policy["label"] and policy["condition"] and policy["sources"] for policy in spec["policies"])
@@ -109,6 +111,8 @@ def test_architecture_html_is_self_contained_and_uses_workflow_api():
     assert 'class="terminal-edge-grid"' in html
     assert "isTerminalTransition" in html
     assert "selectedTransitionKey" in html
+    assert 'id="quality-gate-list"' in html
+    assert "renderQualityGates" in html
     assert "renderPolicyRail" in html
     assert "renderFailures()" in html
     assert "https://" not in html

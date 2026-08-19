@@ -41,7 +41,7 @@ class ArticlePipeline:
         llm: Optional[OpenAIClient],
         review_reasoning_effort: str = "",
         visual_qa: Optional[VisualQAController] = None,
-        quality_repair_rounds: int = 3,
+        quality_repair_rounds: int = 2,
         on_workflow_event=None,
     ):
         self.store = store

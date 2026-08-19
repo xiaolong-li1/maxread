@@ -41,7 +41,7 @@ def repair_until_quality_passes(
     render_xml: Callable[[str], str],
     normalize_markdown: Callable[[str], str],
     *,
-    max_repair_rounds: int = 3,
+    max_repair_rounds: int = 2,
     kind: str = "paper",
     reasoning_effort: Optional[str] = None,
     completeness_check: Optional[Callable[[str], Iterable[str]]] = None,
@@ -113,6 +113,15 @@ def repair_until_quality_passes(
         feedback_history = _dedupe(feedback_history + list(blocking) + list(attempt.repair_warnings))
         if on_workflow_event is not None:
             on_workflow_event(WorkflowEvent.QUALITY_RECHECK, f"round={round_index + 1}")
+        if not attempt.changed and not any("model-call-failed" in item for item in attempt.repair_warnings):
+            return QualityRepairResult(
+                markdown=current,
+                xml=xml,
+                warnings=list(warnings),
+                blocking_warnings=list(blocking),
+                repair_warnings=_dedupe(repair_warnings),
+                attempts=attempts,
+            )
 
     raise AssertionError("quality repair loop terminated unexpectedly")
 
