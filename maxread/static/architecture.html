@@ -125,17 +125,19 @@
     .phase-index-svg { fill: #8a928a; font: 10px "JetBrains Mono", ui-monospace, monospace; }
     .phase-title-svg { fill: var(--ink); font-size: 13px; font-weight: 720; }
     .graph-edge {
-      fill: none; stroke: #b8c0b9; stroke-width: 1.35; opacity: .52;
+      fill: none; stroke: #919d94; stroke-width: 1.55; opacity: .78;
+      stroke-linecap: round; stroke-linejoin: round;
       vector-effect: non-scaling-stroke; transition: stroke .2s, opacity .2s, stroke-width .2s;
     }
     .graph-edge.scenario { stroke: #c48a52; stroke-width: 2.1; opacity: .88; }
     .graph-edge.traversed { stroke: var(--green); stroke-width: 2.4; opacity: 1; }
     .graph-edge.next { stroke: var(--amber); stroke-width: 2.8; opacity: 1; }
     .edge-label-svg rect {
-      fill: rgba(255, 255, 255, .94); stroke: #d8ded8; stroke-width: 1;
+      fill: rgba(255, 255, 255, .98); stroke: #cbd3cc; stroke-width: 1;
       vector-effect: non-scaling-stroke;
     }
-    .edge-label-svg text { fill: #727a72; font-size: 9px; font-weight: 680; text-anchor: middle; }
+    .edge-label-svg { pointer-events: none; }
+    .edge-label-svg text { fill: #59645c; font-size: 9px; font-weight: 700; text-anchor: middle; }
     .edge-label-svg.scenario rect { fill: #fff7ee; stroke: #ddbc99; }
     .edge-label-svg.scenario text { fill: #8b5425; }
     .edge-label-svg.traversed rect { fill: #edf6f1; stroke: #a2c2b2; }
@@ -583,14 +585,16 @@
           '<text class="phase-index-svg" x="' + (x + 14) + '" y="44">' + phase.index + '</text>' +
           '<text class="phase-title-svg" x="' + (x + 14) + '" y="64">' + esc(phase.label) + '</text>';
       }).join('');
-      const edgeSvg = spec.transitions.map((edge, index) => renderGraphEdge(edge, index, scenarioEdges, traversedEdges, nextEdge)).join('');
+      const renderedEdges = spec.transitions.map((edge, index) => renderGraphEdge(edge, index, scenarioEdges, traversedEdges, nextEdge));
+      const edgePathSvg = renderedEdges.map(item => item.path).join('');
+      const edgeLabelSvg = renderedEdges.map(item => item.label).join('');
       const nodeSvg = spec.states.map(item => stateNodeSvg(item, path, visited, current)).join('');
       byId('machine-root').className = 'machine';
       byId('machine-root').innerHTML = '<div class="flow-surface"><div class="graph-scroll"><svg class="state-graph" viewBox="0 0 ' + GRAPH.width + ' ' + GRAPH.height + '" role="img" aria-label="MaxRead workflow state transition graph">' +
-        '<defs><marker id="arrow-default" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 8 4 0 8z" fill="#b8c0b9"/></marker>' +
-        '<marker id="arrow-path" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 8 4 0 8z" fill="#c48a52"/></marker>' +
-        '<marker id="arrow-done" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 8 4 0 8z" fill="#25634f"/></marker></defs>' +
-        '<g class="phase-layer">' + phaseRegions + '</g><g class="edge-layer">' + edgeSvg + '</g><g class="node-layer">' + nodeSvg + '</g></svg></div>' +
+        '<defs><marker id="arrow-default" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 9 4.5 0 9z" fill="#7f8c82"/></marker>' +
+        '<marker id="arrow-path" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 9 4.5 0 9z" fill="#c48a52"/></marker>' +
+        '<marker id="arrow-done" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 9 4.5 0 9z" fill="#25634f"/></marker></defs>' +
+        '<g class="phase-layer">' + phaseRegions + '</g><g class="edge-layer">' + edgePathSvg + '</g><g class="node-layer">' + nodeSvg + '</g><g class="edge-label-layer">' + edgeLabelSvg + '</g></svg></div>' +
         '<div class="graph-legend"><span class="legend-item"><i class="legend-line"></i>固定转移</span><span class="legend-item"><i class="legend-line path"></i>当前场景路径</span><span class="legend-item"><i class="legend-line done"></i>已走过的边</span><span class="legend-item"><i class="legend-line policy"></i>全局条件策略</span></div>' +
         renderPolicyRail() + '</div><aside class="inspector" id="inspector"></aside>';
       document.querySelectorAll('.graph-node').forEach(node => {
@@ -611,7 +615,6 @@
       if (item.terminal) classes.push('terminal');
       const badge = item.terminal ? '<text class="node-badge-svg" x="' + (position[0] + 44) + '" y="' + (position[1] + 51) + '">' + (item.retryable ? '终态 · 可重试' : '终态') + '</text>' : '';
       return '<g class="' + classes.join(' ') + '" data-state="' + esc(item.id) + '" tabindex="0" role="button" aria-label="' + esc(item.label) + '">' +
-        '<title>' + esc(item.label + '：' + item.detail) + '</title>' +
         '<rect x="' + position[0] + '" y="' + position[1] + '" width="' + GRAPH.nodeWidth + '" height="' + GRAPH.nodeHeight + '" rx="7" />' +
         '<circle class="node-dot-svg" cx="' + (position[0] + 18) + '" cy="' + (position[1] + 22) + '" r="4" />' +
         '<text class="node-label-svg" x="' + (position[0] + 31) + '" y="' + (position[1] + 25) + '">' + esc(item.label) + '</text>' +
@@ -631,8 +634,11 @@
       if (key === nextEdge) { classes.push('next'); labelClasses.push('next'); marker = 'arrow-path'; }
       const route = edgeRoute(edge, index);
       const width = Math.max(58, Math.min(100, 18 + Array.from(edge.label || '').length * 10));
-      return '<path class="' + classes.join(' ') + '" d="' + route.d + '" marker-end="url(#' + marker + ')"><title>' + esc(edge.event + '：' + edge.condition) + '</title></path>' +
-        '<g class="' + labelClasses.join(' ') + '" transform="translate(' + route.labelX + ' ' + route.labelY + ')"><title>' + esc(edge.event + '：' + edge.condition) + '</title><rect x="' + (-width / 2) + '" y="-10" width="' + width + '" height="20" rx="5"/><text y="3">' + esc(edge.label) + '</text></g>';
+      const description = esc(edge.event + '：' + edge.condition);
+      return {
+        path: '<path class="' + classes.join(' ') + '" d="' + route.d + '" marker-end="url(#' + marker + ')" aria-label="' + description + '"></path>',
+        label: '<g class="' + labelClasses.join(' ') + '" transform="translate(' + route.labelX + ' ' + route.labelY + ')" aria-label="' + description + '"><rect x="' + (-width / 2) + '" y="-10" width="' + width + '" height="20" rx="5"/><text y="3">' + esc(edge.label) + '</text></g>',
+      };
     }
 
     function edgeRoute(edge, index) {
@@ -659,7 +665,7 @@
         const startX = sourceRight + 10;
         return {
           d: 'M ' + sourceRight + ' ' + sourceCenter + ' L ' + startX + ' ' + terminalLane + ' L ' + busX + ' ' + terminalLane + ' L ' + busX + ' ' + targetCenter + ' L ' + targetLeft + ' ' + targetCenter,
-          labelX: busX - 4, labelY: terminalLane - 12,
+          labelX: (startX + busX) / 2, labelY: terminalLane - 12,
         };
       }
       if (edge.event === 'resume_published') {
@@ -681,10 +687,13 @@
         const x = source[0] + GRAPH.nodeWidth / 2;
         const startY = upward ? source[1] : source[1] + GRAPH.nodeHeight;
         const endY = upward ? target[1] + GRAPH.nodeHeight : target[1];
-        const curveX = edge.event.endsWith('_recheck') ? x - 38 : x;
+        const isRecheck = edge.event.endsWith('_recheck');
+        const isRepair = edge.event.endsWith('_repair_required');
+        const laneOffset = isRecheck ? -52 : (isRepair ? 52 : 0);
+        const curveX = x + laneOffset;
         return {
           d: curveX === x ? 'M ' + x + ' ' + startY + ' C ' + x + ' ' + (startY + (endY - startY) / 3) + ', ' + x + ' ' + (endY - (endY - startY) / 3) + ', ' + x + ' ' + endY : 'M ' + x + ' ' + startY + ' C ' + curveX + ' ' + startY + ', ' + curveX + ' ' + endY + ', ' + x + ' ' + endY,
-          labelX: curveX, labelY: (startY + endY) / 2,
+          labelX: curveX, labelY: (startY + endY) / 2 + (isRecheck ? -6 : (isRepair ? 6 : 0)),
         };
       }
       const middleX = (sourceRight + targetLeft) / 2;
