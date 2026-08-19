@@ -95,6 +95,24 @@ def test_store_queue_jobs_and_watchers(tmp_path):
     store.close()
 
 
+def test_recent_job_duration_uses_recent_success_median(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    for index, minutes in enumerate((5, 10, 15), start=1):
+        store.conn.execute(
+            """
+            insert into queue_jobs (
+                dedupe_key, source_kind, source_id, source_url, status, started_at, finished_at
+            ) values (?, 'paper', ?, 'url', 'done', datetime('now', ?), current_timestamp)
+            """,
+            (f"paper:{index}", str(index), f"-{minutes} minutes"),
+        )
+    store.conn.commit()
+
+    assert 599 <= store.recent_job_duration_seconds("paper") <= 601
+    assert store.recent_job_duration_seconds("article") == 300
+    store.close()
+
+
 def test_store_validates_workflow_transitions_and_records_versions(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     usage_id = store.add_usage_event("evt", "om", "oc", "p2p", "ou_1", "paper", "2604.12946", "url", status="queued")

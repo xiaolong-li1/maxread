@@ -589,6 +589,40 @@ class Store:
         ).fetchone()
         return int(pos["n"])
 
+    def recent_job_duration_seconds(self, source_kind: str = "", limit: int = 12) -> int:
+        """Return a robust recent completion estimate for queue ETA messages."""
+        params = []
+        kind_clause = ""
+        if source_kind:
+            kind_clause = "and source_kind = ?"
+            params.append(str(source_kind))
+        params.append(max(3, int(limit or 12)))
+        rows = self.conn.execute(
+            f"""
+            select cast((julianday(finished_at) - julianday(started_at)) * 86400 as integer) as duration
+            from queue_jobs
+            where status = 'done'
+              and started_at is not null
+              and finished_at is not null
+              and finished_at >= datetime('now', '-14 days')
+              {kind_clause}
+            order by finished_at desc
+            limit ?
+            """,
+            params,
+        ).fetchall()
+        durations = sorted(
+            int(row["duration"])
+            for row in rows
+            if row["duration"] is not None and 30 <= int(row["duration"]) <= 10800
+        )
+        if not durations:
+            return 300
+        middle = len(durations) // 2
+        if len(durations) % 2:
+            return durations[middle]
+        return round((durations[middle - 1] + durations[middle]) / 2)
+
     def queued_count(self) -> int:
         row = self.conn.execute("select count(*) as n from queue_jobs where status = 'queued'").fetchone()
         return int(row["n"])

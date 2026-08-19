@@ -274,13 +274,23 @@ class _LimitedFeishu:
             return wrapped
         return attr
 
-def enqueue_event_items(settings: Settings, store: Store, feishu: FeishuClient, event: FeishuEvent, paper_refs: List[PaperRef], web_refs: List[WebRef]) -> None:
+def enqueue_event_items(
+    settings: Settings,
+    store: Store,
+    feishu: FeishuClient,
+    event: FeishuEvent,
+    paper_refs: List[PaperRef],
+    web_refs: List[WebRef],
+    *,
+    retry_requested: bool = False,
+) -> None:
     items = [QueueItem("paper", ref.paper_id, ref.url, ref.paper_id) for ref in paper_refs]
     items.extend(QueueItem("article", ref.url, ref.url, ref.url) for ref in web_refs)
     if not items:
         return
     _react(feishu, event.message_id, "start")
-    lines = [f"收到 {len(items)} 篇，已加入全局队列。"]
+    action = "已重新加入全局队列" if retry_requested else "已加入全局队列"
+    lines = [f"收到 {len(items)} 篇，{action}。"]
     for item in items:
         cached = _cached_doc(store, item)
         if cached:
@@ -292,21 +302,39 @@ def enqueue_event_items(settings: Settings, store: Store, feishu: FeishuClient, 
         queued = store.enqueue_job(item.kind, item.source_id, item.source_url, event.event_id, event.message_id, event.chat_id, event.chat_type, event.sender_id, usage_id)
         pos = store.queue_position(int(queued["job_id"]))
         if queued["created"]:
-            lines.append(f"- {item.label}：{_queue_eta_text(pos, settings.queue_workers)}")
+            duration = store.recent_job_duration_seconds(item.kind)
+            lines.append(f"- {item.label}：{_queue_eta_text(pos, settings.queue_workers, duration)}")
         else:
             store.update_usage_event(usage_id, "watching")
             lines.append(f"- {item.label}：已经在队列/处理中，完成后会通知你。")
     _reply(feishu, event.message_id, "\n".join(lines), f"queue:{event.event_id}")
 
 
-def _queue_eta_text(position: int, workers: int) -> str:
+def _queue_eta_text(position: int, workers: int, recent_duration_seconds: int = 300) -> str:
     pos = max(1, int(position or 1))
     worker_count = max(1, int(workers or 1))
     batch_no = (pos - 1) // worker_count + 1
-    wait = max(0, batch_no - 1) * 3
+    duration = max(60, int(recent_duration_seconds or 300))
+    wait = max(0, batch_no - 1) * duration
+    complete = batch_no * duration
     if batch_no == 1:
-        return f"队列第 {pos} 位，并发槽位内，预计马上开始。"
-    return f"队列第 {pos} 位，约第 {batch_no} 批开始，预计等待约 {wait} 分钟。"
+        return (
+            f"队列第 {pos} 位，并发槽位内；预计等待约 0 分钟，"
+            f"预计生成约 {_duration_text(duration)}，预计完成约 {_duration_text(complete)}。"
+        )
+    return (
+        f"队列第 {pos} 位，约第 {batch_no} 批开始；"
+        f"预计等待约 {_duration_text(wait)}，预计生成约 {_duration_text(duration)}，"
+        f"预计完成约 {_duration_text(complete)}。"
+    )
+
+
+def _duration_text(seconds: int) -> str:
+    minutes = max(1, round(max(0, int(seconds)) / 60))
+    if minutes < 60:
+        return f"{minutes} 分钟"
+    hours, remaining = divmod(minutes, 60)
+    return f"{hours} 小时" if not remaining else f"{hours} 小时 {remaining} 分钟"
 
 
 
@@ -374,7 +402,10 @@ def _notify_watchers(store: Store, feishu: FeishuClient, job_id: int, source_id:
             if usage_id:
                 store.update_usage_event(usage_id, "failed", title=title, error=error)
             reason = str(error).replace("\n", " ")[:500]
-            text = f"这篇我没读成：{source_id}\n原因：{reason}"
+            text = (
+                f"这篇我没读成：{source_id}\n原因：{reason}\n"
+                "需要再试时，直接在本话题回复「重试」；也可以回复「重试 + 论文 ID」。"
+            )
             prefix = f"job-fail:{job_id}:{watcher['id']}"
         try:
             _reply(feishu, watcher["message_id"], text, prefix)

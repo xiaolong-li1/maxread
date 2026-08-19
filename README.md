@@ -117,16 +117,19 @@ Before publishing, MaxRead sanitizes LaTeX/Markdown formatting, checks required 
 
 Paper generation is also a bounded state-machine loop: each output enters `generation_checking`, deterministic cleanup runs first, and a failed check enters `generation_repairing` with the previous output and exact errors included in the next model prompt. `MAXREAD_GENERATION_REPAIR_ROUNDS` controls model repair rounds (default `2`, three total generation opportunities). Exhausting the budget enters the retryable `generation_incomplete` terminal state without publishing.
 
+Retries are durable across queue jobs. MaxRead reloads the latest failed draft plus the generation, pre-publish quality, and visual QA ledgers from `pipeline_artifacts`; the repair prompt treats those diagnostics as a no-regression checklist. In a Feishu topic, a user can reply `重试` to the failure message (or `重试 2608.10416`) without reposting the original link or mentioning the bot again. Queue acknowledgements estimate start and completion time from the median duration of recent successful jobs of the same source kind instead of a fixed per-batch constant.
+
 An optional browser worker can inspect the published Feishu document for invalid formulas, leaked formatting commands, image overflow, excessive image whitespace, and blank sections. Enable it only when the coordinator can SSH to the worker host:
 
 ```bash
 MAXREAD_VISUAL_QA_ENABLED=true
 MAXREAD_VISUAL_QA_HOST=ziplab-5090
 MAXREAD_VISUAL_QA_RUNNER=/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh
+MAXREAD_VISUAL_QA_INSPECT_RETRIES=2
 MAXREAD_VISUAL_QA_REPAIR_ROUNDS=3
 ```
 
-The worker is read-only. After publishing, MaxRead performs up to three inspect -> repair -> screenshot recheck cycles. Deterministic block repairs run first; if a formula still fails, the configured model may return a strictly validated block-level repair. Each visual round, screenshot path, finding, and model response is saved as `09-visual-qa.json`. If MaxRead itself runs on `ziplab-5090`, keep this option disabled unless that machine has a working SSH alias back to itself.
+The worker is read-only. Browser-runner infrastructure failures are retried twice by default (three attempts total); later attempts use twice the base timeout. Only after a screenshot inspection succeeds does MaxRead enter up to three inspect -> repair -> screenshot recheck cycles. Deterministic block repairs run first; if a formula still fails, the configured model may return a strictly validated block-level repair. Each infrastructure attempt, visual round, screenshot path, finding, and model response is saved as `09-visual-qa.json`. If MaxRead itself runs on `ziplab-5090`, keep this option disabled unless that machine has a working SSH alias back to itself.
 
 Set `MAXREAD_OPENAI_API_MODE=chat` for OpenAI-compatible gateways whose
 `/chat/completions` implementation follows instructions more reliably than

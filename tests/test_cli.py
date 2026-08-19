@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from maxread.cli import _extract_event_supported_inputs, _is_feedback_text, _record_feedback, _should_accept_event
+from maxread.cli import _extract_event_supported_inputs, _is_feedback_text, _is_retry_command, _record_feedback, _should_accept_event
 from maxread.db import Store
 
 
@@ -14,6 +14,18 @@ def test_group_event_requires_bot_mention():
     assert _should_accept_event(SimpleNamespace(chat_type="group", mentioned_bot=True)) is True
 
 
+def test_group_topic_retry_is_accepted_without_rementioning_bot():
+    event = SimpleNamespace(
+        chat_type="group",
+        mentioned_bot=False,
+        content="重试",
+        raw={"event": {"message": {"thread_id": "omt_topic"}}},
+    )
+    assert _should_accept_event(event) is True
+    assert _is_retry_command("@读不动了 重试 2604.12946") is True
+    assert _is_retry_command("为什么还要重试") is False
+
+
 class _ContextFeishu:
     def fetch_related_message_text(self, event):
         return "原消息 https://arxiv.org/abs/2604.12946"
@@ -21,6 +33,18 @@ class _ContextFeishu:
 
 def test_group_mention_uses_parent_context_when_reply_has_no_link():
     event = SimpleNamespace(chat_type="group", mentioned_bot=True, content="@MaxRead 看看这个")
+    refs, web_refs = _extract_event_supported_inputs(_ContextFeishu(), event)
+    assert [ref.paper_id for ref in refs] == ["2604.12946"]
+    assert web_refs == []
+
+
+def test_topic_retry_without_mention_uses_thread_context():
+    event = SimpleNamespace(
+        chat_type="group",
+        mentioned_bot=False,
+        content="重试",
+        raw={"event": {"message": {"thread_id": "omt_topic"}}},
+    )
     refs, web_refs = _extract_event_supported_inputs(_ContextFeishu(), event)
     assert [ref.paper_id for ref in refs] == ["2604.12946"]
     assert web_refs == []

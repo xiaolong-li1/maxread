@@ -3,7 +3,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _generate_complete_paper_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _write_paper_artifact
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _generate_complete_paper_markdown, _load_retry_context, _require_renderable_source_figures, _sanitize_repository_markdown, _write_paper_artifact
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 from maxread.workflow import WorkflowEvent, WorkflowState
@@ -169,6 +169,15 @@ class RepairingGenerationLLM(FakeLLM):
         self.prompts.append(user)
         if self.calls == 1:
             return "The user wants me to draft a document.\n" + ("incomplete " * 220)
+        return super().responses_text(system, user, **kwargs)
+
+
+class CapturingGenerationLLM(FakeLLM):
+    def __init__(self):
+        self.prompts = []
+
+    def responses_text(self, system, user, **kwargs):
+        self.prompts.append(user)
         return super().responses_text(system, user, **kwargs)
 
 
@@ -338,6 +347,70 @@ def test_generation_repairs_invalid_output_with_previous_draft_and_exact_errors(
         WorkflowEvent.GENERATION_REPAIR_REQUIRED,
         WorkflowEvent.GENERATION_RECHECK,
     ]
+
+
+def test_manual_retry_starts_from_previous_draft_and_failure_ledger():
+    llm = CapturingGenerationLLM()
+    previous = "# Previous\n\n**TL;DR**：旧稿。\n\n缺少后续章节。"
+
+    result = _generate_complete_paper_markdown(
+        llm,
+        "生成文档",
+        [],
+        paper_id="2604.12946",
+        title="Fake Paper",
+        previous_markdown=previous,
+        prior_feedback=["attempt 3: missing-section-7", "quality:formula:xml:high:html-tag-in-formula"],
+    )
+
+    assert result.startswith("# Fake Paper\n")
+    assert len(llm.prompts) == 1
+    assert "BEGIN PREVIOUS OUTPUT" in llm.prompts[0]
+    assert previous in llm.prompts[0]
+    assert "missing-section-7" in llm.prompts[0]
+    assert "html-tag-in-formula" in llm.prompts[0]
+    assert "不得再次引入" in llm.prompts[0]
+
+
+def test_retry_context_loads_previous_draft_and_all_quality_layers(tmp_path):
+    bundle = FakeArxiv().fetch("2604.12946")
+    bundle.pdf_path = tmp_path / "paper.pdf"
+    bundle.pdf_path.write_bytes(b"pdf")
+    artifacts = tmp_path / "pipeline_artifacts"
+    artifacts.mkdir()
+    (artifacts / "01-20260819T010000Z-attempt-3.md").write_text("# Failed draft\n", encoding="utf-8")
+    (artifacts / "01-20260819T010000Z-attempt-3.json").write_text(
+        json.dumps({"attempt": 3, "errors": ["missing-section-7"]}),
+        encoding="utf-8",
+    )
+    (artifacts / "05-final.md").write_text("# Quality failed draft\n", encoding="utf-8")
+    (artifacts / "07-quality-round-3.json").write_text(
+        json.dumps({"blocking_warnings": ["quality:formula:xml:high:html-tag-in-formula"]}),
+        encoding="utf-8",
+    )
+    (artifacts / "09-visual-qa.json").write_text(
+        json.dumps(
+            {
+                "rounds": [
+                    {
+                        "round": 2,
+                        "findings": [
+                            {"kind": "invalid-formula", "detail": "页面有无效公式", "section": "3.1 方法"}
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    context = _load_retry_context(bundle)
+
+    assert context.previous_markdown == "# Quality failed draft\n"
+    assert any("missing-section-7" in item for item in context.feedback)
+    assert any("html-tag-in-formula" in item for item in context.feedback)
+    assert any("页面有无效公式" in item for item in context.feedback)
 
 
 def test_generation_enters_incomplete_only_after_bounded_attempts_are_exhausted():

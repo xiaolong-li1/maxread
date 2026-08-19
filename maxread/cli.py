@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from hashlib import sha256
 from pathlib import Path
@@ -247,6 +248,7 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
     if not _should_accept_event(event):
         return
 
+    retry_requested = _is_retry_command(event.content)
     refs, web_refs = _extract_event_supported_inputs(article_pipeline.feishu, event)
 
     if _is_private_chat(event) and store.should_send_intro_to_user(event.sender_id):
@@ -254,6 +256,9 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
         store.mark_intro_sent(event.sender_id)
 
     if not refs and not web_refs:
+        if retry_requested:
+            _reply_retry_missing(article_pipeline.feishu, event)
+            return
         if _is_private_chat(event):
             if _record_feedback(store, article_pipeline.feishu, event, feedback_llm):
                 return
@@ -262,14 +267,26 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
         elif getattr(event, "mentioned_bot", False):
             _reply_group_intro(article_pipeline.feishu, event)
         return
-    enqueue_event_items(settings, store, article_pipeline.feishu, event, refs, web_refs)
+    enqueue_event_items(
+        settings,
+        store,
+        article_pipeline.feishu,
+        event,
+        refs,
+        web_refs,
+        retry_requested=retry_requested,
+    )
 
 
 def _extract_event_supported_inputs(feishu: FeishuClient, event) -> Tuple[List[PaperRef], List[WebRef]]:
     refs, web_refs = extract_supported_inputs(event.content)
-    if refs or web_refs or _is_private_chat(event):
+    if refs or web_refs:
         return refs, web_refs
-    if not getattr(event, "mentioned_bot", False):
+    if _is_private_chat(event):
+        return refs, web_refs
+    if not getattr(event, "mentioned_bot", False) and not (
+        _is_retry_command(event.content) and _is_thread_reply(event)
+    ):
         return refs, web_refs
     context = feishu.fetch_related_message_text(event)
     if not context:
@@ -280,11 +297,36 @@ def _extract_event_supported_inputs(feishu: FeishuClient, event) -> Tuple[List[P
 def _should_accept_event(event) -> bool:
     if _is_private_chat(event):
         return True
-    return bool(getattr(event, "mentioned_bot", False))
+    if getattr(event, "mentioned_bot", False):
+        return True
+    return _is_retry_command(getattr(event, "content", "")) and _is_thread_reply(event)
 
 
 def _is_private_chat(event) -> bool:
     return str(getattr(event, "chat_type", "")).lower() in {"p2p", "private"}
+
+
+def _is_retry_command(content: str) -> bool:
+    text = plain_message_text(str(content or "")).strip()
+    text = re.sub(r"@(?:读不动了|maxread|_user_\d+)\s*", "", text, flags=re.I).strip()
+    return bool(re.fullmatch(r"(?:请|麻烦)?\s*(?:帮我)?\s*(?:重试|再试一次|重新生成|重新读)(?:\s+.*)?[。.!！]?", text, flags=re.I))
+
+
+def _is_thread_reply(event) -> bool:
+    keys = {"thread_id", "root_id", "parent_id", "root_message_id", "parent_message_id", "thread_root_id"}
+
+    def walk(value) -> bool:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if str(key).lower() in keys and str(child or "").startswith(("om_", "omt_")):
+                    return True
+                if walk(child):
+                    return True
+        elif isinstance(value, list):
+            return any(walk(child) for child in value)
+        return False
+
+    return walk(getattr(event, "raw", {}) or {})
 
 
 def _reply_intro(feishu: FeishuClient, event, feedback_url: str) -> None:
@@ -307,6 +349,18 @@ def _reply_no_supported_link(feishu: FeishuClient, event) -> None:
     key = sha256(f"no-link:{event.event_id}:{event.message_id}".encode("utf-8")).hexdigest()[:32]
     try:
         feishu.reply_text(event.message_id, "我在这个话题里没找到 arXiv 或支持的链接。", idempotency_key=key)
+    except Exception:
+        pass
+
+
+def _reply_retry_missing(feishu: FeishuClient, event) -> None:
+    key = sha256(f"retry-missing:{event.event_id}:{event.message_id}".encode("utf-8")).hexdigest()[:32]
+    try:
+        feishu.reply_text(
+            event.message_id,
+            "我在这个话题里没找到可重试的论文或文章。请回复「重试 2608.10416」，或重新带上原链接。",
+            idempotency_key=key,
+        )
     except Exception:
         pass
 

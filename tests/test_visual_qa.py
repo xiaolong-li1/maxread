@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from types import SimpleNamespace
 
+import maxread.visual_qa as visual_qa_module
 from maxread.visual_qa import (
     RemoteVisualResult,
     VisualFinding,
@@ -39,9 +42,11 @@ class StubVisualQA(VisualQAController):
 class FormulaRepairLLM:
     def __init__(self):
         self.calls = 0
+        self.users = []
 
     def responses_text(self, system, user, **kwargs):
         self.calls += 1
+        self.users.append(user)
         return '{"repairs":[{"id":"formula","mode":"latex","value":"a=1\\\\text{ok}"}]}'
 
 
@@ -173,7 +178,12 @@ def test_controller_accepts_nonblocking_visual_findings_without_repair_loop():
         ]
     )
 
-    result = controller.run(feishu, "doc", source_id="paper")
+    result = controller.run(
+        feishu,
+        "doc",
+        source_id="paper",
+        previous_feedback=["visual round 0: invalid-formula: unsupported macro remained"],
+    )
 
     assert result.passed is True
     assert controller.calls == ["paper"]
@@ -223,12 +233,19 @@ def test_controller_uses_model_after_deterministic_formula_repair_makes_no_chang
     )
     controller.llm = llm
 
-    result = controller.run(feishu, "doc", source_id="paper")
+    result = controller.run(
+        feishu,
+        "doc",
+        source_id="paper",
+        previous_feedback=["visual round 0: invalid-formula: unsupported macro remained"],
+    )
 
     assert result.passed is True
     assert llm.calls == 1
     assert result.rounds[0].repair_strategy == "model-formula"
     assert result.rounds[0].model_used is True
+    assert "unsupported macro remained" in llm.users[0]
+    assert "不得重复同样的无效修改" in llm.users[0]
     assert feishu.replacements[0][1] == "formula"
     assert "<latex>a=1" in feishu.replacements[0][2]
 
@@ -237,6 +254,40 @@ def test_last_json_object_ignores_ssh_banner():
     payload = _last_json_object('banner\n{"status":"ok","findings":[]}\n')
 
     assert payload == {"status": "ok", "findings": []}
+
+
+def test_inspect_remote_retries_timeout_with_larger_budget(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(kwargs["timeout"])
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout=json.dumps(
+                {
+                    "status": "ok",
+                    "findings": [],
+                    "screenshots": ["/tmp/page.png"],
+                }
+            ),
+        )
+
+    monkeypatch.setattr(visual_qa_module.subprocess, "run", fake_run)
+    controller = VisualQAController(
+        enabled=True,
+        host="local",
+        timeout=15,
+        inspect_retries=2,
+    )
+
+    result = controller.inspect_remote("https://tenant.feishu.cn/docx/doc123", source_id="paper")
+
+    assert result.status == "ok"
+    assert calls == [15, 30]
+    assert [item["status"] for item in result.raw["inspect_attempts"]] == ["error", "ok"]
 
 
 def test_from_settings_uses_independent_visual_model_when_configured():

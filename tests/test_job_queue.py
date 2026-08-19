@@ -2,7 +2,7 @@ from threading import BoundedSemaphore
 
 from maxread.db import Store
 
-from maxread.job_queue import _LimitedLLM, _notify_watchers_progress, _queue_eta_text
+from maxread.job_queue import _LimitedLLM, _notify_watchers, _notify_watchers_progress, _queue_eta_text
 
 
 class _DummyLLM:
@@ -60,9 +60,9 @@ class _ReactionFeishu:
 
 
 def test_queue_eta_text_accounts_for_parallel_workers():
-    assert _queue_eta_text(1, 5) == "队列第 1 位，并发槽位内，预计马上开始。"
-    assert _queue_eta_text(5, 5) == "队列第 5 位，并发槽位内，预计马上开始。"
-    assert _queue_eta_text(6, 5) == "队列第 6 位，约第 2 批开始，预计等待约 3 分钟。"
+    assert _queue_eta_text(1, 5, 720) == "队列第 1 位，并发槽位内；预计等待约 0 分钟，预计生成约 12 分钟，预计完成约 12 分钟。"
+    assert _queue_eta_text(5, 5, 720) == "队列第 5 位，并发槽位内；预计等待约 0 分钟，预计生成约 12 分钟，预计完成约 12 分钟。"
+    assert _queue_eta_text(6, 5, 720) == "队列第 6 位，约第 2 批开始；预计等待约 12 分钟，预计生成约 12 分钟，预计完成约 24 分钟。"
 
 
 def test_notify_watchers_progress_uses_reactions_not_text(tmp_path):
@@ -77,4 +77,17 @@ def test_notify_watchers_progress_uses_reactions_not_text(tmp_path):
     assert feishu.replies == []
     events = store.list_job_events(queued["job_id"], 10)
     assert any(event["event_type"] == "react_writing" for event in events)
+    store.close()
+
+
+def test_failed_notification_explains_topic_retry(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om_1", "oc", "group", "ou", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om_1", "oc", "group", "ou", usage_id)
+    feishu = _ReactionFeishu()
+
+    _notify_watchers(store, feishu, queued["job_id"], "2604.12946", "", "Title", "quality failed")
+
+    assert len(feishu.replies) == 1
+    assert "本话题回复「重试」" in feishu.replies[0][1]
     store.close()

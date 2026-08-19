@@ -4,11 +4,11 @@ import traceback
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from .arxiv import ArxivClient
 from .db import Store
@@ -41,6 +41,14 @@ class IncompleteGenerationError(RuntimeError):
         self.errors = list(errors)
         self.attempts = attempts
         super().__init__(", ".join(self.errors) or "unknown-format-error")
+
+
+@dataclass
+class RetryContext:
+    """Previous durable diagnostics used as input to a later manual retry."""
+
+    previous_markdown: str = ""
+    feedback: list[str] = field(default_factory=list)
 
 
 class MaxReadPipeline:
@@ -129,6 +137,7 @@ class MaxReadPipeline:
                     indent=2,
                 ),
             )
+            retry_context = _load_retry_context(bundle)
             _remove_paper_artifact(bundle, "08-failure.txt")
             if self.require_source and not bundle.source_text:
                 message = _source_required_message(ref.paper_id, bundle.parse_warnings)
@@ -154,13 +163,16 @@ class MaxReadPipeline:
                 markers = [marker for marker, _path, _caption in figure_inserts]
                 repository_url = find_repository_url(bundle)
                 generation_run = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                generation_prompt = build_final_user_prompt(bundle, figure_inserts, figure_visuals)
                 markdown = _generate_complete_paper_markdown(
                     self.llm,
-                    build_final_user_prompt(bundle, figure_inserts, figure_visuals),
+                    generation_prompt,
                     markers,
                     attempts=self.generation_repair_rounds + 1,
                     paper_id=bundle.metadata.paper_id,
                     title=bundle.metadata.title,
+                    prior_feedback=retry_context.feedback,
+                    previous_markdown=retry_context.previous_markdown,
                     attempt_writer=lambda attempt, raw, errors: _write_generation_attempt(
                         bundle, generation_run, attempt, raw, errors
                     ),
@@ -216,6 +228,7 @@ class MaxReadPipeline:
                     kind="paper",
                     reasoning_effort=self.review_reasoning_effort,
                     completeness_check=lambda candidate: paper_markdown_completeness_errors(candidate, markers),
+                    prior_feedback=retry_context.feedback,
                     on_workflow_event=self._workflow,
                 )
                 _write_quality_repair_artifacts(bundle, quality_result)
@@ -393,6 +406,7 @@ class MaxReadPipeline:
                     expected_image_min=checkpoint.expected_image_min,
                     expected_formula_min=checkpoint.expected_latex_min,
                     expected_table_min=checkpoint.expected_table_min,
+                    previous_feedback=[record.error] if record and record.error else (),
                     on_workflow_event=self._workflow,
                 )
                 warnings.extend(visual_result.warnings)
@@ -477,19 +491,10 @@ def _require_renderable_source_figures(bundle: PaperBundle, figures) -> None:
 
 def _write_paper_artifact(bundle: PaperBundle, name: str, content: str) -> None:
     """Persist pipeline stages without making diagnostics part of the happy path."""
-    candidates = [bundle.pdf_path, bundle.source_path]
-    root = next(
-        (
-            Path(path).parent
-            for path in candidates
-            if path and Path(path).is_absolute() and Path(path).parent.exists()
-        ),
-        None,
-    )
-    if root is None:
+    artifact_dir = _paper_artifact_dir(bundle)
+    if artifact_dir is None:
         return
     try:
-        artifact_dir = root / "pipeline_artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         target = artifact_dir / Path(name).name
         temporary = target.with_name(target.name + ".tmp")
@@ -500,21 +505,108 @@ def _write_paper_artifact(bundle: PaperBundle, name: str, content: str) -> None:
 
 
 def _remove_paper_artifact(bundle: PaperBundle, name: str) -> None:
-    candidates = [bundle.pdf_path, bundle.source_path]
-    root = next(
-        (
-            Path(path).parent
-            for path in candidates
-            if path and Path(path).is_absolute() and Path(path).parent.exists()
-        ),
-        None,
-    )
-    if root is None:
+    artifact_dir = _paper_artifact_dir(bundle)
+    if artifact_dir is None:
         return
     try:
-        (root / "pipeline_artifacts" / Path(name).name).unlink(missing_ok=True)
+        (artifact_dir / Path(name).name).unlink(missing_ok=True)
     except Exception:
         return
+
+
+def _paper_artifact_dir(bundle: PaperBundle) -> Optional[Path]:
+    for path in (bundle.pdf_path, bundle.source_path):
+        if path and Path(path).is_absolute() and Path(path).parent.exists():
+            return Path(path).parent / "pipeline_artifacts"
+    return None
+
+
+def _load_retry_context(bundle: PaperBundle, max_feedback: int = 16) -> RetryContext:
+    """Load the last failed draft and compact diagnostics from durable artifacts."""
+    artifact_dir = _paper_artifact_dir(bundle)
+    if artifact_dir is None or not artifact_dir.exists():
+        return RetryContext()
+
+    feedback: list[str] = []
+    markdown_candidates: list[Path] = []
+
+    for report in sorted(artifact_dir.glob("01-*-attempt-*.json"))[-12:]:
+        payload = _read_json_artifact(report)
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        if isinstance(errors, list) and errors:
+            label = report.stem.removesuffix(".json")
+            feedback.append(f"{label}: {', '.join(str(item) for item in errors)}")
+        markdown = report.with_suffix(".md")
+        if markdown.exists():
+            markdown_candidates.append(markdown)
+
+    for report in sorted(artifact_dir.glob("07-quality-round-*.json"))[-8:]:
+        payload = _read_json_artifact(report)
+        if not isinstance(payload, dict):
+            continue
+        blocking = payload.get("blocking_warnings")
+        if isinstance(blocking, list) and blocking:
+            feedback.append(f"{report.stem}: {', '.join(str(item) for item in blocking)}")
+
+    visual = _read_json_artifact(artifact_dir / "09-visual-qa.json")
+    if isinstance(visual, dict):
+        for item in list(visual.get("rounds") or [])[-4:]:
+            if not isinstance(item, dict):
+                continue
+            details = []
+            for finding in item.get("findings") or []:
+                if not isinstance(finding, dict):
+                    continue
+                detail = str(finding.get("detail") or finding.get("kind") or "").strip()
+                section = str(finding.get("section") or "").strip()
+                details.append(f"{detail} [section={section}]" if section else detail)
+            if details:
+                feedback.append(f"visual-round-{item.get('round', '?')}: {'; '.join(details)}")
+
+    failure_path = artifact_dir / "08-failure.txt"
+    if failure_path.exists():
+        try:
+            failure = failure_path.read_text(encoding="utf-8").strip()
+            if failure:
+                feedback.append(f"last-job: {failure}")
+        except OSError:
+            pass
+
+    preferred = [artifact_dir / "05-final.md"]
+    preferred.extend(sorted(artifact_dir.glob("05-quality-round-*.md"), reverse=True))
+    preferred.extend(reversed(markdown_candidates))
+    previous_markdown = ""
+    for candidate in preferred:
+        try:
+            text = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            previous_markdown = text + "\n"
+            break
+
+    return RetryContext(
+        previous_markdown=previous_markdown,
+        feedback=_dedupe_feedback(feedback)[-max(1, int(max_feedback)):],
+    )
+
+
+def _read_json_artifact(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return {}
+
+
+def _dedupe_feedback(values: Iterable[str]) -> list[str]:
+    output: list[str] = []
+    seen = set()
+    for value in values:
+        text = " ".join(str(value or "").split())[:700]
+        if text and text not in seen:
+            seen.add(text)
+            output.append(text)
+    return output
 
 
 def _write_generation_attempt(bundle: PaperBundle, run_id: str, attempt: int, markdown: str, errors) -> None:
@@ -569,12 +661,24 @@ def _generate_complete_paper_markdown(
     attempts: int = 3,
     paper_id: str = "",
     title: str = "",
+    prior_feedback: Optional[Iterable[str]] = None,
+    previous_markdown: str = "",
     attempt_writer: Optional[Callable[[int, str, list[str]], None]] = None,
     on_workflow_event: Optional[Callable[[WorkflowEvent, str], None]] = None,
 ) -> str:
     attempt_count = max(1, attempts)
     contract = _markdown_generation_contract(paper_id)
     prompt = user_prompt + contract
+    failure_history = _dedupe_feedback(prior_feedback or [])
+    if str(previous_markdown or "").strip():
+        prompt = _generation_repair_prompt(
+            user_prompt,
+            contract,
+            previous_markdown,
+            ["retry-from-previous-failed-draft"],
+            0,
+            history=failure_history,
+        )
     last_errors: list[str] = []
     last_markdown = ""
     last_exception = ""
@@ -635,6 +739,7 @@ def _generate_complete_paper_markdown(
             return repaired
         last_markdown = markdown
         last_errors = errors
+        current_feedback = _generation_feedback(errors, attempt_number)
         if attempt_number < attempt_count:
             if on_workflow_event:
                 on_workflow_event(
@@ -647,7 +752,9 @@ def _generate_complete_paper_markdown(
                 markdown,
                 errors,
                 attempt_number,
+                history=failure_history,
             )
+        failure_history.extend(item for item in current_feedback if item not in failure_history)
     if not had_model_output:
         raise RuntimeError("paper generation failed: " + (last_exception or "no model output"))
     raise IncompleteGenerationError(last_errors, attempts=attempt_count)
@@ -676,22 +783,51 @@ def _generation_repair_prompt(
     previous_markdown: str,
     errors,
     repair_round: int,
+    history: Optional[Iterable[str]] = None,
 ) -> str:
+    current_feedback = "\n".join(f"  - {item}" for item in _generation_feedback(errors, repair_round))
+    history_feedback = "\n".join(f"  - {item}" for item in _dedupe_feedback(history or [])) or "  - 无"
     return (
         user_prompt
         + contract
         + "\n\n生成修复任务（第 "
         + str(repair_round)
         + " 轮输出未通过）：\n"
-        + "- 精确错误："
-        + ", ".join(errors)
-        + "\n- 下面给出上一份原始输出。请修复这些错误并重新输出完整文档，不要只输出补丁。\n"
+        + "- 精确错误：本轮未通过项与验收要求如下。\n"
+        + current_feedback
+        + "\n- 历史失败账本（这些错误在更早尝试中出现过，不得再次引入）：\n"
+        + history_feedback
+        + "\n- 下面给出上一份完整输出。以它为基线逐项修复，不要从头另写，不要只输出补丁。\n"
+        + "- 输出前逐项自检本轮错误和历史失败账本；保留上一稿已经正确的章节、公式、表格和图片位置。\n"
         + "- 第一行必须是 `# ` 开头的 H1；不得有前置解释、JSON、YAML 或包住全文的代码围栏。\n"
         + "- 必须保留第 1 至第 7 章和已有的 MaxReadFigure 标记。不要复述本修复指令或分隔线。\n"
         + "\n----- BEGIN PREVIOUS OUTPUT -----\n"
         + previous_markdown.strip()
         + "\n----- END PREVIOUS OUTPUT -----\n"
     )
+
+
+def _generation_feedback(errors: Iterable[str], attempt_number: int) -> list[str]:
+    descriptions = {
+        "missing-h1": "第一个非空行不是 H1；最终输出必须直接以 `# ` 标题开始",
+        "leading-code-fence": "全文被 Markdown 代码围栏包裹；必须删除最外层围栏",
+        "prompt-leak": "正文泄露了模型的思考或指令复述；必须删除这些前置解释",
+        "duplicate-h1": "存在重复 H1 或重复完整文档；只保留一份最终文档",
+        "missing-tldr": "缺少 TL;DR；必须在标题后保留清晰的一句话摘要",
+        "retry-from-previous-failed-draft": "这是上一任务留下的失败稿；以历史失败账本为验收清单完成修复",
+    }
+    output = []
+    for error in errors:
+        code = str(error or "").strip()
+        if code.startswith("missing-section-"):
+            number = code.rsplit("-", 1)[-1]
+            detail = f"缺少第 {number} 章二级标题及正文；必须补齐该章，不能只放空标题"
+        elif code.startswith("too-few-figures:"):
+            detail = f"关键图 marker 数量不足（{code.split(':', 1)[-1]}）；按方法、实验、分析位置恢复要求数量"
+        else:
+            detail = descriptions.get(code, code)
+        output.append(f"attempt {attempt_number}: [{code}] {detail}")
+    return output
 
 
 def _markdown_generation_contract(paper_id: str) -> str:

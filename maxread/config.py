@@ -56,6 +56,7 @@ class Settings:
     visual_qa_runner: str
     visual_qa_remote_root: str
     visual_qa_timeout: int
+    visual_qa_inspect_retries: int
     visual_qa_max_sections: int
     visual_qa_max_repairs: int
     visual_qa_repair_rounds: int
@@ -118,6 +119,7 @@ class Settings:
                 "/home/lixiaolong/.local/share/maxread-browser",
             ),
             visual_qa_timeout=int(os.environ.get("MAXREAD_VISUAL_QA_TIMEOUT", "90")),
+            visual_qa_inspect_retries=max(0, int(os.environ.get("MAXREAD_VISUAL_QA_INSPECT_RETRIES", "2"))),
             visual_qa_max_sections=int(os.environ.get("MAXREAD_VISUAL_QA_MAX_SECTIONS", "12")),
             visual_qa_max_repairs=int(os.environ.get("MAXREAD_VISUAL_QA_MAX_REPAIRS", "2")),
             visual_qa_repair_rounds=max(0, int(os.environ.get("MAXREAD_VISUAL_QA_REPAIR_ROUNDS", "3"))),

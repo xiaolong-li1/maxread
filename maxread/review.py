@@ -62,11 +62,18 @@ def repair_markdown_with_quality_report(
     quality_warnings: Iterable[str],
     kind: str = "paper",
     reasoning_effort: str | None = None,
+    previous_feedback: Iterable[str] = (),
 ) -> ReviewResult:
     markers = list(markers)
     raw = llm.responses_text(
         REVIEW_SYSTEM_PROMPT,
-        build_quality_repair_user_prompt(markdown, markers, quality_warnings, kind),
+        build_quality_repair_user_prompt(
+            markdown,
+            markers,
+            quality_warnings,
+            kind,
+            previous_feedback=previous_feedback,
+        ),
         reasoning_effort=reasoning_effort,
     )
     return _review_result_or_original(markdown, raw, markers)
@@ -119,9 +126,11 @@ def build_quality_repair_user_prompt(
     markers: Iterable[str],
     quality_warnings: Iterable[str],
     kind: str = "paper",
+    previous_feedback: Iterable[str] = (),
 ) -> str:
     marker_text = "\n".join(f"- {marker}" for marker in markers) or "- 无"
     warning_text = "\n".join(f"- {warning}" for warning in quality_warnings) or "- 无"
+    history_text = "\n".join(f"- {warning}" for warning in previous_feedback) or "- 无"
     return rf"""请修复下面这份 MaxRead {'论文' if kind == 'paper' else '网页文章'} Markdown 的发布前质检错误。
 
 硬约束：
@@ -134,9 +143,13 @@ def build_quality_repair_user_prompt(
 - API、函数、类、字段、配置项和文件路径必须保持为反引号行内代码，不能改成 <latex>；若现有 <latex> 里只是 snake_case 程序标识符或函数调用，应恢复为行内代码。
 - 修复公式时不得改变变量、上下标、运算关系或数值；不确定等价写法时保持原文，并在 issues 中说明风险。
 - 如果问题已经修好，issues 必须为空数组。
+- 修复前对照历史反馈；不得为了修当前错误而重新引入更早轮次已经出现过的错误。
 
 本轮确定性质检错误：
 {warning_text}
+
+历史生成/修复反馈（只作为不可回退清单，本轮错误优先）：
+{history_text}
 
 允许保留的图片 marker：
 {marker_text}

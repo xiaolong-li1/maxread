@@ -8,9 +8,11 @@ class RepairLLM:
     def __init__(self, repaired_markdown: str):
         self.repaired_markdown = repaired_markdown
         self.calls = 0
+        self.users = []
 
     def responses_text(self, system, user, **kwargs):
         self.calls += 1
+        self.users.append(user)
         assert "本轮确定性质检错误" in user
         return json.dumps(
             {"markdown": self.repaired_markdown, "issues": []},
@@ -114,3 +116,22 @@ def test_quality_repair_can_fix_structural_completeness_errors():
     assert result.passed is True
     assert result.markdown.startswith("# T\n")
     assert any("missing-h1" in warning for warning in result.attempts[0].blocking_warnings)
+
+
+def test_quality_repair_prompt_includes_previous_failure_ledger():
+    bad = "# T\n\n正文里残留 \\textbf{bad}。\n"
+    llm = RepairLLM("# T\n\n正文已修复。\n")
+
+    result = repair_until_quality_passes(
+        llm,
+        bad,
+        [],
+        render_xml=lambda markdown: f"<doc><p>{markdown}</p></doc>",
+        normalize_markdown=lambda markdown: markdown.strip() + "\n",
+        prior_feedback=["attempt 2: missing-section-7", "visual round 1: invalid-formula"],
+    )
+
+    assert result.passed is True
+    assert "missing-section-7" in llm.users[0]
+    assert "visual round 1: invalid-formula" in llm.users[0]
+    assert "不可回退清单" in llm.users[0]

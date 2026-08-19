@@ -138,6 +138,7 @@ class VisualQAController:
         runner: str = "/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh",
         remote_root: str = "/home/lixiaolong/.local/share/maxread-browser",
         timeout: int = 90,
+        inspect_retries: int = 2,
         max_sections: int = 12,
         max_repairs: int = 2,
         repair_rounds: int = 3,
@@ -149,6 +150,7 @@ class VisualQAController:
         self.runner = str(runner)
         self.remote_root = str(remote_root).rstrip("/")
         self.timeout = max(15, int(timeout or 90))
+        self.inspect_retries = max(0, int(inspect_retries or 0))
         self.max_sections = max(1, int(max_sections or 12))
         self.max_repairs = max(0, int(max_repairs or 2))
         self.repair_rounds = max(0, int(repair_rounds if repair_rounds is not None else 3))
@@ -174,6 +176,7 @@ class VisualQAController:
             runner=getattr(settings, "visual_qa_runner", "/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh"),
             remote_root=getattr(settings, "visual_qa_remote_root", "/home/lixiaolong/.local/share/maxread-browser"),
             timeout=getattr(settings, "visual_qa_timeout", 90),
+            inspect_retries=getattr(settings, "visual_qa_inspect_retries", 2),
             max_sections=getattr(settings, "visual_qa_max_sections", 12),
             max_repairs=getattr(settings, "visual_qa_max_repairs", 2),
             repair_rounds=getattr(settings, "visual_qa_repair_rounds", 3),
@@ -190,10 +193,12 @@ class VisualQAController:
         expected_image_min: int = 0,
         expected_formula_min: int = 0,
         expected_table_min: int = 0,
+        previous_feedback: Iterable[str] = (),
         on_workflow_event=None,
     ) -> VisualRepairResult:
         result = VisualRepairResult()
         initial = list(initial_warnings)
+        feedback_history = _dedupe_text(previous_feedback)
 
         # Structural repair is useful even when the remote browser is disabled.
         structural_changed, structural_warnings, repaired = repair_structural_blocks(
@@ -250,7 +255,10 @@ class VisualQAController:
                     f"round={round_index + 1}; findings={len(remote.findings)}",
                 )
             changed, repair_warnings, repaired, strategy, model_response = self._repair_remote_findings(
-                feishu, doc_url, remote.findings
+                feishu,
+                doc_url,
+                remote.findings,
+                previous_feedback=feedback_history,
             )
             audit_round.repair_strategy = strategy
             audit_round.changed = changed
@@ -264,6 +272,11 @@ class VisualQAController:
             if changed:
                 result.changed = True
                 result.repaired_blocks.extend(repaired)
+            feedback_history = _dedupe_text(
+                feedback_history
+                + [_visual_finding_feedback(item, round_index) for item in remote.findings]
+                + list(repair_warnings)
+            )
             if on_workflow_event is not None:
                 on_workflow_event(WorkflowEvent.VISUAL_RECHECK, f"round={round_index + 1}")
 
@@ -274,6 +287,7 @@ class VisualQAController:
         feishu: VisualFeishuClient,
         doc_url: str,
         findings: List[VisualFinding],
+        previous_feedback: Iterable[str] = (),
     ) -> tuple[bool, List[str], List[str], str, str]:
         structural = [item for item in findings if item.kind in {"invalid-formula", "raw-formatting"}]
         if structural:
@@ -293,6 +307,7 @@ class VisualQAController:
                     findings,
                     max_repairs=self.max_repairs,
                     reasoning_effort=self.reasoning_effort,
+                    previous_feedback=previous_feedback,
                 )
                 return changed, warnings, blocks, "model-formula" if raw else "model-formula-unavailable", raw
             return False, warnings, blocks, "deterministic-structural-no-change", ""
@@ -320,27 +335,30 @@ class VisualQAController:
             return RemoteVisualResult(status="error", error=f"invalid Feishu doc URL: {_clip(doc_url)}")
         doc_url = normalized_url
         tag = _safe_tag(source_id or doc_url)
-        run_id = f"{tag}-{uuid.uuid4().hex[:8]}"
-        remote_dir = f"{self.remote_root}/runs/{run_id}"
-        command = " ".join(
-            [
-                shlex.quote(self.runner),
-                "--url",
-                shlex.quote(doc_url),
-                "--output-dir",
-                shlex.quote(remote_dir),
-                "--max-sections",
-                str(self.max_sections),
-                "--expected-images",
-                str(max(0, int(expected_image_min or 0))),
-                "--expected-formulas",
-                str(max(0, int(expected_formula_min or 0))),
-                "--expected-tables",
-                str(max(0, int(expected_table_min or 0))),
-            ]
-        )
-        try:
-            with _QA_LOCK:
+        attempt_audit: List[Dict[str, Any]] = []
+        last_error = "visual runner failed"
+        for attempt_index in range(self.inspect_retries + 1):
+            run_id = f"{tag}-inspect-a{attempt_index + 1}-{uuid.uuid4().hex[:8]}"
+            remote_dir = f"{self.remote_root}/runs/{run_id}"
+            command = " ".join(
+                [
+                    shlex.quote(self.runner),
+                    "--url",
+                    shlex.quote(doc_url),
+                    "--output-dir",
+                    shlex.quote(remote_dir),
+                    "--max-sections",
+                    str(self.max_sections),
+                    "--expected-images",
+                    str(max(0, int(expected_image_min or 0))),
+                    "--expected-formulas",
+                    str(max(0, int(expected_formula_min or 0))),
+                    "--expected-tables",
+                    str(max(0, int(expected_table_min or 0))),
+                ]
+            )
+            attempt_timeout = self.timeout if attempt_index == 0 else self.timeout * 2
+            try:
                 local_hosts = {"", "local", "localhost", "127.0.0.1", "::1", socket.gethostname().lower()}
                 if self.host.strip().lower() in local_hosts:
                     argv = shlex.split(command)
@@ -358,30 +376,55 @@ class VisualQAController:
                         self.host,
                         command,
                     ]
-                completed = subprocess.run(
-                    argv,
-                    text=True,
-                    capture_output=True,
-                    timeout=self.timeout,
-                    check=False,
+                with _QA_LOCK:
+                    completed = subprocess.run(
+                        argv,
+                        text=True,
+                        capture_output=True,
+                        timeout=attempt_timeout,
+                        check=False,
+                    )
+            except Exception as exc:
+                last_error = str(exc)
+                attempt_audit.append(
+                    {"attempt": attempt_index + 1, "timeout": attempt_timeout, "status": "error", "error": _clip(last_error, 1000)}
                 )
-        except Exception as exc:
-            return RemoteVisualResult(status="error", error=str(exc))
-        if completed.returncode != 0:
-            detail = completed.stderr.strip() or completed.stdout.strip() or f"ssh exit {completed.returncode}"
-            return RemoteVisualResult(status="error", error=detail)
-        payload = _last_json_object(completed.stdout)
-        if not payload:
-            return RemoteVisualResult(status="error", error="remote runner returned no JSON")
-        screenshots = [str(item) for item in payload.get("screenshots", [])]
-        if str(payload.get("status") or "") == "ok" and not screenshots:
-            return RemoteVisualResult(status="error", error="remote runner returned no screenshots")
-        findings = [VisualFinding.from_dict(item) for item in payload.get("findings", []) if isinstance(item, dict)]
+                continue
+            if completed.returncode != 0:
+                last_error = completed.stderr.strip() or completed.stdout.strip() or f"runner exit {completed.returncode}"
+                attempt_audit.append(
+                    {"attempt": attempt_index + 1, "timeout": attempt_timeout, "status": "error", "error": _clip(last_error, 1000)}
+                )
+                continue
+            payload = _last_json_object(completed.stdout)
+            if not payload:
+                last_error = "remote runner returned no JSON"
+                attempt_audit.append(
+                    {"attempt": attempt_index + 1, "timeout": attempt_timeout, "status": "error", "error": last_error}
+                )
+                continue
+            screenshots = [str(item) for item in payload.get("screenshots", [])]
+            if str(payload.get("status") or "") == "ok" and not screenshots:
+                last_error = "remote runner returned no screenshots"
+                attempt_audit.append(
+                    {"attempt": attempt_index + 1, "timeout": attempt_timeout, "status": "error", "error": last_error}
+                )
+                continue
+            attempt_audit.append(
+                {"attempt": attempt_index + 1, "timeout": attempt_timeout, "status": "ok", "run_dir": remote_dir}
+            )
+            payload["inspect_attempts"] = list(attempt_audit)
+            findings = [VisualFinding.from_dict(item) for item in payload.get("findings", []) if isinstance(item, dict)]
+            return RemoteVisualResult(
+                status=str(payload.get("status") or "ok"),
+                findings=findings,
+                screenshots=screenshots,
+                raw=payload,
+            )
         return RemoteVisualResult(
-            status=str(payload.get("status") or "ok"),
-            findings=findings,
-            screenshots=screenshots,
-            raw=payload,
+            status="error",
+            raw={"inspect_attempts": attempt_audit},
+            error=f"visual runner failed after {len(attempt_audit)} attempts: {last_error}",
         )
 
 
@@ -452,6 +495,7 @@ def repair_formula_blocks_with_llm(
     findings: Iterable[VisualFinding],
     max_repairs: int = 2,
     reasoning_effort: str = "high",
+    previous_feedback: Iterable[str] = (),
 ) -> tuple[bool, List[str], List[str], str]:
     """Use the model only after deterministic XML repair made no progress.
 
@@ -485,8 +529,12 @@ def repair_formula_blocks_with_llm(
         f"BLOCK id={item['id']}\nKIND={item['kind']}\nFORMULA={item['formula']}\nCONTEXT={item['context']}"
         for item in candidates
     )
+    history_text = "\n".join(f"- {item}" for item in _dedupe_text(previous_feedback)) or "- 无"
     user = f"""浏览器截图质检发现以下问题：
 {finding_text}
+
+之前轮次的失败与修复记录（不得重复同样的无效修改）：
+{history_text}
 
 下面是当前文档中可疑的公式 block。只修复确实相关的 block：
 {formula_text}
@@ -859,6 +907,23 @@ def _safe_tag(value: str) -> str:
 def _clip(value: str, limit: int = 240) -> str:
     text = " ".join(str(value or "").split())
     return text if len(text) <= limit else text[:limit].rstrip() + "..."
+
+
+def _dedupe_text(values: Iterable[str]) -> List[str]:
+    output: List[str] = []
+    seen = set()
+    for value in values:
+        text = _clip(str(value or ""), 500)
+        if text and text not in seen:
+            seen.add(text)
+            output.append(text)
+    return output[-20:]
+
+
+def _visual_finding_feedback(finding: VisualFinding, round_index: int) -> str:
+    location = f" [section={_clip(finding.section, 80)}]" if finding.section else ""
+    block = f" [block={finding.block_id}]" if finding.block_id else ""
+    return f"visual round {round_index}: {finding.kind}: {_clip(finding.detail, 320)}{location}{block}"
 
 
 def _is_nonblocking_visual_finding(finding: VisualFinding) -> bool:

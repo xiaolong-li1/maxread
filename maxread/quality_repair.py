@@ -45,6 +45,7 @@ def repair_until_quality_passes(
     kind: str = "paper",
     reasoning_effort: Optional[str] = None,
     completeness_check: Optional[Callable[[str], Iterable[str]]] = None,
+    prior_feedback: Iterable[str] = (),
     on_workflow_event=None,
 ) -> QualityRepairResult:
     """Run deterministic checks and ask the model to repair only blocking errors."""
@@ -52,6 +53,7 @@ def repair_until_quality_passes(
     current = normalize_markdown(markdown)
     attempts: List[QualityRepairAttempt] = []
     repair_warnings: List[str] = []
+    feedback_history = _dedupe(prior_feedback)
     max_rounds = max(0, int(max_repair_rounds))
 
     for round_index in range(max_rounds + 1):
@@ -88,6 +90,7 @@ def repair_until_quality_passes(
                 blocking,
                 kind=kind,
                 reasoning_effort=reasoning_effort,
+                previous_feedback=feedback_history,
             )
             attempt.model_response = review.raw
             attempt.repair_warnings = [
@@ -107,6 +110,7 @@ def repair_until_quality_passes(
             attempt.model_response = warning
             attempt.repair_warnings.append(warning)
             repair_warnings.append(warning)
+        feedback_history = _dedupe(feedback_history + list(blocking) + list(attempt.repair_warnings))
         if on_workflow_event is not None:
             on_workflow_event(WorkflowEvent.QUALITY_RECHECK, f"round={round_index + 1}")
 
