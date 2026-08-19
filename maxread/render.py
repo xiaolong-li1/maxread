@@ -56,6 +56,7 @@ def polish_markdown(
     markdown = _normalize_backticked_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _normalize_display_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _normalize_inline_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
+    markdown = _normalize_table_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _sanitize_latex_blocks(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _replace_breaks_outside_latex(markdown)
     markdown = _expand_text_macros_outside_latex(markdown, custom_macros or {})
@@ -198,6 +199,7 @@ def markdown_to_docx_xml(
     # Keep this boundary defensive: repair scripts and older artifacts can call
     # the XML renderer directly without going through polish_markdown().
     markdown = compile_formula_markup(markdown).text
+    markdown = _normalize_table_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _sanitize_latex_blocks(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _sanitize_visible_text_macros(markdown)
     markdown = re.sub(
@@ -605,6 +607,49 @@ def _normalize_inline_math(
 
     markdown = re.sub(r"\\\((.{1,240}?)\\\)", repl, markdown)
     return re.sub(r"(?<!\$)\$([^\n$]{1,240})\$(?!\$)", repl, markdown)
+
+
+_NUMBER_TOKEN = r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)"
+_RAW_TABLE_UNCERTAINTY_RE = re.compile(
+    rf"(?<![\w.]){_NUMBER_TOKEN}\s*(?:"
+    rf"\^\s*\{{\s*{_NUMBER_TOKEN}\s*\}}\s*_\s*\{{\s*{_NUMBER_TOKEN}\s*\}}"
+    rf"|_\s*\{{\s*{_NUMBER_TOKEN}\s*\}}\s*\^\s*\{{\s*{_NUMBER_TOKEN}\s*\}}"
+    rf")(?![\w.])"
+)
+
+
+def _normalize_table_math(
+    markdown: str,
+    latex_macros: Optional[Dict[str, str]] = None,
+    latex_arg_macros: Optional[Dict[str, str]] = None,
+) -> str:
+    """Compile un-delimited numeric uncertainty notation inside Markdown tables."""
+
+    def normalize_cell(cell: str) -> str:
+        parts = re.split(r"(<latex>.*?</latex>|`[^`\n]*`)", cell, flags=re.S | re.I)
+        for index in range(0, len(parts), 2):
+            parts[index] = _RAW_TABLE_UNCERTAINTY_RE.sub(
+                lambda match: (
+                    "<latex>"
+                    + _normalize_latex_body(
+                        match.group(0),
+                        latex_macros=latex_macros,
+                        latex_arg_macros=latex_arg_macros,
+                    )
+                    + "</latex>"
+                ),
+                parts[index],
+            )
+        return "".join(parts)
+
+    lines: List[str] = []
+    for line in str(markdown or "").splitlines():
+        if not _looks_like_table_row(line) or re.fullmatch(r"\|?[\s:|\-]+\|?", line.strip()):
+            lines.append(line)
+            continue
+        cells = line.split("|")
+        lines.append("|".join(normalize_cell(cell) for cell in cells))
+    return "\n".join(lines)
 
 
 def _normalize_latex_body(
@@ -1028,7 +1073,11 @@ def prepare_key_figures(bundle: PaperBundle, max_figures: int = 5) -> List[Tuple
         candidates.append((rank, path, caption))
 
     assets = _ranked_figure_assets(bundle)
-    assets = [path for path in assets if path.exists() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf"}]
+    assets = [
+        path
+        for path in assets
+        if path.exists() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps", ".ps"}
+    ]
     for path in assets:
         if path.resolve() in skipped_assets:
             continue
@@ -1217,7 +1266,7 @@ def _grouped_figure_items(bundle: PaperBundle, output_dir: Path) -> dict[str, li
         items: List[Tuple[Path, PaperFigure]] = []
         for figure in sorted(group, key=lambda item: (item.row, item.col, item.asset_index)):
             path = bundle.source_dir / figure.asset
-            if not path.exists() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".pdf"}:
+            if not path.exists() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".pdf", ".eps", ".ps"}:
                 continue
             rendered = _render_asset(path, output_dir)
             if rendered:
@@ -1634,11 +1683,13 @@ def _render_asset(path: Path, output_dir: Path) -> Optional[Path]:
     suffix = path.suffix.lower()
     if suffix in {".png", ".jpg", ".jpeg"}:
         return path
-    if suffix != ".pdf":
+    if suffix not in {".pdf", ".eps", ".ps"}:
         return None
     out_png = output_dir / f"{path.stem}.png"
     if out_png.exists() and out_png.stat().st_size > 0:
         return out_png
+    if suffix in {".eps", ".ps"}:
+        return _render_postscript_with_ghostscript(path, out_png)
     qlmanage = shutil.which("qlmanage")
     if qlmanage:
         tmp_dir = output_dir / f"{path.stem}_thumb"
@@ -1679,6 +1730,74 @@ def _render_asset(path: Path, output_dir: Path) -> Optional[Path]:
         return rendered
 
     return None
+
+
+def _render_postscript_with_ghostscript(path: Path, out_png: Path) -> Optional[Path]:
+    ghostscript, runtime_env = _ghostscript_runtime()
+    if not ghostscript:
+        return None
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            ghostscript,
+            "-dSAFER",
+            "-dBATCH",
+            "-dNOPAUSE",
+            "-dEPSCrop",
+            "-sDEVICE=png16m",
+            "-r200",
+            f"-sOutputFile={out_png}",
+            str(path),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=45,
+        env=runtime_env,
+    )
+    if result.returncode == 0 and out_png.exists() and out_png.stat().st_size > 0:
+        return out_png
+    out_png.unlink(missing_ok=True)
+    return None
+
+
+def _ghostscript_runtime() -> Tuple[Optional[str], Optional[Dict[str, str]]]:
+    system_binary = shutil.which("gs")
+    if system_binary:
+        return system_binary, None
+
+    configured = str(os.environ.get("MAXREAD_GHOSTSCRIPT_ROOT", "") or "").strip()
+    root = Path(configured).expanduser() if configured else Path.home() / ".local/share/maxread-tools/ghostscript"
+    binary = root / "usr/bin/gs"
+    if not binary.is_file():
+        return None, None
+
+    env = dict(os.environ)
+    library_dirs = [
+        root / "usr/lib/x86_64-linux-gnu",
+        root / "lib/x86_64-linux-gnu",
+        root / "usr/lib",
+    ]
+    existing_library_path = str(env.get("LD_LIBRARY_PATH", "") or "").strip()
+    library_path = [str(path) for path in library_dirs if path.is_dir()]
+    if existing_library_path:
+        library_path.append(existing_library_path)
+    if library_path:
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(library_path)
+
+    resource_dirs: List[Path] = []
+    for pattern in (
+        "usr/share/ghostscript/*/Resource/Init",
+        "usr/share/ghostscript/*/lib",
+        "usr/share/ghostscript/*/Resource/Font",
+        "usr/share/ghostscript/fonts",
+        "usr/share/color/icc/ghostscript",
+        "usr/share/fonts/X11/Type1",
+    ):
+        resource_dirs.extend(sorted(path for path in root.glob(pattern) if path.is_dir()))
+    if resource_dirs:
+        env["GS_LIB"] = os.pathsep.join(str(path) for path in resource_dirs)
+    return str(binary), env
 
 
 def _render_pdf_with_pymupdf(path: Path, out_png: Path) -> Optional[Path]:

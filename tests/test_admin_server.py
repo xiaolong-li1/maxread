@@ -84,6 +84,8 @@ def test_architecture_spec_covers_states_and_scenarios_follow_real_transitions()
     state_ids = {item["id"] for item in spec["states"]}
     assert spec["metrics"]["states"] == len(state_ids)
     assert spec["metrics"]["repair_loops"] == 3
+    assert spec["metrics"]["failure_modes"] == len(spec["failure_modes"])
+    assert {item["handling"] for item in spec["failure_modes"]} <= {item["id"] for item in spec["handling_types"]}
 
     for scenario in spec["scenarios"]:
         assert len(scenario["events"]) == len(scenario["states"]) - 1
@@ -96,4 +98,6 @@ def test_architecture_html_is_self_contained_and_uses_workflow_api():
     html = architecture_html()
     assert "MaxRead Pipeline Architecture" in html
     assert "fetch('/api/workflow-spec'" in html
+    assert 'id="failure-list"' in html
+    assert "renderFailures()" in html
     assert "https://" not in html

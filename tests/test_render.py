@@ -1,8 +1,9 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure
-from maxread.render import display_caption, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning, _pretty_grid_label
+from maxread.render import display_caption, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning, _pretty_grid_label, _render_asset
 
 
 def test_polish_markdown_converts_math():
@@ -336,6 +337,42 @@ def test_markdown_to_docx_xml_preserves_latex_and_tables():
     assert "<latex>x &lt; y</latex>" in xml
     assert "<table>" in xml
     assert "<latex>a+b</latex>" in xml
+
+
+def test_polish_markdown_compiles_raw_uncertainty_values_inside_tables():
+    markdown = r"""| Gaia DR3 | M1 | M2 |
+| --- | --- | --- |
+| 40041022325608704 | 1.28^{+0.11}_{-0.10} | 1.27_{-0.12}^{+0.13} |
+"""
+
+    polished = polish_markdown(markdown)
+    xml = markdown_to_docx_xml(polished)
+
+    assert r"<latex>1.28^{+0.11}_{-0.10}</latex>" in polished
+    assert r"<latex>1.27_{-0.12}^{+0.13}</latex>" in polished
+    assert "<td><p>40041022325608704</p></td>" in xml
+    assert r"<td><p><latex>1.28^{+0.11}_{-0.10}</latex></p></td>" in xml
+
+
+def test_render_asset_converts_eps_with_ghostscript(tmp_path, monkeypatch):
+    source = tmp_path / "figure.eps"
+    source.write_text("%!PS-Adobe-3.0 EPSF-3.0", encoding="ascii")
+    output_dir = tmp_path / "rendered"
+    output_dir.mkdir()
+
+    monkeypatch.setattr("maxread.render.shutil.which", lambda name: "/usr/bin/gs" if name == "gs" else None)
+
+    def fake_run(argv, **_kwargs):
+        output = next(item.split("=", 1)[1] for item in argv if item.startswith("-sOutputFile="))
+        Path(output).write_bytes(b"png")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("maxread.render.subprocess.run", fake_run)
+
+    rendered = _render_asset(source, output_dir)
+
+    assert rendered == output_dir / "figure.png"
+    assert rendered.read_bytes() == b"png"
 
 
 def test_markdown_to_docx_xml_keeps_multiline_latex_with_norm_bars_intact():

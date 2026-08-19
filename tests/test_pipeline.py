@@ -490,6 +490,7 @@ def test_require_renderable_source_figures_blocks_silent_missing_images():
         _require_renderable_source_figures(bundle, [])
     except PrePublishQualityError as exc:
         assert "no-renderable-source-figure" in str(exc)
+        assert "formats=.pdf" in str(exc)
     else:
         raise AssertionError("missing rendered figures should block publication")
 

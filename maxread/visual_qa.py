@@ -117,9 +117,15 @@ class VisualRepairRound:
 
 
 _QA_LOCK = threading.BoundedSemaphore(1)
-_BLOCK_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"}
+_BLOCK_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "table"}
 _RESOURCE_TAGS = {"img", "source", "whiteboard", "sheet", "bitable", "cite", "synced_reference"}
 _FORMULA_RE = re.compile(r"<latex>(.*?)</latex>", flags=re.S | re.I)
+_RAW_UNCERTAINTY_RE = re.compile(
+    r"(?<![\w.])[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*(?:"
+    r"\^\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}\s*_\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}"
+    r"|_\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}\s*\^\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}"
+    r")(?![\w.])"
+)
 
 
 class VisualQAController:
@@ -225,8 +231,14 @@ class VisualQAController:
             if remote.error:
                 result.warnings.append(f"visual-qa:remote-error:{_clip(remote.error)}")
                 break
+            ignored = [finding for finding in remote.findings if _is_nonblocking_visual_finding(finding)]
+            if ignored:
+                result.warnings.extend(
+                    _finding_warning("visual-qa", finding, severity="medium") for finding in ignored
+                )
+                remote.findings = [finding for finding in remote.findings if not _is_nonblocking_visual_finding(finding)]
             if not remote.findings:
-                audit_round.status = "passed"
+                audit_round.status = "passed-with-warnings" if ignored else "passed"
                 break
             if round_index >= self.repair_rounds:
                 result.warnings.extend(_finding_warning("visual-qa", finding) for finding in remote.findings)
@@ -720,6 +732,7 @@ def _repair_raw_formatting_xml_block(serialized: str) -> str:
     parts = re.split(protected, original, flags=re.S | re.I)
     for index in range(0, len(parts), 2):
         repaired = parts[index]
+        repaired = _RAW_UNCERTAINTY_RE.sub(lambda match: f"<latex>{match.group(0)}</latex>", repaired)
         for pattern, replacement in replacements:
             repaired = re.sub(pattern, replacement, repaired)
         parts[index] = re.sub(
@@ -848,7 +861,11 @@ def _clip(value: str, limit: int = 240) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "..."
 
 
-def _finding_warning(prefix: str, finding: VisualFinding) -> str:
+def _is_nonblocking_visual_finding(finding: VisualFinding) -> bool:
+    return finding.kind == "table-overflow"
+
+
+def _finding_warning(prefix: str, finding: VisualFinding, severity: str = "") -> str:
     location = f" [section={_clip(finding.section, 80)}]" if finding.section else ""
     screenshot = f" [screenshot={finding.screenshot}]" if finding.screenshot else ""
-    return f"{prefix}:{finding.severity}:{finding.kind}:{_clip(finding.detail)}{location}{screenshot}"
+    return f"{prefix}:{severity or finding.severity}:{finding.kind}:{_clip(finding.detail)}{location}{screenshot}"

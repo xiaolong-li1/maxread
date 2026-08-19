@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .workflow import workflow_spec
+from .workflow import transition, workflow_spec
 
 
 STATE_PRESENTATION = {
@@ -95,6 +95,224 @@ SCENARIOS = [
             "generation_incomplete", "retry",
         ],
     },
+    {
+        "id": "source-blocked",
+        "label": "源码阻断",
+        "summary": "材料不足时停止在生成之前；补齐源码后由人工重试回到队列。",
+        "states": ["fetching", "needs_source", "queued", "claimed"],
+        "events": ["source_missing", "retry", "claim"],
+    },
+    {
+        "id": "execution-failed",
+        "label": "执行异常",
+        "summary": "网络、模型或文件异常进入通用失败终态，确认根因后显式重试。",
+        "states": ["generating", "failed", "queued", "claimed"],
+        "events": ["fail", "retry", "claim"],
+    },
+    {
+        "id": "published-recovery",
+        "label": "发布后恢复",
+        "summary": "已有发布检查点时，重试复用原飞书文档并直接回到发布后检查，不重复生成。",
+        "states": [
+            "publishing", "post_publish_checking", "quality_failed",
+            "queued", "claimed", "post_publish_checking",
+        ],
+        "events": ["publish_succeeded", "quality_rejected", "retry", "claim", "resume_published"],
+    },
+]
+
+
+HANDLING_TYPES = [
+    {
+        "id": "automatic",
+        "label": "自动恢复",
+        "summary": "系统能证明重放安全，自动回队列或复用已有检查点。",
+    },
+    {
+        "id": "bounded",
+        "label": "有界修复",
+        "summary": "在固定预算内修复并复检，耗尽后进入可审计终态。",
+    },
+    {
+        "id": "degraded",
+        "label": "降级继续",
+        "summary": "辅助步骤失败只记录告警，后续确定性质量门仍然执行。",
+    },
+    {
+        "id": "manual",
+        "label": "人工介入",
+        "summary": "系统无法安全猜测下一步，保留证据并等待明确操作。",
+    },
+]
+
+
+FAILURE_MODES = [
+    {
+        "id": "source-asset-render",
+        "title": "源码有图，但图形格式无法渲染",
+        "stage": "生成前材料",
+        "trigger": "TeX 引用了 EPS/PDF/SVG 等资产，但对应转换器缺失、文件损坏或所有候选转换失败。",
+        "handling": "manual",
+        "outcome_state": "failed",
+        "automatic": "停止在模型调用之前，并在错误中保存实际资产格式，例如 formats=.eps。",
+        "next_action": "补齐受支持的渲染后端后显式重试；不得把“有图但转不出”降级成无图文档。",
+        "side_effect": "未创建飞书文档",
+    },
+    {
+        "id": "source-unavailable",
+        "title": "原文或 TeX source 不可用",
+        "stage": "获取原文",
+        "trigger": "arXiv 限流、网络失败、源码包缺失或无法解压，且 require_source=true。",
+        "handling": "manual",
+        "outcome_state": "needs_source",
+        "automatic": "停止在生成之前，保存 source summary 与解析告警，不创建飞书文档。",
+        "next_action": "等待限流恢复，或用 import-source 补齐源码后在控制台重试。",
+        "side_effect": "无外部文档副作用",
+    },
+    {
+        "id": "generation-no-output",
+        "title": "生成模型没有可用输出",
+        "stage": "生成初稿",
+        "trigger": "密钥、超时、网关或模型调用在所有 generation attempts 中持续失败。",
+        "handling": "bounded",
+        "outcome_state": "failed",
+        "automatic": "按 generation_repair_rounds + 1 次调用预算重试，并保存每次异常。",
+        "next_action": "检查模型配置与网关状态；恢复后 retry-job，任务重新进入队列。",
+        "side_effect": "未创建飞书文档",
+    },
+    {
+        "id": "generation-contract",
+        "title": "初稿违反完整文档契约",
+        "stage": "生成检查",
+        "trigger": "缺 H1、章节不全、输出过短、提示词泄漏、代码围栏或关键图标记缺失。",
+        "handling": "bounded",
+        "outcome_state": "generation_incomplete",
+        "automatic": "先做确定性修复，再携带原稿和精确错误让模型重写；所有原始输出落盘。",
+        "next_action": "查看 generation attempt artifact；修正提示或模型后显式重试。",
+        "side_effect": "未创建飞书文档",
+    },
+    {
+        "id": "auxiliary-review",
+        "title": "AI review 或关键图读图失败",
+        "stage": "内容审阅",
+        "trigger": "reviewer 或图像理解模型超时、拒答或返回不可解析内容。",
+        "handling": "degraded",
+        "outcome_state": "quality_checking",
+        "automatic": "保留原 Markdown，把异常记为 warning，继续执行 Markdown/XML 确定性质检。",
+        "next_action": "通常无需处理；若最终质量异常，可从 review warning 追溯辅助模型。",
+        "side_effect": "无外部文档副作用",
+    },
+    {
+        "id": "prepublish-quality",
+        "title": "发布前公式、表格或结构质检失败",
+        "stage": "发布前质检",
+        "trigger": "Markdown/XML 出现高严重度公式、格式字符、表格或完整性问题。",
+        "handling": "bounded",
+        "outcome_state": "quality_failed",
+        "automatic": "按 quality_repair_rounds 循环模型修复、重新规范化、重新编译并复检。",
+        "next_action": "检查 05/06/07 quality artifacts；修正规则或模型后 retry-job。",
+        "side_effect": "未创建飞书文档",
+    },
+    {
+        "id": "image-publication",
+        "title": "图片锚点、上传或移动失败",
+        "stage": "写入飞书",
+        "trigger": "marker 找不到、媒体上传失败、block_id 缺失、移动失败或 marker 删除失败。",
+        "handling": "bounded",
+        "outcome_state": "quality_failed",
+        "automatic": "图片步骤尝试回滚；发布后计数和真实页面质检把残留问题升级为阻断告警。",
+        "next_action": "重试会复用已保存的文档检查点；优先修复原文档，不重新生成正文。",
+        "side_effect": "可能已有未交付的飞书文档",
+    },
+    {
+        "id": "feishu-write",
+        "title": "飞书创建或写入过程异常",
+        "stage": "写入飞书",
+        "trigger": "create/update/publish 命令持续失败，或媒体写入发生不可安全盲重试的错误。",
+        "handling": "manual",
+        "outcome_state": "failed",
+        "automatic": "幂等写操作按错误类型退避重试；图片 append 避免盲重试并尽量回滚。",
+        "next_action": "先检查是否留下部分文档；没有 publish checkpoint 时，确认清理后再重试。",
+        "side_effect": "检查点前存在部分文档风险",
+    },
+    {
+        "id": "postpublish-quality",
+        "title": "发布后回读或真实页面质量失败",
+        "stage": "发布后检查",
+        "trigger": "标题、图片、公式、表格数量不足，或截图发现无效公式、裸格式字符和错位图片。",
+        "handling": "bounded",
+        "outcome_state": "quality_failed",
+        "automatic": "按 block_id 做确定性修复，必要时调用模型修公式，并在每轮后重新截图。",
+        "next_action": "预算耗尽后查看 visual QA 截图；retry-job 从原文档复检，不重跑正文生成。",
+        "side_effect": "文档已存在但暂不交付",
+    },
+    {
+        "id": "visual-runner",
+        "title": "无头浏览器或视觉检查基础设施失败",
+        "stage": "视觉检查",
+        "trigger": "SSH、浏览器、登录态、runner 超时、无 JSON 或没有生成截图。",
+        "handling": "manual",
+        "outcome_state": "quality_failed",
+        "automatic": "remote-error 被视为阻断，不会把未经真实渲染验证的文档交付。",
+        "next_action": "恢复 runner、网络和登录态后重试；已有 checkpoint 时仍复用原文档。",
+        "side_effect": "文档已存在但暂不交付",
+    },
+    {
+        "id": "worker-lease",
+        "title": "Worker 崩溃、重启或租约过期",
+        "stage": "任意活动阶段",
+        "trigger": "本机 PID 消失，或 heartbeat 超过 queue_stale_minutes。",
+        "handling": "automatic",
+        "outcome_state": "queued",
+        "automatic": "原子 recover 回队列；新 worker 认领后，旧 worker 的迟到写入会因 worker_id 不匹配被拒绝。",
+        "next_action": "通常无需人工操作；通过 job-events 检查 recover_dead_worker/recover_stale。",
+        "side_effect": "有 checkpoint 时复用原文档",
+    },
+    {
+        "id": "notification",
+        "title": "结果已落库但飞书通知失败",
+        "stage": "终态通知",
+        "trigger": "回复消息失败、原消息不可回复、飞书网络异常或权限变化。",
+        "handling": "manual",
+        "outcome_state": "",
+        "automatic": "任务终态保持不变，watcher 不标记 notified，并记录 notify_error 事件。",
+        "next_action": "在控制台查看真实任务结果并人工补发；当前没有独立通知重试 worker。",
+        "side_effect": "文档和任务结果不受影响",
+    },
+]
+
+
+RECOVERY_RULES = [
+    {
+        "title": "发布前失败",
+        "condition": "没有 publish checkpoint",
+        "decision": "只有显式 retry 才回到 queued，重新执行材料和生成流程。",
+        "guard": "未创建文档时可安全重跑；若写入阶段异常需先排查部分文档。",
+    },
+    {
+        "title": "发布后失败",
+        "condition": "job 保存 doc_url + checkpoint_json",
+        "decision": "claimed 通过 resume_published 直接进入发布后检查，跳过模型与源码下载。",
+        "guard": "复用同一文档，避免重复创建和重复消耗模型调用。",
+    },
+    {
+        "title": "Worker 失联",
+        "condition": "PID 消失或 heartbeat 过期",
+        "decision": "自动 recover 到 queued，再由新 worker 原子认领。",
+        "guard": "worker_id 租约隔离迟到结果，终态写入不会被旧进程覆盖。",
+    },
+    {
+        "title": "辅助步骤失败",
+        "condition": "review 或图像理解失败但核心材料仍完整",
+        "decision": "记录 warning 后继续，让后续确定性质量门决定是否可交付。",
+        "guard": "降级不绕过发布前质检和真实页面检查。",
+    },
+    {
+        "title": "终态重试",
+        "condition": "needs_source / generation_incomplete / quality_failed / failed",
+        "decision": "retry 清空错误、重置 watcher 通知并回到 queued；cancelled 不允许重试。",
+        "guard": "所有转移和原因写入 job_events，便于审计每次尝试。",
+    },
 ]
 
 
@@ -127,6 +345,9 @@ def architecture_spec() -> dict:
     spec.update(
         {
             "scenarios": SCENARIOS,
+            "handling_types": HANDLING_TYPES,
+            "failure_modes": FAILURE_MODES,
+            "recovery_rules": RECOVERY_RULES,
             "layers": LAYERS,
             "invariants": INVARIANTS,
             "metrics": {
@@ -134,10 +355,43 @@ def architecture_spec() -> dict:
                 "transitions": len(spec["transitions"]),
                 "repair_loops": 3,
                 "retryable_terminals": sum(1 for state in spec["states"] if state["terminal"] and state["retryable"]),
+                "failure_modes": len(FAILURE_MODES),
             },
         }
     )
+    _validate_architecture_spec(spec)
     return spec
+
+
+def _validate_architecture_spec(spec: dict) -> None:
+    state_ids = {state["id"] for state in spec["states"]}
+    missing = state_ids - set(STATE_PRESENTATION)
+    if missing:
+        raise RuntimeError(f"missing architecture metadata: {', '.join(sorted(missing))}")
+
+    for scenario in spec["scenarios"]:
+        states = scenario["states"]
+        events = scenario["events"]
+        if len(events) != len(states) - 1:
+            raise RuntimeError(f"invalid scenario length: {scenario['id']}")
+        unknown = set(states) - state_ids
+        if unknown:
+            raise RuntimeError(f"unknown scenario states in {scenario['id']}: {', '.join(sorted(unknown))}")
+        for source, event, target in zip(states, events, states[1:]):
+            actual = transition(source, event).to_state.value
+            if actual != target:
+                raise RuntimeError(f"invalid scenario edge: {source} + {event} -> {target}, actual={actual}")
+
+    handling_ids = {item["id"] for item in spec["handling_types"]}
+    failure_ids = [item["id"] for item in spec["failure_modes"]]
+    if len(failure_ids) != len(set(failure_ids)):
+        raise RuntimeError("duplicate failure mode id")
+    for failure in spec["failure_modes"]:
+        if failure["handling"] not in handling_ids:
+            raise RuntimeError(f"unknown failure handling: {failure['id']}")
+        outcome_state = failure.get("outcome_state")
+        if outcome_state and outcome_state not in state_ids:
+            raise RuntimeError(f"unknown failure outcome state: {failure['id']} -> {outcome_state}")
 
 
 def architecture_html() -> str:

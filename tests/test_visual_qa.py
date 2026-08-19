@@ -99,6 +99,23 @@ def test_repair_structural_blocks_strips_fused_raw_tex_but_preserves_latex():
     assert "The algorithm pipeline" in feishu.replacements[0][2]
 
 
+def test_repair_structural_blocks_compiles_raw_uncertainty_inside_table():
+    feishu = FakeVisualFeishu(
+        '<title>T</title><table id="table-block"><tr><td><p>1.28^{+0.11}_{-0.10}</p></td></tr></table>'
+    )
+
+    changed, warnings, blocks = repair_structural_blocks(
+        feishu,
+        "doc",
+        ["visual-qa:repairable-structural"],
+    )
+
+    assert changed is True
+    assert warnings == ["visual-repair:structural-block:table-block"]
+    assert blocks == ["table-block"]
+    assert "<latex>1.28^{+0.11}_{-0.10}</latex>" in feishu.replacements[0][2]
+
+
 def test_repair_image_findings_maps_dom_block_id_and_preserves_ratio():
     feishu = FakeVisualFeishu(
         '<title>T</title><img id="image-block" token="token-1" name="figure.png" width="900" height="450"/>'
@@ -140,6 +157,26 @@ def test_controller_rechecks_after_remote_structural_repair():
     assert result.repaired_blocks == ["caption"]
     assert controller.calls == ["paper", "paper-visual-r1"]
     assert not any(warning.startswith("visual-qa:high:") for warning in result.warnings)
+
+
+def test_controller_accepts_legacy_scrollable_table_overflow_without_repair_loop():
+    feishu = FakeVisualFeishu("<title>T</title><table><tr><td><p>wide</p></td></tr></table>")
+    controller = StubVisualQA(
+        [
+            RemoteVisualResult(
+                status="issues",
+                findings=[VisualFinding(kind="table-overflow", severity="high", detail="388px")],
+            )
+        ]
+    )
+
+    result = controller.run(feishu, "doc", source_id="paper")
+
+    assert result.passed is True
+    assert controller.calls == ["paper"]
+    assert result.rounds[0].status == "passed-with-warnings"
+    assert result.warnings == ["visual-qa:medium:table-overflow:388px"]
+    assert feishu.replacements == []
 
 
 def test_controller_retries_visual_repair_for_three_rounds_and_uses_final_pass():

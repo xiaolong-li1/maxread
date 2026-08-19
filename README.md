@@ -38,6 +38,13 @@ bash deploy/install.sh
 
 The script asks for the deploy directory and local key file path, then creates `.env`, a Python venv, runtime directories, and user services when available.
 
+For paper figure rendering, install Ghostscript (`gs`) for EPS/PS assets and
+Poppler (`pdftoppm`) for PDF assets. MaxRead also discovers a user-local
+Ghostscript bundle at `~/.local/share/maxread-tools/ghostscript`; set
+`MAXREAD_GHOSTSCRIPT_ROOT` when that bundle lives elsewhere. A paper that
+contains source figures but has no working renderer is blocked before model
+generation instead of silently publishing a zero-image document.
+
 The paper-reading listener and admin UI are independent from the duty reminder. On a machine that should only run MaxRead, leave `maxread-duty-reminder` stopped:
 
 ```bash

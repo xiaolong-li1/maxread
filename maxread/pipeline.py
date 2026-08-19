@@ -470,7 +470,9 @@ def _paper_macro_kwargs(bundle: PaperBundle) -> dict:
 
 def _require_renderable_source_figures(bundle: PaperBundle, figures) -> None:
     if bundle.source_figures and not figures:
-        raise PrePublishQualityError("quality:figure:source:high:no-renderable-source-figure")
+        formats = sorted({Path(figure.asset).suffix.lower() or "(none)" for figure in bundle.source_figures})
+        detail = ",".join(formats) or "unknown"
+        raise PrePublishQualityError(f"quality:figure:source:high:no-renderable-source-figure:formats={detail}")
 
 
 def _write_paper_artifact(bundle: PaperBundle, name: str, content: str) -> None:

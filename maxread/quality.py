@@ -91,6 +91,8 @@ class FormattingQualityAgent(QualityAgent):
                 flags=re.S | re.I,
             ):
                 issues.append(QualityIssue(self.name, stage, "high", "figure-marker-inside-paragraph"))
+            if _has_raw_table_uncertainty(text, stage):
+                issues.append(QualityIssue(self.name, stage, "high", "raw-table-math"))
         return _dedupe_issues(issues)
 
 
@@ -156,6 +158,8 @@ def blocking_quality_warnings(warnings: Iterable[str]) -> List[str]:
         if quality_warning.startswith("quality:") and ":high:" in quality_warning:
             blocking.append(warning)
             continue
+        if _is_scrollable_table_warning(warning):
+            continue
         if warning.startswith("visual-qa:high:") or warning.startswith("visual-qa:recheck:high:"):
             blocking.append(warning)
             continue
@@ -174,6 +178,26 @@ def blocking_quality_warnings(warnings: Iterable[str]) -> List[str]:
         )):
             blocking.append(warning)
     return blocking
+
+
+def _is_scrollable_table_warning(warning: str) -> bool:
+    value = str(warning or "").removeprefix("post-publish:")
+    return value.startswith(("visual-qa:high:table-overflow:", "visual-qa:recheck:high:table-overflow:"))
+
+
+_RAW_TABLE_UNCERTAINTY_PATTERN = re.compile(
+    r"(?<![\w.])[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*(?:"
+    r"\^\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}\s*_\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}"
+    r"|_\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}\s*\^\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}"
+    r")(?![\w.])"
+)
+
+
+def _has_raw_table_uncertainty(text: str, stage: str) -> bool:
+    protected = re.sub(r"<latex>.*?</latex>|<code>.*?</code>", " ", str(text or ""), flags=re.S | re.I)
+    if stage == "xml":
+        return any(_RAW_TABLE_UNCERTAINTY_PATTERN.search(block) for block in re.findall(r"<table\b.*?</table>", protected, re.S | re.I))
+    return any("|" in line and _RAW_TABLE_UNCERTAINTY_PATTERN.search(line) for line in protected.splitlines())
 
 
 def paper_markdown_completeness_errors(markdown: str, expected_markers: Iterable[str] = ()) -> List[str]:

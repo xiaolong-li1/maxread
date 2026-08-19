@@ -30,6 +30,29 @@ def test_blocking_quality_warnings_includes_visual_high_severity():
     assert blocking_quality_warnings(warnings) == warnings[:2] + [warnings[3]]
 
 
+def test_scrollable_table_overflow_is_nonblocking_but_clipped_table_blocks():
+    warnings = [
+        "visual-qa:high:table-overflow:表格超出正文区域 388px",
+        "post-publish:visual-qa:recheck:high:table-overflow:legacy warning",
+        "visual-qa:high:table-clipped:表格被裁切且无法横向滚动",
+    ]
+
+    assert blocking_quality_warnings(warnings) == [warnings[2]]
+
+
+def test_quality_flags_uncompiled_uncertainty_only_inside_table_cells():
+    markdown = r"""正文可解释符号 x^{2}。
+
+| ID | M1 |
+| --- | --- |
+| 1 | 1.28^{+0.11}_{-0.10} |
+"""
+
+    warnings = quality_warnings(markdown, "")
+
+    assert "quality:format:markdown:high:raw-table-math" in warnings
+
+
 def test_blocking_quality_warnings_includes_failed_image_publication():
     warnings = [
         "image-anchor-missing:framework.png:[MaxReadFigure:1:framework]",

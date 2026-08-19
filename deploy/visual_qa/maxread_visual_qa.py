@@ -258,6 +258,7 @@ def _inspect_document(
                     data={"actual": actual, "expected": expected},
                 )
             )
+    scrollable_table_count = 0
     for table in inventory["tables"]:
         if int(table.get("rows", 0)) < 1 or int(table.get("cells", 0)) < 1:
             findings.append(
@@ -271,15 +272,18 @@ def _inspect_document(
             )
         overflow = float(table.get("right", 0)) - float(editor.get("right", 0))
         if overflow > 12 or float(table.get("left", 0)) < float(editor.get("left", 0)) - 12:
-            findings.append(
-                _finding(
-                    "table-overflow",
-                    "high",
-                    f"表格超出正文区域 {round(max(overflow, 0))}px",
-                    screenshot=count_screenshot,
-                    data={"editor_width": round(float(editor.get("width", 0))), "render_width": round(float(table.get("width", 0)))},
+            if table.get("horizontally_scrollable"):
+                scrollable_table_count += 1
+            else:
+                findings.append(
+                    _finding(
+                        "table-clipped",
+                        "high",
+                        f"表格超出正文区域 {round(max(overflow, 0))}px，且没有可用的横向滚动容器",
+                        screenshot=count_screenshot,
+                        data={"editor_width": round(float(editor.get("width", 0))), "render_width": round(float(table.get("width", 0)))},
+                    )
                 )
-            )
 
     report["findings"] = _dedupe_findings(findings)
     report["status"] = "issues" if report["findings"] else "ok"
@@ -291,6 +295,7 @@ def _inspect_document(
         "rendered_image_count": rendered_images,
         "rendered_formula_count": rendered_formulas,
         "rendered_table_count": rendered_tables,
+        "scrollable_table_count": scrollable_table_count,
         "expected_image_min": expected_images,
         "expected_formula_min": expected_formulas,
         "expected_table_min": expected_tables,
@@ -477,9 +482,20 @@ def _visible_tables(page: Page) -> List[Dict[str, Any]]:
     if not editor.count():
         return []
     return editor.locator("table").evaluate_all(
-        """els => els.map(e => { const r=e.getBoundingClientRect(); return {
+        """els => els.map(e => { const r=e.getBoundingClientRect();
+          let current=e.parentElement, horizontallyScrollable=false, scrollContainerWidth=0, scrollContentWidth=0;
+          for (let depth=0; current && depth<8; depth++, current=current.parentElement) {
+            const style=getComputedStyle(current);
+            const canScroll=current.scrollWidth > current.clientWidth + 4 && !['hidden','clip'].includes(style.overflowX);
+            if (canScroll) {
+              horizontallyScrollable=true; scrollContainerWidth=current.clientWidth; scrollContentWidth=current.scrollWidth; break;
+            }
+          }
+          return {
           left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,
           rows:e.querySelectorAll('tr').length,cells:e.querySelectorAll('th,td').length,
+          horizontally_scrollable:horizontallyScrollable,
+          scroll_container_width:scrollContainerWidth,scroll_content_width:scrollContentWidth,
           text:String(e.innerText || e.textContent || '').trim().slice(0,300)};
         }).filter(x => x.width > 1 && x.height > 1 && x.bottom > 64 && x.top < window.innerHeight)"""
     )
@@ -558,6 +574,7 @@ def _raw_formatting_artifacts(text: str) -> List[str]:
         r"(?<!\\)\$\$",
         r"\\\(|\\\)|\\\[|\\\]",
         r"(?m)^\s*\|\s*[-:]+(?:\s*\|\s*[-:]+)+\s*\|?\s*$",
+        r"(?<![\w.])[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*(?:\^\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}\s*_\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}|_\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\}\s*\^\s*\{\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\})(?![\w.])",
     ]
     found = []
     for pattern in patterns:
