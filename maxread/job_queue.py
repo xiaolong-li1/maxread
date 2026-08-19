@@ -143,6 +143,7 @@ class QueueManager:
                     require_source=self.settings.require_source,
                     review_reasoning_effort=self.settings.openai_review_reasoning_effort,
                     visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
+                    generation_repair_rounds=self.settings.generation_repair_rounds,
                     quality_repair_rounds=self.settings.quality_repair_rounds,
                     on_workflow_event=lambda event, detail="": store.transition_queue_job(
                         job_id, event, detail, expected_worker_id=worker_id

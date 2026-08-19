@@ -18,6 +18,7 @@ def test_happy_path_reaches_completed():
         WorkflowEvent.FETCH_STARTED,
         WorkflowEvent.SOURCE_READY,
         WorkflowEvent.GENERATION_STARTED,
+        WorkflowEvent.GENERATION_CHECK_STARTED,
         WorkflowEvent.DRAFT_READY,
         WorkflowEvent.REVIEW_COMPLETED,
         WorkflowEvent.QUALITY_PASSED,
@@ -46,6 +47,10 @@ def test_published_checkpoint_round_trips_expected_quality_counts():
 
 
 def test_quality_and_visual_repairs_are_bounded_loops():
+    generation = transition(WorkflowState.GENERATION_CHECKING, WorkflowEvent.GENERATION_REPAIR_REQUIRED)
+    assert generation.to_state is WorkflowState.GENERATION_REPAIRING
+    assert transition(generation.to_state, WorkflowEvent.GENERATION_RECHECK).to_state is WorkflowState.GENERATION_CHECKING
+
     quality = transition(WorkflowState.QUALITY_CHECKING, WorkflowEvent.QUALITY_REPAIR_REQUIRED)
     assert quality.to_state is WorkflowState.QUALITY_REPAIRING
     assert transition(quality.to_state, WorkflowEvent.QUALITY_RECHECK).to_state is WorkflowState.QUALITY_CHECKING
@@ -66,6 +71,9 @@ def test_failure_states_have_explicit_retry_semantics():
 
 def test_generation_incomplete_is_a_distinct_retryable_terminal_state():
     state = transition(WorkflowState.SOURCE_READY, WorkflowEvent.GENERATION_STARTED).to_state
+    state = transition(state, WorkflowEvent.GENERATION_CHECK_STARTED).to_state
+    state = transition(state, WorkflowEvent.GENERATION_REPAIR_REQUIRED).to_state
+    state = transition(state, WorkflowEvent.GENERATION_RECHECK).to_state
     state = transition(state, WorkflowEvent.GENERATION_INCOMPLETE).to_state
     assert state is WorkflowState.GENERATION_INCOMPLETE
     assert transition(state, WorkflowEvent.RETRY).to_state is WorkflowState.QUEUED

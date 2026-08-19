@@ -85,6 +85,7 @@ class BatchProcessor:
                     require_source=self.settings.require_source,
                     review_reasoning_effort=self.settings.openai_review_reasoning_effort,
                     visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
+                    generation_repair_rounds=self.settings.generation_repair_rounds,
                     quality_repair_rounds=self.settings.quality_repair_rounds,
                 )
                 result = pipeline.process_ref(ref, send_progress=False)

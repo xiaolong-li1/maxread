@@ -40,6 +40,7 @@ class Settings:
     openai_timeout: int
     openai_reasoning_effort: str
     openai_review_reasoning_effort: str
+    generation_repair_rounds: int
     quality_repair_rounds: int
     require_source: bool
     batch_workers: int
@@ -95,6 +96,7 @@ class Settings:
             openai_timeout=int(os.environ.get("MAXREAD_OPENAI_TIMEOUT", "180")),
             openai_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REASONING_EFFORT", "high"),
             openai_review_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REVIEW_REASONING_EFFORT", "low"),
+            generation_repair_rounds=max(0, int(os.environ.get("MAXREAD_GENERATION_REPAIR_ROUNDS", "2"))),
             quality_repair_rounds=max(0, int(os.environ.get("MAXREAD_QUALITY_REPAIR_ROUNDS", "3"))),
             require_source=os.environ.get("MAXREAD_REQUIRE_SOURCE", "true").lower() in {"1", "true", "yes", "on"},
             batch_workers=int(os.environ.get("MAXREAD_BATCH_WORKERS", "3")),

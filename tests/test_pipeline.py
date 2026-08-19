@@ -3,10 +3,10 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import MaxReadPipeline, _describe_figures_for_prompt, _generate_complete_paper_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _write_paper_artifact
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _generate_complete_paper_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _write_paper_artifact
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
-from maxread.workflow import WorkflowState
+from maxread.workflow import WorkflowEvent, WorkflowState
 
 
 class FakeArxiv:
@@ -159,6 +159,28 @@ class ConcatenatedDocumentLLM(FakeLLM):
         )
 
 
+class RepairingGenerationLLM(FakeLLM):
+    def __init__(self):
+        self.calls = 0
+        self.prompts = []
+
+    def responses_text(self, system, user, **kwargs):
+        self.calls += 1
+        self.prompts.append(user)
+        if self.calls == 1:
+            return "The user wants me to draft a document.\n" + ("incomplete " * 220)
+        return super().responses_text(system, user, **kwargs)
+
+
+class AlwaysInvalidGenerationLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def responses_text(self, system, user, **kwargs):
+        self.calls += 1
+        return "The user wants me to draft a document.\n" + ("incomplete " * 220)
+
+
 class FakeArxivNoSource(FakeArxiv):
     def fetch(self, paper_id):
         bundle = super().fetch(paper_id)
@@ -227,6 +249,7 @@ def test_pipeline_emits_durable_workflow_milestones(tmp_path):
         "fetching",
         "source_ready",
         "generating",
+        "generation_checking",
         "reviewing",
         "quality_checking",
         "publishing",
@@ -288,7 +311,61 @@ def test_generation_extracts_complete_document_appended_after_partial_draft():
     assert llm.calls == 1
     assert result.startswith("# [2604.12946] Complete Paper\n")
     assert "The user wants me" not in result
-    assert attempts[-1][2] == ["deterministic-repair:concatenated-document"]
+    assert attempts[-1][2] == ["deterministic-repair:complete-document-suffix"]
+
+
+def test_generation_repairs_invalid_output_with_previous_draft_and_exact_errors():
+    llm = RepairingGenerationLLM()
+    events = []
+
+    result = _generate_complete_paper_markdown(
+        llm,
+        "生成文档",
+        [],
+        attempts=3,
+        paper_id="2604.12946",
+        title="Fake Paper",
+        on_workflow_event=lambda event, detail: events.append((event, detail)),
+    )
+
+    assert result.startswith("# Fake Paper\n")
+    assert llm.calls == 2
+    assert "精确错误：" in llm.prompts[1]
+    assert "BEGIN PREVIOUS OUTPUT" in llm.prompts[1]
+    assert "The user wants me to draft a document" in llm.prompts[1]
+    assert [event for event, _detail in events] == [
+        WorkflowEvent.GENERATION_CHECK_STARTED,
+        WorkflowEvent.GENERATION_REPAIR_REQUIRED,
+        WorkflowEvent.GENERATION_RECHECK,
+    ]
+
+
+def test_generation_enters_incomplete_only_after_bounded_attempts_are_exhausted():
+    llm = AlwaysInvalidGenerationLLM()
+    events = []
+
+    try:
+        _generate_complete_paper_markdown(
+            llm,
+            "生成文档",
+            [],
+            attempts=3,
+            paper_id="2604.12946",
+            title="Fake Paper",
+            on_workflow_event=lambda event, detail: events.append((event, detail)),
+        )
+        raise AssertionError("incomplete generation unexpectedly passed")
+    except IncompleteGenerationError as exc:
+        assert exc.attempts == 3
+
+    assert llm.calls == 3
+    assert [event for event, _detail in events] == [
+        WorkflowEvent.GENERATION_CHECK_STARTED,
+        WorkflowEvent.GENERATION_REPAIR_REQUIRED,
+        WorkflowEvent.GENERATION_RECHECK,
+        WorkflowEvent.GENERATION_REPAIR_REQUIRED,
+        WorkflowEvent.GENERATION_RECHECK,
+    ]
 
 
 def test_pipeline_post_publish_fetch_failure_is_warning(tmp_path):

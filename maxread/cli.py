@@ -129,6 +129,7 @@ def main(argv: List[str] | None = None) -> int:
         require_source=settings.require_source,
         review_reasoning_effort=settings.openai_review_reasoning_effort,
         visual_qa=visual_qa,
+        generation_repair_rounds=settings.generation_repair_rounds,
         quality_repair_rounds=settings.quality_repair_rounds,
     )
     article_pipeline = ArticlePipeline(

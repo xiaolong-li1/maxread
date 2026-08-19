@@ -53,6 +53,7 @@ class MaxReadPipeline:
         require_source: bool = True,
         review_reasoning_effort: str = "",
         visual_qa: Optional[VisualQAController] = None,
+        generation_repair_rounds: int = 2,
         quality_repair_rounds: int = 3,
         on_workflow_event=None,
     ):
@@ -63,6 +64,7 @@ class MaxReadPipeline:
         self.require_source = require_source
         self.review_reasoning_effort = review_reasoning_effort
         self.visual_qa = visual_qa
+        self.generation_repair_rounds = max(0, int(generation_repair_rounds))
         self.quality_repair_rounds = max(0, int(quality_repair_rounds))
         self.on_workflow_event = on_workflow_event
 
@@ -156,11 +158,13 @@ class MaxReadPipeline:
                     self.llm,
                     build_final_user_prompt(bundle, figure_inserts, figure_visuals),
                     markers,
+                    attempts=self.generation_repair_rounds + 1,
                     paper_id=bundle.metadata.paper_id,
                     title=bundle.metadata.title,
                     attempt_writer=lambda attempt, raw, errors: _write_generation_attempt(
                         bundle, generation_run, attempt, raw, errors
                     ),
+                    on_workflow_event=self._workflow,
                 )
                 self._workflow(WorkflowEvent.DRAFT_READY, ref.paper_id)
                 _write_paper_artifact(bundle, "01-generated.md", markdown)
@@ -560,10 +564,11 @@ def _generate_complete_paper_markdown(
     llm,
     user_prompt: str,
     markers,
-    attempts: int = 2,
+    attempts: int = 3,
     paper_id: str = "",
     title: str = "",
     attempt_writer: Optional[Callable[[int, str, list[str]], None]] = None,
+    on_workflow_event: Optional[Callable[[WorkflowEvent, str], None]] = None,
 ) -> str:
     attempt_count = max(1, attempts)
     contract = _markdown_generation_contract(paper_id)
@@ -572,45 +577,119 @@ def _generate_complete_paper_markdown(
     last_markdown = ""
     last_exception = ""
     had_model_output = False
+    checking_started = False
     for attempt in range(attempt_count):
+        attempt_number = attempt + 1
         try:
             raw_markdown = llm.responses_text(FINAL_SYSTEM_PROMPT, prompt)
         except Exception as exc:
             last_exception = str(exc)
             if attempt_writer:
-                attempt_writer(attempt + 1, "", [f"model-call:{last_exception}"])
+                attempt_writer(attempt_number, "", [f"model-call:{last_exception}"])
             continue
         had_model_output = True
+        if on_workflow_event:
+            if checking_started:
+                on_workflow_event(
+                    WorkflowEvent.GENERATION_RECHECK,
+                    f"attempt={attempt_number}/{attempt_count}",
+                )
+            else:
+                on_workflow_event(
+                    WorkflowEvent.GENERATION_CHECK_STARTED,
+                    f"attempt={attempt_number}/{attempt_count}",
+                )
+                checking_started = True
         markdown = _unwrap_outer_markdown_fence(raw_markdown)
         errors = paper_markdown_completeness_errors(markdown, markers)
         if attempt_writer:
-            attempt_writer(attempt + 1, raw_markdown, errors)
+            attempt_writer(attempt_number, raw_markdown, errors)
         if not errors:
             return markdown
-        repaired = _extract_complete_document_suffix(markdown, markers, paper_id)
+        repaired, repair_kind = _deterministic_generation_repair(
+            markdown,
+            errors,
+            markers,
+            paper_id,
+            title,
+        )
         if repaired:
+            if on_workflow_event:
+                on_workflow_event(
+                    WorkflowEvent.GENERATION_REPAIR_REQUIRED,
+                    f"attempt={attempt_number}/{attempt_count} deterministic={repair_kind}",
+                )
             if attempt_writer:
-                attempt_writer(attempt + 2, repaired, ["deterministic-repair:concatenated-document"])
+                attempt_writer(
+                    attempt_count + attempt_number,
+                    repaired,
+                    [f"deterministic-repair:{repair_kind}"],
+                )
+            if on_workflow_event:
+                on_workflow_event(
+                    WorkflowEvent.GENERATION_RECHECK,
+                    f"attempt={attempt_number}/{attempt_count} deterministic={repair_kind}",
+                )
             return repaired
         last_markdown = markdown
         last_errors = errors
-        prompt = user_prompt + contract + (
-            "\n\n上一次输出未通过结构检查，问题为：" + ", ".join(errors) +
-            "。请从第一行重新输出完整文档：第一行必须是 `# ` 开头的 H1；"
-            "不得有前置解释、JSON、YAML 或包住全文的代码围栏；必须包含第 1 至第 7 章，"
-            "并只选择 3-5 张关键图片嵌入对应论述。"
-        )
-    if had_model_output and last_errors == ["missing-h1"]:
-        repaired = _repair_missing_h1(last_markdown, paper_id, title)
-        repaired_errors = paper_markdown_completeness_errors(repaired, markers)
-        if not repaired_errors:
-            if attempt_writer:
-                attempt_writer(attempt_count + 1, repaired, ["deterministic-repair:missing-h1"])
-            return repaired
-        last_errors = repaired_errors
+        if attempt_number < attempt_count:
+            if on_workflow_event:
+                on_workflow_event(
+                    WorkflowEvent.GENERATION_REPAIR_REQUIRED,
+                    f"attempt={attempt_number}/{attempt_count} errors={','.join(errors)}",
+                )
+            prompt = _generation_repair_prompt(
+                user_prompt,
+                contract,
+                markdown,
+                errors,
+                attempt_number,
+            )
     if not had_model_output:
         raise RuntimeError("paper generation failed: " + (last_exception or "no model output"))
     raise IncompleteGenerationError(last_errors, attempts=attempt_count)
+
+
+def _deterministic_generation_repair(
+    markdown: str,
+    errors,
+    markers,
+    paper_id: str,
+    title: str,
+) -> tuple[str, str]:
+    repaired = _extract_complete_document_suffix(markdown, markers, paper_id)
+    if repaired:
+        return repaired, "complete-document-suffix"
+    if list(errors) == ["missing-h1"]:
+        repaired = _repair_missing_h1(markdown, paper_id, title)
+        if not paper_markdown_completeness_errors(repaired, markers):
+            return repaired, "missing-h1"
+    return "", ""
+
+
+def _generation_repair_prompt(
+    user_prompt: str,
+    contract: str,
+    previous_markdown: str,
+    errors,
+    repair_round: int,
+) -> str:
+    return (
+        user_prompt
+        + contract
+        + "\n\n生成修复任务（第 "
+        + str(repair_round)
+        + " 轮输出未通过）：\n"
+        + "- 精确错误："
+        + ", ".join(errors)
+        + "\n- 下面给出上一份原始输出。请修复这些错误并重新输出完整文档，不要只输出补丁。\n"
+        + "- 第一行必须是 `# ` 开头的 H1；不得有前置解释、JSON、YAML 或包住全文的代码围栏。\n"
+        + "- 必须保留第 1 至第 7 章和已有的 MaxReadFigure 标记。不要复述本修复指令或分隔线。\n"
+        + "\n----- BEGIN PREVIOUS OUTPUT -----\n"
+        + previous_markdown.strip()
+        + "\n----- END PREVIOUS OUTPUT -----\n"
+    )
 
 
 def _markdown_generation_contract(paper_id: str) -> str:

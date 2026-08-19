@@ -108,6 +108,8 @@ The listener ignores ordinary messages with no supported input. It replies with 
 
 Before publishing, MaxRead sanitizes LaTeX/Markdown formatting, checks required paper sections and figure references, and blocks documents with high-severity formula or raw-formatting errors. A blocked document is sent back to the review model with the exact quality findings and re-rendered; this repeats for `MAXREAD_QUALITY_REPAIR_ROUNDS` rounds (default `3`) before the job is marked failed. Every round's Markdown, XML, quality report, and model response is saved under `pipeline_artifacts`. After publishing, it fetches the document again for a post-publish quality check.
 
+Paper generation is also a bounded state-machine loop: each output enters `generation_checking`, deterministic cleanup runs first, and a failed check enters `generation_repairing` with the previous output and exact errors included in the next model prompt. `MAXREAD_GENERATION_REPAIR_ROUNDS` controls model repair rounds (default `2`, three total generation opportunities). Exhausting the budget enters the retryable `generation_incomplete` terminal state without publishing.
+
 An optional browser worker can inspect the published Feishu document for invalid formulas, leaked formatting commands, image overflow, excessive image whitespace, and blank sections. Enable it only when the coordinator can SSH to the worker host:
 
 ```bash

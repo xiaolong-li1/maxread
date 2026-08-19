@@ -12,6 +12,8 @@ class WorkflowState(str, Enum):
     FETCHING = "fetching"
     SOURCE_READY = "source_ready"
     GENERATING = "generating"
+    GENERATION_CHECKING = "generation_checking"
+    GENERATION_REPAIRING = "generation_repairing"
     REVIEWING = "reviewing"
     QUALITY_CHECKING = "quality_checking"
     QUALITY_REPAIRING = "quality_repairing"
@@ -33,6 +35,9 @@ class WorkflowEvent(str, Enum):
     SOURCE_READY = "source_ready"
     SOURCE_MISSING = "source_missing"
     GENERATION_STARTED = "generation_started"
+    GENERATION_CHECK_STARTED = "generation_check_started"
+    GENERATION_REPAIR_REQUIRED = "generation_repair_required"
+    GENERATION_RECHECK = "generation_recheck"
     DRAFT_READY = "draft_ready"
     GENERATION_INCOMPLETE = "generation_incomplete"
     REVIEW_COMPLETED = "review_completed"
@@ -90,8 +95,14 @@ _TRANSITIONS: Dict[Tuple[WorkflowState, WorkflowEvent], WorkflowState] = {
     (WorkflowState.FETCHING, WorkflowEvent.SOURCE_READY): WorkflowState.SOURCE_READY,
     (WorkflowState.FETCHING, WorkflowEvent.SOURCE_MISSING): WorkflowState.NEEDS_SOURCE,
     (WorkflowState.SOURCE_READY, WorkflowEvent.GENERATION_STARTED): WorkflowState.GENERATING,
+    (WorkflowState.GENERATING, WorkflowEvent.GENERATION_CHECK_STARTED): WorkflowState.GENERATION_CHECKING,
+    (WorkflowState.GENERATION_CHECKING, WorkflowEvent.GENERATION_REPAIR_REQUIRED): WorkflowState.GENERATION_REPAIRING,
+    (WorkflowState.GENERATION_REPAIRING, WorkflowEvent.GENERATION_RECHECK): WorkflowState.GENERATION_CHECKING,
     (WorkflowState.GENERATING, WorkflowEvent.DRAFT_READY): WorkflowState.REVIEWING,
+    (WorkflowState.GENERATION_CHECKING, WorkflowEvent.DRAFT_READY): WorkflowState.REVIEWING,
     (WorkflowState.GENERATING, WorkflowEvent.GENERATION_INCOMPLETE): WorkflowState.GENERATION_INCOMPLETE,
+    (WorkflowState.GENERATION_CHECKING, WorkflowEvent.GENERATION_INCOMPLETE): WorkflowState.GENERATION_INCOMPLETE,
+    (WorkflowState.GENERATION_REPAIRING, WorkflowEvent.GENERATION_INCOMPLETE): WorkflowState.GENERATION_INCOMPLETE,
     (WorkflowState.REVIEWING, WorkflowEvent.REVIEW_COMPLETED): WorkflowState.QUALITY_CHECKING,
     (WorkflowState.QUALITY_CHECKING, WorkflowEvent.QUALITY_REPAIR_REQUIRED): WorkflowState.QUALITY_REPAIRING,
     (WorkflowState.QUALITY_REPAIRING, WorkflowEvent.QUALITY_RECHECK): WorkflowState.QUALITY_CHECKING,
