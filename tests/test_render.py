@@ -176,6 +176,26 @@ def test_polish_markdown_keeps_real_code_spans_as_code():
     assert '`print("ok")`' in out
 
 
+def test_polish_markdown_restores_reviewed_api_identifiers_to_code():
+    text = (
+        r"调用 <latex>tensor_meta()</latex>、<latex>on_worker</latex> 和 "
+        r"<latex>publish(req_id)</latex>；数学量仍包括 <latex>x_i</latex>、"
+        r"<latex>\lambda_max</latex> 与 <latex>f(x)</latex>。"
+    )
+
+    out = polish_markdown(text)
+    xml = markdown_to_docx_xml(out)
+
+    assert "`tensor_meta()`" in out
+    assert "`on_worker`" in out
+    assert "`publish(req_id)`" in out
+    assert r"<latex>x_i</latex>" in out
+    assert r"<latex>\lambda_{\max}</latex>" in out or r"<latex>\lambda_max</latex>" in out
+    assert r"<latex>f(x)</latex>" in out
+    assert "<code>tensor_meta()</code>" in xml
+    assert "<latex>tensor_meta()</latex>" not in xml
+
+
 def test_polish_markdown_repairs_split_latex_commands_before_validation():
     text = r"<latex>\bar{a}=\mathrm{softmax}\le ft(\hat{Q}K^\to p/\sqrt d\right),\quad \text{s.t.}\ D_{JS}<\tau</latex>"
     out = polish_markdown(text)

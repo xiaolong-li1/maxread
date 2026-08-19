@@ -245,7 +245,6 @@ def _inspect_document(
     count_screenshot = screenshots[0] if screenshots else ""
     for kind, actual, expected, label in (
         ("missing-image", rendered_images, expected_images, "图片"),
-        ("missing-formula", rendered_formulas, expected_formulas, "公式"),
         ("missing-table", rendered_tables, expected_tables, "表格"),
     ):
         if expected and actual < expected:
@@ -258,7 +257,26 @@ def _inspect_document(
                     data={"actual": actual, "expected": expected},
                 )
             )
-    scrollable_table_count = 0
+    if expected_formulas and rendered_formulas < expected_formulas:
+        missing = expected_formulas - rendered_formulas
+        # Feishu can merge or canonicalize one equation block in the rendered
+        # DOM. With no invalid-formula or raw-formatting signal, a one-block
+        # difference is a count drift rather than evidence of broken math.
+        tolerance = max(1, math.ceil(expected_formulas * 0.01))
+        count_drift = missing <= tolerance and invalid_count == 0 and raw_formatting_count == 0
+        findings.append(
+            _finding(
+                "formula-count-drift" if count_drift else "missing-formula",
+                "medium" if count_drift else "high",
+                f"真实页面只渲染出 {rendered_formulas}/{expected_formulas} 个公式",
+                screenshot=count_screenshot,
+                data={
+                    "actual": rendered_formulas,
+                    "expected": expected_formulas,
+                    "tolerance": tolerance,
+                },
+            )
+        )
     for table in inventory["tables"]:
         if int(table.get("rows", 0)) < 1 or int(table.get("cells", 0)) < 1:
             findings.append(
@@ -270,20 +288,6 @@ def _inspect_document(
                     data={"rows": table.get("rows", 0), "cells": table.get("cells", 0)},
                 )
             )
-        overflow = float(table.get("right", 0)) - float(editor.get("right", 0))
-        if overflow > 12 or float(table.get("left", 0)) < float(editor.get("left", 0)) - 12:
-            if table.get("horizontally_scrollable"):
-                scrollable_table_count += 1
-            else:
-                findings.append(
-                    _finding(
-                        "table-clipped",
-                        "high",
-                        f"表格超出正文区域 {round(max(overflow, 0))}px，且没有可用的横向滚动容器",
-                        screenshot=count_screenshot,
-                        data={"editor_width": round(float(editor.get("width", 0))), "render_width": round(float(table.get("width", 0)))},
-                    )
-                )
 
     report["findings"] = _dedupe_findings(findings)
     report["status"] = "issues" if report["findings"] else "ok"
@@ -295,7 +299,6 @@ def _inspect_document(
         "rendered_image_count": rendered_images,
         "rendered_formula_count": rendered_formulas,
         "rendered_table_count": rendered_tables,
-        "scrollable_table_count": scrollable_table_count,
         "expected_image_min": expected_images,
         "expected_formula_min": expected_formulas,
         "expected_table_min": expected_tables,

@@ -58,7 +58,10 @@
     .icon-button { width: 36px; padding: 0; }
     .back-link { padding: 0 12px; color: var(--ink); }
     .icon-button:hover, .back-link:hover { border-color: #afb8af; background: #fbfcfa; }
-    svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .brand-mark svg, .icon-button svg, .back-link svg {
+      width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2;
+      stroke-linecap: round; stroke-linejoin: round;
+    }
 
     .intro {
       display: grid;
@@ -96,63 +99,105 @@
       display: grid;
       grid-template-columns: minmax(0, 1fr) 300px;
       gap: 18px;
-      align-items: stretch;
+      align-items: start;
     }
     .flow-surface {
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 18px;
+      padding: 14px;
       min-height: 500px;
       box-shadow: var(--shadow);
+      overflow: hidden;
     }
-    .phase-grid {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(150px, 1fr));
-      gap: 12px;
-      align-items: start;
+    .graph-scroll {
+      width: 100%; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain;
+      border-bottom: 1px solid var(--line); scrollbar-color: #aeb6ae transparent;
     }
-    .phase { min-width: 0; }
-    .phase-head { min-height: 52px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
-    .phase-index { color: var(--muted); font: 11px/1.3 "JetBrains Mono", ui-monospace, monospace; }
-    .phase-title { margin-top: 3px; font-weight: 720; }
-    .node-list { display: grid; gap: 8px; }
-    .state-node {
-      position: relative;
-      width: 100%;
-      min-height: 68px;
-      padding: 10px 11px 9px 29px;
-      text-align: left;
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      background: #fbfcfa;
+    .state-graph {
+      display: block; width: 1160px; min-width: 1160px; height: 980px;
+      font-family: Outfit, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      fill: initial; stroke: none;
+    }
+    .state-graph text { stroke: none; paint-order: normal; }
+    .phase-region { fill: #f8faf7; stroke: #e3e7e1; stroke-width: 1; }
+    .phase-region.terminal { fill: #faf8f6; }
+    .phase-index-svg { fill: #8a928a; font: 10px "JetBrains Mono", ui-monospace, monospace; }
+    .phase-title-svg { fill: var(--ink); font-size: 13px; font-weight: 720; }
+    .graph-edge {
+      fill: none; stroke: #b8c0b9; stroke-width: 1.35; opacity: .52;
+      vector-effect: non-scaling-stroke; transition: stroke .2s, opacity .2s, stroke-width .2s;
+    }
+    .graph-edge.scenario { stroke: #c48a52; stroke-width: 2.1; opacity: .88; }
+    .graph-edge.traversed { stroke: var(--green); stroke-width: 2.4; opacity: 1; }
+    .graph-edge.next { stroke: var(--amber); stroke-width: 2.8; opacity: 1; }
+    .edge-label-svg rect {
+      fill: rgba(255, 255, 255, .94); stroke: #d8ded8; stroke-width: 1;
+      vector-effect: non-scaling-stroke;
+    }
+    .edge-label-svg text { fill: #727a72; font-size: 9px; font-weight: 680; text-anchor: middle; }
+    .edge-label-svg.scenario rect { fill: #fff7ee; stroke: #ddbc99; }
+    .edge-label-svg.scenario text { fill: #8b5425; }
+    .edge-label-svg.traversed rect { fill: #edf6f1; stroke: #a2c2b2; }
+    .edge-label-svg.traversed text { fill: var(--green); }
+    .edge-label-svg.next rect { fill: var(--amber-soft); stroke: var(--amber); }
+    .edge-label-svg.next text { fill: #754316; }
+    .graph-node {
       cursor: pointer;
-      transition: border-color .18s, background .18s, transform .18s, opacity .18s;
+      opacity: .82; transition: opacity .18s;
     }
-    .state-node:hover { border-color: #aab5aa; transform: translateY(-1px); }
-    .state-node::before {
-      content: ""; position: absolute; left: 11px; top: 15px;
-      width: 8px; height: 8px; border-radius: 50%; background: #aeb5ae;
+    .graph-node rect {
+      fill: #ffffff; stroke: #cbd2cb; stroke-width: 1.2;
+      vector-effect: non-scaling-stroke; transition: fill .18s, stroke .18s, stroke-width .18s;
     }
-    .state-node.visited { background: var(--green-soft); border-color: #9dbbab; }
-    .state-node.visited::before { background: var(--green); }
-    .state-node.current { background: var(--amber-soft); border-color: var(--amber); box-shadow: 0 0 0 2px rgba(169,100,40,.12); }
-    .state-node.current::before { background: var(--amber); }
-    .state-node.dim { opacity: .42; }
-    .state-node.terminal { border-style: dashed; }
-    .node-label { display: block; font-size: 13px; font-weight: 720; line-height: 1.35; }
-    .node-id {
-      display: block; margin-top: 4px; color: var(--muted);
-      font: 10px/1.25 "JetBrains Mono", ui-monospace, monospace;
-      overflow-wrap: anywhere;
+    .graph-node:hover, .graph-node:focus { opacity: 1; outline: none; }
+    .graph-node:hover rect, .graph-node:focus rect { stroke: #7d897f; stroke-width: 1.8; }
+    .graph-node.path { opacity: 1; }
+    .graph-node.path rect { fill: #fffaf4; stroke: #d4aa7d; }
+    .graph-node.visited rect { fill: var(--green-soft); stroke: #86ad9a; }
+    .graph-node.current rect { fill: var(--amber-soft); stroke: var(--amber); stroke-width: 2.2; }
+    .graph-node.terminal rect { stroke-dasharray: 5 3; }
+    .node-dot-svg { fill: #aeb6ae; }
+    .graph-node.path .node-dot-svg { fill: #c17c3c; }
+    .graph-node.visited .node-dot-svg { fill: var(--green); }
+    .graph-node.current .node-dot-svg { fill: var(--amber); }
+    .node-label-svg { fill: var(--ink); font-size: 13px; font-weight: 720; }
+    .node-id-svg { fill: #747d75; font: 9px "JetBrains Mono", ui-monospace, monospace; }
+    .node-badge-svg { fill: #8c5a2c; font-size: 8px; font-weight: 700; }
+    .graph-legend {
+      display: flex; flex-wrap: wrap; gap: 13px; padding: 10px 4px 0;
+      color: var(--muted); font-size: 10px;
     }
-    .node-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-    .tiny-badge { border-radius: 4px; padding: 1px 5px; font-size: 9px; background: var(--surface-soft); color: var(--muted); }
-    .tiny-badge.retry { background: var(--amber-soft); color: #87501e; }
+    .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+    .legend-line { width: 23px; height: 0; border-top: 2px solid #b8c0b9; }
+    .legend-line.path { border-color: #c48a52; }
+    .legend-line.done { border-color: var(--green); }
+    .legend-line.policy { border-top-style: dashed; border-color: var(--blue); }
+
+    .policy-rail { padding: 14px 4px 2px; }
+    .policy-rail-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    .policy-rail-head strong { font-size: 12px; }
+    .policy-rail-head span { color: var(--muted); font-size: 10px; }
+    .policy-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+    .policy-edge { min-width: 0; padding: 11px 10px 12px 0; border-bottom: 1px solid var(--line); opacity: .72; }
+    .policy-edge + .policy-edge { border-left: 1px solid var(--line); padding-left: 10px; }
+    .policy-edge.scenario { background: #fffaf4; opacity: 1; }
+    .policy-edge.traversed { background: #eef6f2; }
+    .policy-edge.next { background: var(--amber-soft); }
+    .policy-route { display: grid; grid-template-columns: minmax(0, 1fr) 18px minmax(58px, auto); align-items: center; gap: 5px; }
+    .policy-source { min-width: 0; font-size: 10px; font-weight: 700; }
+    .policy-source small { display: block; color: var(--muted); font-weight: 500; }
+    .policy-arrow { position: relative; height: 1px; border-top: 1px dashed var(--blue); }
+    .policy-arrow::after { content: ""; position: absolute; right: -1px; top: -3px; width: 5px; height: 5px; border-top: 1px solid var(--blue); border-right: 1px solid var(--blue); transform: rotate(45deg); }
+    .policy-target { color: var(--blue); font-size: 10px; font-weight: 700; text-align: right; }
+    .policy-event { margin-top: 8px; color: var(--ink); font-size: 10px; font-weight: 700; }
+    .policy-event code { margin-left: 4px; color: var(--muted); font-size: 8px; font-weight: 500; }
+    .policy-condition { margin: 3px 0 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
 
     .inspector {
       background: var(--ink); color: #f6f8f4; border-radius: 8px;
-      padding: 18px; min-height: 500px; display: flex; flex-direction: column;
+      padding: 18px; min-height: 500px; max-height: calc(100vh - 24px); overflow: auto;
+      display: flex; flex-direction: column; position: sticky; top: 12px;
     }
     .inspector-kicker { color: #aebbb2; font-size: 11px; font-weight: 700; }
     .inspector h3 { margin: 7px 0 2px; font-size: 20px; line-height: 1.25; }
@@ -164,9 +209,12 @@
     .property strong { display: block; margin-top: 4px; font-size: 12px; }
     .outgoing { margin-top: 20px; border-top: 1px solid #3a423c; padding-top: 14px; }
     .outgoing-title { color: #aebbb2; font-size: 11px; margin-bottom: 8px; }
-    .edge-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 7px 0; border-bottom: 1px solid #343a35; }
+    .edge-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 8px 0; border-bottom: 1px solid #343a35; }
     .edge-event { color: #f0c89e; font: 10px/1.4 "JetBrains Mono", ui-monospace, monospace; overflow-wrap: anywhere; }
     .edge-target { color: #d6ddd7; font-size: 11px; text-align: right; }
+    .edge-name { color: #f3f6f2; font-size: 11px; font-weight: 700; }
+    .edge-code { margin-left: 5px; color: #aebbb2; font: 8px/1.3 "JetBrains Mono", ui-monospace, monospace; }
+    .edge-condition { grid-column: 1 / -1; margin: 0; color: #aebbb2; font-size: 9px; line-height: 1.45; }
     .scenario-note { margin-top: auto; padding-top: 16px; color: #b9c3bc; font-size: 12px; }
 
     .trace-panel { margin-top: 14px; padding: 14px 0 6px; }
@@ -265,8 +313,9 @@
       .intro { grid-template-columns: 1fr; }
       .metrics { grid-template-columns: repeat(5, minmax(80px, 1fr)); }
       .machine { grid-template-columns: 1fr; }
-      .inspector { min-height: 310px; }
-      .phase-grid { grid-template-columns: repeat(3, minmax(160px, 1fr)); }
+      .inspector { min-height: 310px; max-height: none; position: static; }
+      .policy-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .policy-edge:nth-child(4) { border-left: 0; padding-left: 0; }
       .handling-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .handling-item:nth-child(3) { border-left: 0; padding-left: 0; }
       .failure-detail-grid { grid-template-columns: 1fr 1fr; }
@@ -283,9 +332,10 @@
       .metrics { grid-template-columns: repeat(2, 1fr); }
       .section-head { align-items: flex-start; flex-direction: column; }
       .sim-controls { justify-content: flex-start; }
-      .phase-grid { grid-template-columns: 1fr; }
-      .flow-surface { min-height: 0; padding: 14px; }
-      .phase-head { min-height: 42px; }
+      .flow-surface { min-height: 0; padding: 10px; }
+      .state-graph { width: 1160px; min-width: 1160px; height: 980px; }
+      .policy-grid { grid-template-columns: 1fr; }
+      .policy-edge + .policy-edge { border-left: 0; padding-left: 0; }
       .architecture-grid { grid-template-columns: 1fr; }
       .handling-overview { grid-template-columns: 1fr; }
       .handling-item + .handling-item { border-left: 0; padding-left: 0; }
@@ -424,6 +474,26 @@
       { id: 'delivery', index: '04', label: '发布与实页检查' },
       { id: 'terminal', index: '05', label: '终态与恢复' },
     ];
+    const GRAPH = {
+      width: 1160,
+      height: 980,
+      nodeWidth: 174,
+      nodeHeight: 60,
+      positions: {
+        queued: [34, 70], claimed: [34, 170], fetching: [34, 270], source_ready: [34, 370],
+        generating: [264, 370], generation_checking: [264, 490], generation_repairing: [264, 640],
+        reviewing: [494, 370], quality_checking: [494, 490], quality_repairing: [494, 640],
+        publishing: [724, 370], post_publish_checking: [724, 490], visual_checking: [724, 640], visual_repairing: [724, 790],
+        needs_source: [954, 270], generation_incomplete: [954, 450], quality_failed: [954, 600],
+        completed: [954, 730], failed: [954, 810], cancelled: [954, 890],
+      },
+    };
+    const POLICY_SOURCE_LABELS = {
+      non_terminal: '任意非终态',
+      active_except_queued: '活动态（不含 queued）',
+      retryable: '可重试终态',
+      publish_or_visual_check: '发布 / 视觉检查态',
+    };
     let spec = null;
     let scenario = null;
     let stepIndex = 0;
@@ -494,44 +564,155 @@
 
     function renderMachine() {
       const states = new Map(spec.states.map(item => [item.id, item]));
-      const path = scenario.states.slice(0, stepIndex + 1);
-      const visited = new Set(path);
+      const path = new Set(scenario.states);
+      const visited = new Set(scenario.states.slice(0, stepIndex + 1));
       const current = scenario.states[stepIndex];
-      const phases = PHASES.map(phase => {
-        const nodes = spec.states.filter(item => item.phase === phase.id);
-        return '<div class="phase"><div class="phase-head"><div class="phase-index">' + phase.index +
-          '</div><div class="phase-title">' + esc(phase.label) + '</div></div><div class="node-list">' +
-          nodes.map(item => stateNode(item, visited, current)).join('') + '</div></div>';
+      const scenarioEdges = new Set(scenario.events.map((event, index) =>
+        transitionKey(scenario.states[index], event, scenario.states[index + 1])
+      ));
+      const traversedEdges = new Set(scenario.events.slice(0, stepIndex).map((event, index) =>
+        transitionKey(scenario.states[index], event, scenario.states[index + 1])
+      ));
+      const nextEdge = stepIndex < scenario.events.length
+        ? transitionKey(scenario.states[stepIndex], scenario.events[stepIndex], scenario.states[stepIndex + 1])
+        : '';
+      const phaseRegions = PHASES.map((phase, index) => {
+        const x = 18 + index * 230;
+        const terminal = phase.id === 'terminal' ? ' terminal' : '';
+        return '<rect class="phase-region' + terminal + '" x="' + x + '" y="18" width="200" height="942" rx="8" />' +
+          '<text class="phase-index-svg" x="' + (x + 14) + '" y="44">' + phase.index + '</text>' +
+          '<text class="phase-title-svg" x="' + (x + 14) + '" y="64">' + esc(phase.label) + '</text>';
       }).join('');
+      const edgeSvg = spec.transitions.map((edge, index) => renderGraphEdge(edge, index, scenarioEdges, traversedEdges, nextEdge)).join('');
+      const nodeSvg = spec.states.map(item => stateNodeSvg(item, path, visited, current)).join('');
       byId('machine-root').className = 'machine';
-      byId('machine-root').innerHTML = '<div class="flow-surface"><div class="phase-grid">' + phases +
-        '</div></div><aside class="inspector" id="inspector"></aside>';
-      document.querySelectorAll('.state-node').forEach(node => node.addEventListener('click', () => {
-        selectedState = node.dataset.state;
-        renderMachine();
-      }));
+      byId('machine-root').innerHTML = '<div class="flow-surface"><div class="graph-scroll"><svg class="state-graph" viewBox="0 0 ' + GRAPH.width + ' ' + GRAPH.height + '" role="img" aria-label="MaxRead workflow state transition graph">' +
+        '<defs><marker id="arrow-default" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 8 4 0 8z" fill="#b8c0b9"/></marker>' +
+        '<marker id="arrow-path" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 8 4 0 8z" fill="#c48a52"/></marker>' +
+        '<marker id="arrow-done" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 8 4 0 8z" fill="#25634f"/></marker></defs>' +
+        '<g class="phase-layer">' + phaseRegions + '</g><g class="edge-layer">' + edgeSvg + '</g><g class="node-layer">' + nodeSvg + '</g></svg></div>' +
+        '<div class="graph-legend"><span class="legend-item"><i class="legend-line"></i>固定转移</span><span class="legend-item"><i class="legend-line path"></i>当前场景路径</span><span class="legend-item"><i class="legend-line done"></i>已走过的边</span><span class="legend-item"><i class="legend-line policy"></i>全局条件策略</span></div>' +
+        renderPolicyRail() + '</div><aside class="inspector" id="inspector"></aside>';
+      document.querySelectorAll('.graph-node').forEach(node => {
+        node.addEventListener('click', () => { selectedState = node.dataset.state; renderMachine(); });
+        node.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectedState = node.dataset.state; renderMachine(); }
+        });
+      });
       renderInspector(states.get(selectedState) || states.get(current));
     }
 
-    function stateNode(item, visited, current) {
-      const classes = ['state-node'];
+    function stateNodeSvg(item, path, visited, current) {
+      const position = GRAPH.positions[item.id];
+      const classes = ['graph-node'];
+      if (path.has(item.id)) classes.push('path');
       if (visited.has(item.id)) classes.push('visited');
       if (item.id === current) classes.push('current');
-      if (!visited.has(item.id) && scenario.states.length) classes.push('dim');
       if (item.terminal) classes.push('terminal');
-      const badges = [
-        item.terminal ? '<span class="tiny-badge">终态</span>' : '',
-        item.retryable ? '<span class="tiny-badge retry">可重试</span>' : '',
-      ].join('');
-      return '<button class="' + classes.join(' ') + '" data-state="' + esc(item.id) + '">' +
-        '<span class="node-label">' + esc(item.label) + '</span>' +
-        '<span class="node-id">' + esc(item.id) + '</span>' +
-        (badges ? '<span class="node-badges">' + badges + '</span>' : '') +
-        '</button>';
+      const badge = item.terminal ? '<text class="node-badge-svg" x="' + (position[0] + 44) + '" y="' + (position[1] + 51) + '">' + (item.retryable ? '终态 · 可重试' : '终态') + '</text>' : '';
+      return '<g class="' + classes.join(' ') + '" data-state="' + esc(item.id) + '" tabindex="0" role="button" aria-label="' + esc(item.label) + '">' +
+        '<title>' + esc(item.label + '：' + item.detail) + '</title>' +
+        '<rect x="' + position[0] + '" y="' + position[1] + '" width="' + GRAPH.nodeWidth + '" height="' + GRAPH.nodeHeight + '" rx="7" />' +
+        '<circle class="node-dot-svg" cx="' + (position[0] + 18) + '" cy="' + (position[1] + 22) + '" r="4" />' +
+        '<text class="node-label-svg" x="' + (position[0] + 31) + '" y="' + (position[1] + 25) + '">' + esc(item.label) + '</text>' +
+        '<text class="node-id-svg" x="' + (position[0] + 31) + '" y="' + (position[1] + 43) + '">' + esc(item.id) + '</text>' + badge +
+        '</g>';
+    }
+
+    function transitionKey(from, event, to) { return from + '|' + event + '|' + to; }
+
+    function renderGraphEdge(edge, index, scenarioEdges, traversedEdges, nextEdge) {
+      const key = transitionKey(edge.from, edge.event, edge.to);
+      const classes = ['graph-edge'];
+      const labelClasses = ['edge-label-svg'];
+      let marker = 'arrow-default';
+      if (scenarioEdges.has(key)) { classes.push('scenario'); labelClasses.push('scenario'); marker = 'arrow-path'; }
+      if (traversedEdges.has(key)) { classes.push('traversed'); labelClasses.push('traversed'); marker = 'arrow-done'; }
+      if (key === nextEdge) { classes.push('next'); labelClasses.push('next'); marker = 'arrow-path'; }
+      const route = edgeRoute(edge, index);
+      const width = Math.max(58, Math.min(100, 18 + Array.from(edge.label || '').length * 10));
+      return '<path class="' + classes.join(' ') + '" d="' + route.d + '" marker-end="url(#' + marker + ')"><title>' + esc(edge.event + '：' + edge.condition) + '</title></path>' +
+        '<g class="' + labelClasses.join(' ') + '" transform="translate(' + route.labelX + ' ' + route.labelY + ')"><title>' + esc(edge.event + '：' + edge.condition) + '</title><rect x="' + (-width / 2) + '" y="-10" width="' + width + '" height="20" rx="5"/><text y="3">' + esc(edge.label) + '</text></g>';
+    }
+
+    function edgeRoute(edge, index) {
+      const source = GRAPH.positions[edge.from];
+      const target = GRAPH.positions[edge.to];
+      const sourceRight = source[0] + GRAPH.nodeWidth;
+      const targetLeft = target[0];
+      const sourceCenter = source[1] + GRAPH.nodeHeight / 2;
+      const targetCenter = target[1] + GRAPH.nodeHeight / 2;
+      const sameColumn = source[0] === target[0];
+      const terminalLanes = {
+        'generating|generation_incomplete': 330,
+        'generation_checking|generation_incomplete': 575,
+        'generation_repairing|generation_incomplete': 730,
+        'quality_checking|quality_failed': 575,
+        'quality_repairing|quality_failed': 730,
+        'post_publish_checking|quality_failed': 590,
+        'visual_checking|quality_failed': 730,
+        'visual_repairing|quality_failed': 860,
+      };
+      const terminalLane = terminalLanes[edge.from + '|' + edge.to];
+      if (terminalLane !== undefined) {
+        const busX = targetLeft - 22;
+        const startX = sourceRight + 10;
+        return {
+          d: 'M ' + sourceRight + ' ' + sourceCenter + ' L ' + startX + ' ' + terminalLane + ' L ' + busX + ' ' + terminalLane + ' L ' + busX + ' ' + targetCenter + ' L ' + targetLeft + ' ' + targetCenter,
+          labelX: busX - 4, labelY: terminalLane - 12,
+        };
+      }
+      if (edge.event === 'resume_published') {
+        const lane = 235;
+        const busX = targetLeft - 22;
+        return {
+          d: 'M ' + sourceRight + ' ' + sourceCenter + ' L ' + (sourceRight + 16) + ' ' + lane + ' L ' + busX + ' ' + lane + ' L ' + busX + ' ' + targetCenter + ' L ' + targetLeft + ' ' + targetCenter,
+          labelX: 540, labelY: lane - 12,
+        };
+      }
+      if (edge.event === 'source_missing') {
+        return {
+          d: 'M ' + sourceRight + ' ' + sourceCenter + ' C ' + (sourceRight + 120) + ' ' + sourceCenter + ', ' + (targetLeft - 120) + ' ' + targetCenter + ', ' + targetLeft + ' ' + targetCenter,
+          labelX: (sourceRight + targetLeft) / 2, labelY: sourceCenter - 12,
+        };
+      }
+      if (sameColumn) {
+        const upward = target[1] < source[1];
+        const x = source[0] + GRAPH.nodeWidth / 2;
+        const startY = upward ? source[1] : source[1] + GRAPH.nodeHeight;
+        const endY = upward ? target[1] + GRAPH.nodeHeight : target[1];
+        const curveX = edge.event.endsWith('_recheck') ? x - 38 : x;
+        return {
+          d: curveX === x ? 'M ' + x + ' ' + startY + ' C ' + x + ' ' + (startY + (endY - startY) / 3) + ', ' + x + ' ' + (endY - (endY - startY) / 3) + ', ' + x + ' ' + endY : 'M ' + x + ' ' + startY + ' C ' + curveX + ' ' + startY + ', ' + curveX + ' ' + endY + ', ' + x + ' ' + endY,
+          labelX: curveX, labelY: (startY + endY) / 2,
+        };
+      }
+      const middleX = (sourceRight + targetLeft) / 2;
+      return {
+        d: 'M ' + sourceRight + ' ' + sourceCenter + ' C ' + middleX + ' ' + sourceCenter + ', ' + middleX + ' ' + targetCenter + ', ' + targetLeft + ' ' + targetCenter,
+        labelX: middleX, labelY: (sourceCenter + targetCenter) / 2 - 12,
+      };
+    }
+
+    function renderPolicyRail() {
+      const policyItems = spec.policies.map(policy => {
+        const matches = scenario.events.map((event, index) => ({ event, index, target: scenario.states[index + 1] }))
+          .filter(item => item.event === policy.event && policy.sources.includes(scenario.states[item.index]) && item.target === policy.to);
+        const classes = ['policy-edge'];
+        if (matches.length) classes.push('scenario');
+        if (matches.some(item => item.index < stepIndex)) classes.push('traversed');
+        if (matches.some(item => item.index === stepIndex)) classes.push('next');
+        const sourceText = POLICY_SOURCE_LABELS[policy.from] || policy.from;
+        const countText = policy.sources.length + ' 个状态';
+        return '<div class="' + classes.join(' ') + '"><div class="policy-route"><div class="policy-source">' + esc(sourceText) + '<small>' + countText + '</small></div><span class="policy-arrow"></span><div class="policy-target">' + esc(labelOf(policy.to)) + '</div></div>' +
+          '<div class="policy-event">' + esc(policy.label) + '<code>' + esc(policy.event) + '</code></div><p class="policy-condition">' + esc(policy.condition) + '</p></div>';
+      }).join('');
+      return '<div class="policy-rail"><div class="policy-rail-head"><strong>全局条件转移</strong><span>适用于状态集合；不展开成 50 条重复边</span></div><div class="policy-grid">' + policyItems + '</div></div>';
     }
 
     function renderInspector(item) {
       const outgoing = spec.transitions.filter(edge => edge.from === item.id);
+      const policyOutgoing = spec.policies.filter(policy => policy.sources.includes(item.id));
       const currentIndex = scenario.states[stepIndex] === item.id ? stepIndex : scenario.states.lastIndexOf(item.id, stepIndex);
       const event = currentIndex >= 0 ? scenario.events[currentIndex] : '';
       const phase = PHASES.find(value => value.id === item.phase);
@@ -547,10 +728,16 @@
         '</div>' +
         '<div class="outgoing"><div class="outgoing-title">固定转移</div>' +
           (outgoing.length ? outgoing.map(edge =>
-            '<div class="edge-row"><span class="edge-event">' + esc(edge.event) + '</span><span class="edge-target">' + esc(labelOf(edge.to)) + '</span></div>'
+            inspectorEdge(edge.label, edge.event, edge.condition, labelOf(edge.to))
           ).join('') : '<div class="edge-row"><span class="edge-event">dynamic policy</span><span class="edge-target">见终态策略</span></div>') +
-        '</div>' +
+        (policyOutgoing.length ? '<div class="outgoing-title policy-outgoing-title">全局策略</div>' + policyOutgoing.map(policy =>
+          inspectorEdge(policy.label, policy.event, policy.condition, labelOf(policy.to))
+        ).join('') : '') + '</div>' +
         '<div class="scenario-note">当前场景事件：<span class="edge-event">' + esc(event || '等待下一步') + '</span></div>';
+    }
+
+    function inspectorEdge(label, event, condition, target) {
+      return '<div class="edge-row"><div><span class="edge-name">' + esc(label) + '</span><code class="edge-code">' + esc(event) + '</code></div><span class="edge-target">' + esc(target) + '</span><p class="edge-condition">' + esc(condition) + '</p></div>';
     }
 
     function property(label, value) {

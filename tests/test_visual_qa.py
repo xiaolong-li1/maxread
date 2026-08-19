@@ -159,13 +159,16 @@ def test_controller_rechecks_after_remote_structural_repair():
     assert not any(warning.startswith("visual-qa:high:") for warning in result.warnings)
 
 
-def test_controller_accepts_legacy_scrollable_table_overflow_without_repair_loop():
+def test_controller_accepts_nonblocking_visual_findings_without_repair_loop():
     feishu = FakeVisualFeishu("<title>T</title><table><tr><td><p>wide</p></td></tr></table>")
     controller = StubVisualQA(
         [
             RemoteVisualResult(
                 status="issues",
-                findings=[VisualFinding(kind="table-overflow", severity="high", detail="388px")],
+                findings=[
+                    VisualFinding(kind="table-clipped", severity="high", detail="388px"),
+                    VisualFinding(kind="formula-count-drift", severity="medium", detail="12/13"),
+                ],
             )
         ]
     )
@@ -175,7 +178,10 @@ def test_controller_accepts_legacy_scrollable_table_overflow_without_repair_loop
     assert result.passed is True
     assert controller.calls == ["paper"]
     assert result.rounds[0].status == "passed-with-warnings"
-    assert result.warnings == ["visual-qa:medium:table-overflow:388px"]
+    assert result.warnings == [
+        "visual-qa:medium:table-clipped:388px",
+        "visual-qa:medium:formula-count-drift:12/13",
+    ]
     assert feishu.replacements == []
 
 

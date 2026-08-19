@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Iterable, List
 
@@ -25,6 +26,8 @@ REVIEW_SYSTEM_PROMPT = r"""你是 MaxRead 的发布前质量检查员。
 10. 检查图文是否错位：如果 `**图：...**` 的解释和 marker 周围段落主题明显不一致，移动到更合适的相邻段落；无法判断时记录 `figure_marker` issue，不要臆造图意。
 11. 不要修改 `<latex>...</latex>` 内部的反斜杠命令，例如 `\left`、`\right`、`\cdot`、`\lambda`、`\nabla`、`\partial`。
 12. 如果问题都已经修好，issues 输出空数组；不要为了说明你做了什么而写 issue。
+13. 不得把 Markdown 行内代码、API、函数、类、字段、配置项或文件路径改成公式。`tensor_meta()`、`on_worker`、`publish(req_id)` 这类程序标识符必须写成反引号行内代码；`<latex>` 只用于数学表达式。
+14. 不要压缩或概括方法节。审稿只能做局部事实与格式修复，必须保留原稿的方法小节、因果链、公式解释和端到端流程。
 """
 
 
@@ -96,7 +99,9 @@ def build_review_user_prompt(markdown: str, markers: Iterable[str], kind: str = 
 - 原稿已经使用的图片 marker 是否保留且独立成行，且周围图解是否和段落主题一致。候选清单里但原稿没用的 marker 不要补回；如果你只是按要求保留/未补回 marker，不要写入 issues，只有 marker 丢失、错位且无法修复时才写 issue。
 - marker 后缀/文件名可能是截图名、hash、临时文件名或无意义缩写；不要仅凭 marker 名称像机构、Logo、缩写或文件名就记录 `figure_marker` issue。
 - 公式是否仍是 `<latex>...</latex>`，公式内部反斜杠命令是否被保留。
+- API、函数、类、字段和配置项是否仍是反引号行内代码；不要把程序标识符包装成 `<latex>`。
 - 表格是否仍是合法 Markdown 表格。
+- 方法节是否完整保留；不要为了缩短文章删除方法上下文、模块间输入输出关系或公式解释。
 - 方法/实验事实不能被你改写成新结论。
 
 候选图片 marker 清单（用于检查；只有原稿里已经出现的 marker 必须保留，原稿没出现的不要新增）：
@@ -126,6 +131,7 @@ def build_quality_repair_user_prompt(
 - 原稿中已经出现的图片 marker 必须逐字保留并独立成行；不要把图片集中到文末，也不要凭空新增候选 marker。
 - 保持 H1、TL;DR、章节、表格、列表、公式和图注内容；只修复下面列出的结构/格式问题。
 - 公式必须保持为 <latex>...</latex>。不要改动没有报错的公式；如果质检明确指出公式内有不支持的宏、HTML/CJK 混入或非法格式命令，只做等价的最小修复。
+- API、函数、类、字段、配置项和文件路径必须保持为反引号行内代码，不能改成 <latex>；若现有 <latex> 里只是 snake_case 程序标识符或函数调用，应恢复为行内代码。
 - 修复公式时不得改变变量、上下标、运算关系或数值；不确定等价写法时保持原文，并在 issues 中说明风险。
 - 如果问题已经修好，issues 必须为空数组。
 
@@ -193,12 +199,24 @@ def _review_structure_error(original: str, reviewed: str, markers: Iterable[str]
         return "lost H1"
     if "TL;DR" in original and "TL;DR" not in reviewed:
         return "lost TL;DR"
+    original_method = _numbered_section(original, 3)
+    reviewed_method = _numbered_section(reviewed, 3)
+    if len(original_method) >= 600 and len(reviewed_method) < len(original_method) * 0.8:
+        return "truncated method section"
     if len(original) >= 1200 and len(reviewed) < len(original) * 0.65:
         return "was truncated"
     for marker in markers:
         if marker in original and marker not in reviewed:
             return f"lost marker {marker}"
     return ""
+
+
+def _numbered_section(markdown: str, number: int) -> str:
+    match = re.search(
+        rf"(?ms)^##\s+{number}(?:[.、]|\s).*?(?=^##\s+{number + 1}(?:[.、]|\s)|\Z)",
+        str(markdown or ""),
+    )
+    return match.group(0).strip() if match else ""
 
 
 def visible_review_issues(rows):

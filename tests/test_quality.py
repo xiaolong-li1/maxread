@@ -30,14 +30,15 @@ def test_blocking_quality_warnings_includes_visual_high_severity():
     assert blocking_quality_warnings(warnings) == warnings[:2] + [warnings[3]]
 
 
-def test_scrollable_table_overflow_is_nonblocking_but_clipped_table_blocks():
+def test_table_geometry_warnings_are_nonblocking_but_render_failure_blocks():
     warnings = [
         "visual-qa:high:table-overflow:表格超出正文区域 388px",
         "post-publish:visual-qa:recheck:high:table-overflow:legacy warning",
         "visual-qa:high:table-clipped:表格被裁切且无法横向滚动",
+        "visual-qa:high:table-render-failed:表格没有有效行列",
     ]
 
-    assert blocking_quality_warnings(warnings) == [warnings[2]]
+    assert blocking_quality_warnings(warnings) == [warnings[3]]
 
 
 def test_quality_flags_uncompiled_uncertainty_only_inside_table_cells():

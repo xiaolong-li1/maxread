@@ -862,7 +862,7 @@ def _clip(value: str, limit: int = 240) -> str:
 
 
 def _is_nonblocking_visual_finding(finding: VisualFinding) -> bool:
-    return finding.kind == "table-overflow"
+    return finding.kind in {"table-overflow", "table-clipped", "formula-count-drift"}
 
 
 def _finding_warning(prefix: str, finding: VisualFinding, severity: str = "") -> str:

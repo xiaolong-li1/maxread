@@ -53,6 +53,7 @@ def polish_markdown(
 ) -> str:
     markdown = compile_formula_markup(markdown).text
     markdown = _flatten_nested_latex_wrappers(markdown)
+    markdown = _restore_code_like_latex(markdown)
     markdown = _normalize_backticked_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _normalize_display_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _normalize_inline_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
@@ -86,6 +87,8 @@ def _normalize_backticked_math(
 ) -> str:
     def repl(match: re.Match[str]) -> str:
         raw = match.group(1).strip()
+        if _looks_like_code_identifier(raw):
+            return match.group(0)
         if not _looks_like_math_code(raw):
             return match.group(0)
         body = _normalize_latex_body(raw, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
@@ -106,6 +109,47 @@ def _normalize_backticked_math(
         return f"<latex>{body}</latex>"
 
     return re.sub(r"`([^`\n]{1,240})`", repl, markdown)
+
+
+_MATH_FUNCTION_NAMES = {
+    "argmax", "argmin", "cos", "det", "exp", "f", "g", "h", "log",
+    "max", "mean", "min", "p", "q", "relu", "sigmoid", "sin", "softmax",
+    "sqrt", "sum", "tanh", "var",
+}
+_MATH_SNAKE_PREFIXES = {
+    "alpha", "beta", "chi", "delta", "eta", "gamma", "kappa", "lambda",
+    "mu", "nu", "omega", "phi", "psi", "rho", "sigma", "tau", "theta",
+}
+
+
+def _restore_code_like_latex(markdown: str) -> str:
+    """Undo reviewer mistakes that turn program identifiers into formulas."""
+
+    def repl(match: re.Match[str]) -> str:
+        body = html.unescape(match.group(1)).strip()
+        if _looks_like_code_identifier(body):
+            return f"`{body}`"
+        return match.group(0)
+
+    return re.sub(r"<latex>(.*?)</latex>", repl, str(markdown or ""), flags=re.S | re.I)
+
+
+def _looks_like_code_identifier(text: str) -> bool:
+    value = html.unescape(str(text or "")).strip()
+    if not value or "\n" in value or re.search(r"\\|[{}=+*/^<>≤≥]", value):
+        return False
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_.]*)(?:\(([A-Za-z0-9_.,='\"\s-]*)\))?", value)
+    if not match:
+        return False
+    name = match.group(1)
+    arguments = match.group(2)
+    root = name.split("_", 1)[0].lower()
+    if root in _MATH_SNAKE_PREFIXES or name.lower() in _MATH_FUNCTION_NAMES:
+        return False
+    segments = name.split("_")
+    descriptive_snake_case = len(segments) >= 2 and all(len(segment) >= 2 for segment in segments)
+    call_with_code_argument = arguments is not None and "_" in arguments and len(name) >= 3
+    return descriptive_snake_case or call_with_code_argument
 
 
 def _looks_like_math_code(text: str) -> bool:
@@ -199,6 +243,7 @@ def markdown_to_docx_xml(
     # Keep this boundary defensive: repair scripts and older artifacts can call
     # the XML renderer directly without going through polish_markdown().
     markdown = compile_formula_markup(markdown).text
+    markdown = _restore_code_like_latex(markdown)
     markdown = _normalize_table_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _sanitize_latex_blocks(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _sanitize_visible_text_macros(markdown)

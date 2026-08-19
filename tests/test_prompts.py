@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from maxread import repository
@@ -34,7 +35,18 @@ def test_paper_prompt_requires_method_fidelity():
     assert "Method/Approach/Algorithm/Model/Training/Inference" in prompt
     assert "输入是什么、输出是什么" in prompt
     assert "变量含义、计算顺序" in prompt
+    assert "为什么需要它 -> 接收什么 -> 如何计算/执行" in prompt
+    assert "端到端例子" in prompt
+    assert "35%-50%" in prompt
     assert "原文未展开" in prompt
+
+
+def test_paper_prompt_keeps_program_identifiers_out_of_latex():
+    prompt = build_final_user_prompt(_bundle())
+
+    assert "程序标识符必须使用 Markdown 行内代码" in FINAL_SYSTEM_PROMPT
+    assert "`tensor_meta()`" in prompt
+    assert "`publish(req_id)`" in prompt
 
 
 def test_paper_prompt_allows_selective_appendix_evidence():
@@ -291,6 +303,28 @@ def test_review_prompt_preserves_markers_and_checks_format():
     assert "长英文 caption" in prompt
     assert "\\formername" in prompt
     assert "不要仅凭 marker 名称" in prompt
+    assert "程序标识符" in REVIEW_SYSTEM_PROMPT
+    assert "不要把程序标识符包装成 `<latex>`" in prompt
+
+
+class _MethodTruncatingReviewLLM:
+    def __init__(self, reviewed):
+        self.reviewed = reviewed
+
+    def responses_text(self, system, user, **kwargs):
+        return json.dumps({"markdown": self.reviewed, "issues": []}, ensure_ascii=False)
+
+
+def test_review_markdown_keeps_original_when_review_truncates_method_section():
+    method = "## 3. 方法框架\n\n" + ("模块接收状态并计算下一阶段输入，随后解释公式直觉。" * 45)
+    tail = "\n\n## 4. 实验结果\n\n" + ("实验结果完整。" * 180)
+    original = "# 标题\n\n**TL;DR**：摘要。\n\n" + method + tail
+    reviewed = "# 标题\n\n**TL;DR**：摘要。\n\n## 3. 方法框架\n\n方法有效。" + tail
+
+    result = review_markdown_with_report(_MethodTruncatingReviewLLM(reviewed), original, [])
+
+    assert result.markdown == original + "\n"
+    assert any("truncated method section" in issue.detail for issue in result.issues)
 
 
 class _FenceLLM:

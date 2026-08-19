@@ -29,6 +29,35 @@ STATE_PRESENTATION = {
 }
 
 
+EVENT_PRESENTATION = {
+    "claim": ("认领成功", "Worker 通过原子租约成功认领排队任务。"),
+    "fetch_started": ("开始取材", "Worker 开始下载并解析论文原文与 TeX source。"),
+    "source_ready": ("材料就绪", "PDF、TeX source 和结构化材料满足生成约束。"),
+    "source_missing": ("源码缺失", "require_source=true，但没有取得可用的 TeX source。"),
+    "generation_started": ("开始生成", "材料检查通过，进入初稿生成。"),
+    "generation_check_started": ("检查初稿", "模型返回候选稿，进入完整文档契约检查。"),
+    "generation_repair_required": ("修复初稿", "完整性检查失败，且生成修复预算尚未耗尽。"),
+    "generation_recheck": ("重检初稿", "修复稿生成完成，重新执行完整性检查。"),
+    "draft_ready": ("初稿通过", "候选稿满足完整文档契约。"),
+    "generation_incomplete": ("生成耗尽", "生成修复预算耗尽，文档仍不完整。"),
+    "review_completed": ("审阅完成", "内容审阅完成；辅助审阅失败允许带 warning 降级继续。"),
+    "quality_repair_required": ("修复格式", "发布前质检失败，且格式修复预算尚未耗尽。"),
+    "quality_recheck": ("重检格式", "格式修复完成，重新规范化、编译并复检。"),
+    "quality_passed": ("质检通过", "Markdown/XML 中不存在阻断发布的高严重度问题。"),
+    "quality_rejected": ("质量拒绝", "修复预算耗尽，或发布后检查仍存在阻断问题。"),
+    "publish_succeeded": ("发布完成", "飞书文档写入成功，并已持久化发布检查点。"),
+    "resume_published": ("恢复已发布", "任务带有可复用的 doc_url 和发布检查点。"),
+    "visual_qa_started": ("开始实页检查", "发布后回读通过，进入浏览器真实渲染检查。"),
+    "visual_repair_required": ("修复实页", "视觉检查发现可定位问题，且视觉修复预算尚未耗尽。"),
+    "visual_recheck": ("重检实页", "视觉修复完成，重新打开文档并截图复检。"),
+    "complete": ("交付完成", "发布或视觉检查确认文档达到可交付条件。"),
+    "fail": ("执行异常", "任意非终态发生未处理异常。"),
+    "recover": ("租约恢复", "活动状态的 Worker 失联或租约超时，queued 除外。"),
+    "retry": ("显式重试", "任务处于可重试终态，并收到 retry-job。"),
+    "cancel": ("取消任务", "任意非终态收到取消请求。"),
+}
+
+
 SCENARIOS = [
     {
         "id": "happy",
@@ -342,6 +371,22 @@ def architecture_spec() -> dict:
     for state in spec["states"]:
         label, phase, detail = STATE_PRESENTATION[state["id"]]
         state.update({"label": label, "phase": phase, "detail": detail})
+    for edge in spec["transitions"]:
+        label, condition = EVENT_PRESENTATION[edge["event"]]
+        edge.update({"label": label, "condition": condition})
+    for policy in spec["policies"]:
+        label, condition = EVENT_PRESENTATION[policy["event"]]
+        policy.update(
+            {
+                "label": label,
+                "condition": condition,
+                "sources": [
+                    state["id"]
+                    for state in spec["states"]
+                    if _transition_matches(state["id"], policy["event"], policy["to"])
+                ],
+            }
+        )
     spec.update(
         {
             "scenarios": SCENARIOS,
@@ -382,6 +427,17 @@ def _validate_architecture_spec(spec: dict) -> None:
             if actual != target:
                 raise RuntimeError(f"invalid scenario edge: {source} + {event} -> {target}, actual={actual}")
 
+    for edge in spec["transitions"]:
+        if not edge.get("label") or not edge.get("condition"):
+            raise RuntimeError(f"missing transition presentation: {edge['from']} + {edge['event']}")
+    for policy in spec["policies"]:
+        if not policy.get("label") or not policy.get("condition") or not policy.get("sources"):
+            raise RuntimeError(f"missing policy presentation: {policy['event']}")
+        for source in policy["sources"]:
+            actual = transition(source, policy["event"]).to_state.value
+            if actual != policy["to"]:
+                raise RuntimeError(f"invalid policy edge: {source} + {policy['event']} -> {actual}")
+
     handling_ids = {item["id"] for item in spec["handling_types"]}
     failure_ids = [item["id"] for item in spec["failure_modes"]]
     if len(failure_ids) != len(set(failure_ids)):
@@ -392,6 +448,13 @@ def _validate_architecture_spec(spec: dict) -> None:
         outcome_state = failure.get("outcome_state")
         if outcome_state and outcome_state not in state_ids:
             raise RuntimeError(f"unknown failure outcome state: {failure['id']} -> {outcome_state}")
+
+
+def _transition_matches(source: str, event: str, target: str) -> bool:
+    try:
+        return transition(source, event).to_state.value == target
+    except ValueError:
+        return False
 
 
 def architecture_html() -> str:

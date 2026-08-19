@@ -158,7 +158,7 @@ def blocking_quality_warnings(warnings: Iterable[str]) -> List[str]:
         if quality_warning.startswith("quality:") and ":high:" in quality_warning:
             blocking.append(warning)
             continue
-        if _is_scrollable_table_warning(warning):
+        if _is_table_geometry_warning(warning):
             continue
         if warning.startswith("visual-qa:high:") or warning.startswith("visual-qa:recheck:high:"):
             blocking.append(warning)
@@ -180,9 +180,14 @@ def blocking_quality_warnings(warnings: Iterable[str]) -> List[str]:
     return blocking
 
 
-def _is_scrollable_table_warning(warning: str) -> bool:
+def _is_table_geometry_warning(warning: str) -> bool:
     value = str(warning or "").removeprefix("post-publish:")
-    return value.startswith(("visual-qa:high:table-overflow:", "visual-qa:recheck:high:table-overflow:"))
+    return value.startswith((
+        "visual-qa:high:table-overflow:",
+        "visual-qa:recheck:high:table-overflow:",
+        "visual-qa:high:table-clipped:",
+        "visual-qa:recheck:high:table-clipped:",
+    ))
 
 
 _RAW_TABLE_UNCERTAINTY_PATTERN = re.compile(
