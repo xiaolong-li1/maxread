@@ -280,10 +280,10 @@ FAILURE_MODES = [
         "title": "无头浏览器或视觉检查基础设施失败",
         "stage": "视觉检查",
         "trigger": "SSH、浏览器、登录态、runner 超时、无 JSON 或没有生成截图。",
-        "handling": "manual",
+        "handling": "bounded",
         "outcome_state": "quality_failed",
-        "automatic": "remote-error 被视为阻断，不会把未经真实渲染验证的文档交付。",
-        "next_action": "恢复 runner、网络和登录态后重试；已有 checkpoint 时仍复用原文档。",
+        "automatic": "基础设施检查最多执行 3 次，后续尝试使用更长超时；全部失败才阻断交付。",
+        "next_action": "恢复 runner、网络或登录态后在话题中回复重试；已有 checkpoint 时复用原文档。",
         "side_effect": "文档已存在但暂不交付",
     },
     {

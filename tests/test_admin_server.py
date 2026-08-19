@@ -106,6 +106,9 @@ def test_architecture_html_is_self_contained_and_uses_workflow_api():
     assert "fetch('/api/workflow-spec'" in html
     assert 'id="failure-list"' in html
     assert 'class="state-graph"' in html
+    assert 'class="terminal-edge-grid"' in html
+    assert "isTerminalTransition" in html
+    assert "selectedTransitionKey" in html
     assert "renderPolicyRail" in html
     assert "renderFailures()" in html
     assert "https://" not in html

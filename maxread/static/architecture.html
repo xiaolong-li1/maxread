@@ -132,6 +132,7 @@
     .graph-edge.scenario { stroke: #c48a52; stroke-width: 2.1; opacity: .88; }
     .graph-edge.traversed { stroke: var(--green); stroke-width: 2.4; opacity: 1; }
     .graph-edge.next { stroke: var(--amber); stroke-width: 2.8; opacity: 1; }
+    .graph-edge.selected { stroke: var(--blue); stroke-width: 2.8; opacity: 1; }
     .edge-label-svg rect {
       fill: rgba(255, 255, 255, .98); stroke: #cbd3cc; stroke-width: 1;
       vector-effect: non-scaling-stroke;
@@ -144,6 +145,8 @@
     .edge-label-svg.traversed text { fill: var(--green); }
     .edge-label-svg.next rect { fill: var(--amber-soft); stroke: var(--amber); }
     .edge-label-svg.next text { fill: #754316; }
+    .edge-label-svg.selected rect { fill: var(--blue-soft); stroke: var(--blue); }
+    .edge-label-svg.selected text { fill: #284f69; }
     .graph-node {
       cursor: pointer;
       opacity: .82; transition: opacity .18s;
@@ -175,6 +178,44 @@
     .legend-line.path { border-color: #c48a52; }
     .legend-line.done { border-color: var(--green); }
     .legend-line.policy { border-top-style: dashed; border-color: var(--blue); }
+
+    .terminal-rail { padding: 14px 4px 4px; border-top: 1px solid var(--line); }
+    .terminal-rail-head {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+      margin-bottom: 8px;
+    }
+    .terminal-rail-head strong { font-size: 12px; }
+    .terminal-rail-head span { color: var(--muted); font-size: 10px; }
+    .terminal-edge-grid {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+      border-top: 1px solid var(--line);
+    }
+    .terminal-edge {
+      appearance: none; width: 100%; min-width: 0; border: 0; border-bottom: 1px solid var(--line);
+      background: transparent; padding: 10px 10px 10px 0; text-align: left; cursor: pointer;
+    }
+    .terminal-edge:nth-child(even) { border-left: 1px solid var(--line); padding-left: 10px; }
+    .terminal-edge:hover, .terminal-edge:focus { background: #f3f6f2; outline: none; }
+    .terminal-edge.scenario { background: #fffaf4; }
+    .terminal-edge.traversed { background: #eef6f2; }
+    .terminal-edge.next { background: var(--amber-soft); }
+    .terminal-edge.selected { background: var(--blue-soft); }
+    .terminal-route {
+      display: grid; grid-template-columns: minmax(82px, 1fr) 92px minmax(82px, 1fr);
+      gap: 8px; align-items: center;
+    }
+    .terminal-state { min-width: 0; font-size: 10px; font-weight: 720; }
+    .terminal-state small {
+      display: block; color: var(--muted); font: 8px/1.35 "JetBrains Mono", ui-monospace, monospace;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .terminal-event { min-width: 0; color: var(--blue); text-align: center; font-size: 9px; font-weight: 720; }
+    .terminal-event::after {
+      content: "→"; display: block; margin-top: 1px; color: var(--blue);
+      font: 15px/1 "JetBrains Mono", ui-monospace, monospace;
+    }
+    .terminal-target { text-align: right; }
+    .terminal-condition { margin: 5px 0 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
 
     .policy-rail { padding: 14px 4px 2px; }
     .policy-rail-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
@@ -317,6 +358,8 @@
       .machine { grid-template-columns: 1fr; }
       .inspector { min-height: 310px; max-height: none; position: static; }
       .policy-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .terminal-edge-grid { grid-template-columns: 1fr; }
+      .terminal-edge:nth-child(even) { border-left: 0; padding-left: 0; }
       .policy-edge:nth-child(4) { border-left: 0; padding-left: 0; }
       .handling-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .handling-item:nth-child(3) { border-left: 0; padding-left: 0; }
@@ -500,6 +543,7 @@
     let scenario = null;
     let stepIndex = 0;
     let selectedState = '';
+    let selectedTransitionKey = '';
     let failureFilter = 'all';
     let timer = null;
 
@@ -558,6 +602,7 @@
           scenario = spec.scenarios.find(item => item.id === button.dataset.id);
           stepIndex = 0;
           selectedState = scenario.states[0];
+          selectedTransitionKey = '';
           renderAll();
         });
       });
@@ -595,12 +640,20 @@
         '<marker id="arrow-path" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 9 4.5 0 9z" fill="#c48a52"/></marker>' +
         '<marker id="arrow-done" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 9 4.5 0 9z" fill="#25634f"/></marker></defs>' +
         '<g class="phase-layer">' + phaseRegions + '</g><g class="edge-layer">' + edgePathSvg + '</g><g class="node-layer">' + nodeSvg + '</g><g class="edge-label-layer">' + edgeLabelSvg + '</g></svg></div>' +
-        '<div class="graph-legend"><span class="legend-item"><i class="legend-line"></i>固定转移</span><span class="legend-item"><i class="legend-line path"></i>当前场景路径</span><span class="legend-item"><i class="legend-line done"></i>已走过的边</span><span class="legend-item"><i class="legend-line policy"></i>全局条件策略</span></div>' +
+        '<div class="graph-legend"><span class="legend-item"><i class="legend-line"></i>固定转移</span><span class="legend-item"><i class="legend-line path"></i>当前场景路径</span><span class="legend-item"><i class="legend-line done"></i>已走过的边</span><span class="legend-item"><i class="legend-line policy"></i>终态 / 全局转移索引</span></div>' +
+        renderTerminalTransitionRail(scenarioEdges, traversedEdges, nextEdge) +
         renderPolicyRail() + '</div><aside class="inspector" id="inspector"></aside>';
       document.querySelectorAll('.graph-node').forEach(node => {
-        node.addEventListener('click', () => { selectedState = node.dataset.state; renderMachine(); });
+        node.addEventListener('click', () => { selectedTransitionKey = ''; selectedState = node.dataset.state; renderMachine(); });
         node.addEventListener('keydown', event => {
-          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectedState = node.dataset.state; renderMachine(); }
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectedTransitionKey = ''; selectedState = node.dataset.state; renderMachine(); }
+        });
+      });
+      document.querySelectorAll('.terminal-edge').forEach(row => {
+        row.addEventListener('click', () => {
+          selectedTransitionKey = selectedTransitionKey === row.dataset.edgeKey ? '' : row.dataset.edgeKey;
+          selectedState = row.dataset.source;
+          renderMachine();
         });
       });
       renderInspector(states.get(selectedState) || states.get(current));
@@ -632,6 +685,10 @@
       if (scenarioEdges.has(key)) { classes.push('scenario'); labelClasses.push('scenario'); marker = 'arrow-path'; }
       if (traversedEdges.has(key)) { classes.push('traversed'); labelClasses.push('traversed'); marker = 'arrow-done'; }
       if (key === nextEdge) { classes.push('next'); labelClasses.push('next'); marker = 'arrow-path'; }
+      if (key === selectedTransitionKey) { classes.push('selected'); labelClasses.push('selected'); }
+      if (isTerminalTransition(edge) && !scenarioEdges.has(key) && key !== selectedTransitionKey) {
+        return { path: '', label: '' };
+      }
       const route = edgeRoute(edge, index);
       const width = Math.max(58, Math.min(100, 18 + Array.from(edge.label || '').length * 10));
       const description = esc(edge.event + '：' + edge.condition);
@@ -701,6 +758,29 @@
         d: 'M ' + sourceRight + ' ' + sourceCenter + ' C ' + middleX + ' ' + sourceCenter + ', ' + middleX + ' ' + targetCenter + ', ' + targetLeft + ' ' + targetCenter,
         labelX: middleX, labelY: (sourceCenter + targetCenter) / 2 - 12,
       };
+    }
+
+    function isTerminalTransition(edge) {
+      const target = spec.states.find(state => state.id === edge.to);
+      return Boolean(target && target.terminal);
+    }
+
+    function renderTerminalTransitionRail(scenarioEdges, traversedEdges, nextEdge) {
+      const terminalEdges = spec.transitions.filter(isTerminalTransition);
+      const rows = terminalEdges.map((edge, index) => {
+        const key = transitionKey(edge.from, edge.event, edge.to);
+        const classes = ['terminal-edge'];
+        if (scenarioEdges.has(key)) classes.push('scenario');
+        if (traversedEdges.has(key)) classes.push('traversed');
+        if (key === nextEdge) classes.push('next');
+        if (key === selectedTransitionKey) classes.push('selected');
+        return '<button class="' + classes.join(' ') + '" data-edge-key="' + esc(key) + '" data-source="' + esc(edge.from) + '" title="' + esc(edge.condition) + '">' +
+          '<div class="terminal-route"><span class="terminal-state">' + esc(labelOf(edge.from)) + '<small>' + esc(edge.from) + '</small></span>' +
+          '<span class="terminal-event">' + esc(edge.label) + '</span>' +
+          '<span class="terminal-state terminal-target">' + esc(labelOf(edge.to)) + '<small>' + esc(edge.to) + '</small></span></div>' +
+          '<p class="terminal-condition">T' + String(index + 1).padStart(2, '0') + ' · ' + esc(edge.condition) + '</p></button>';
+      }).join('');
+      return '<div class="terminal-rail"><div class="terminal-rail-head"><strong>终态转移 · 逐边索引</strong><span>' + terminalEdges.length + ' 条独立转移</span></div><div class="terminal-edge-grid">' + rows + '</div></div>';
     }
 
     function renderPolicyRail() {
