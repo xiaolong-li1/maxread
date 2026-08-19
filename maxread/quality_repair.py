@@ -5,6 +5,7 @@ from typing import Callable, Iterable, List, Optional
 
 from .quality import blocking_quality_warnings, pre_publish_quality_warnings
 from .review import repair_markdown_with_quality_report
+from .workflow import WorkflowEvent
 
 
 @dataclass
@@ -44,6 +45,7 @@ def repair_until_quality_passes(
     kind: str = "paper",
     reasoning_effort: Optional[str] = None,
     completeness_check: Optional[Callable[[str], Iterable[str]]] = None,
+    on_workflow_event=None,
 ) -> QualityRepairResult:
     """Run deterministic checks and ask the model to repair only blocking errors."""
     markers = list(markers)
@@ -76,6 +78,8 @@ def repair_until_quality_passes(
                 attempts=attempts,
             )
 
+        if on_workflow_event is not None:
+            on_workflow_event(WorkflowEvent.QUALITY_REPAIR_REQUIRED, "; ".join(blocking))
         try:
             review = repair_markdown_with_quality_report(
                 llm,
@@ -103,6 +107,8 @@ def repair_until_quality_passes(
             attempt.model_response = warning
             attempt.repair_warnings.append(warning)
             repair_warnings.append(warning)
+        if on_workflow_event is not None:
+            on_workflow_event(WorkflowEvent.QUALITY_RECHECK, f"round={round_index + 1}")
 
     raise AssertionError("quality repair loop terminated unexpectedly")
 

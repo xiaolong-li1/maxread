@@ -28,6 +28,7 @@ MODULES = [
     "tests.test_sources",
     "tests.test_web_article",
     "tests.test_visual_qa",
+    "tests.test_workflow",
 ]
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

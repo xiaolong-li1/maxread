@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from .workflow import (
+    InvalidWorkflowTransition,
+    PublishedCheckpoint,
+    WorkflowEvent,
+    WorkflowState,
+    queue_status_for_state,
+    state_from_legacy,
+    transition,
+)
+
+
+class QueueLeaseLostError(RuntimeError):
+    """Raised when a worker tries to mutate a job after losing its lease."""
 
 
 @dataclass
@@ -223,9 +238,21 @@ class Store:
         self._ensure_column("queue_jobs", "heartbeat_at", "datetime")
         self._ensure_column("queue_jobs", "stage", "text not null default ''")
         self._ensure_column("queue_jobs", "stage_updated_at", "datetime")
+        self._ensure_column("queue_jobs", "workflow_state", "text not null default ''")
+        self._ensure_column("queue_jobs", "state_version", "integer not null default 0")
+        self._ensure_column("queue_jobs", "last_event", "text not null default ''")
+        self._ensure_column("queue_jobs", "checkpoint_json", "text not null default ''")
         self._ensure_column("feedback", "feedback_source", "text not null default ''")
         self._ensure_column("feedback", "feedback_category", "text not null default ''")
         self._ensure_column("feedback", "feedback_confidence", "real not null default 0")
+        self.conn.executescript(
+            """
+            create index if not exists queue_jobs_claim_idx on queue_jobs(status, priority desc, id asc);
+            create index if not exists queue_jobs_heartbeat_idx on queue_jobs(status, heartbeat_at);
+            create index if not exists queue_jobs_worker_idx on queue_jobs(status, worker_id);
+            """
+        )
+        self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in self.conn.execute(f"pragma table_info({table})").fetchall()}
@@ -516,7 +543,8 @@ class Store:
         usage_event_id: int,
     ):
         dedupe_key = self.dedupe_key(source_kind, source_id)
-        with self.conn:
+        self.conn.execute("begin immediate")
+        try:
             job = self.find_active_job(dedupe_key)
             created = False
             if job is None:
@@ -541,7 +569,11 @@ class Store:
                 (job_id, event_id, message_id, chat_id, chat_type, sender_id, int(usage_event_id)),
             )
             watcher_id = int(cur.lastrowid)
-        return {"job_id": job_id, "watcher_id": watcher_id, "created": created}
+            self.conn.commit()
+            return {"job_id": job_id, "watcher_id": watcher_id, "created": created}
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def queue_position(self, job_id: int) -> int:
         row = self.conn.execute("select status from queue_jobs where id = ?", (int(job_id),)).fetchone()
@@ -580,10 +612,28 @@ class Store:
                 update queue_jobs
                 set status = 'running', attempts = attempts + 1, started_at = current_timestamp,
                     updated_at = current_timestamp, worker_id = ?, heartbeat_at = current_timestamp,
-                    stage = 'claimed', stage_updated_at = current_timestamp
+                    stage = 'claimed', stage_updated_at = current_timestamp,
+                    workflow_state = 'claimed', state_version = coalesce(state_version, 0) + 1,
+                    last_event = 'claim'
                 where id = ?
                 """,
                 (worker_id, job_id),
+            )
+            self.conn.execute(
+                "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
+                (
+                    job_id,
+                    "transition",
+                    json.dumps(
+                        {
+                            "from": WorkflowState.QUEUED.value,
+                            "to": WorkflowState.CLAIMED.value,
+                            "event": WorkflowEvent.CLAIM.value,
+                            "detail": f"worker claimed {worker_id}".strip(),
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
             )
             self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (job_id, "claim", f"worker claimed {worker_id}".strip()))
             self.conn.execute("commit")
@@ -592,6 +642,9 @@ class Store:
             claimed["attempts"] = int(claimed.get("attempts") or 0) + 1
             claimed["worker_id"] = worker_id
             claimed["stage"] = "claimed"
+            claimed["workflow_state"] = WorkflowState.CLAIMED.value
+            claimed["state_version"] = int(claimed.get("state_version") or 0) + 1
+            claimed["last_event"] = WorkflowEvent.CLAIM.value
             return claimed
         except Exception:
             try:
@@ -600,65 +653,144 @@ class Store:
                 pass
             raise
 
-    def complete_queue_job(self, job_id: int, doc_url: str, title: str = "") -> None:
-        self.conn.execute(
-            """
-            update queue_jobs
-            set status = 'done', doc_url = ?, title = ?, error = '', worker_id = '', stage = 'done',
-                finished_at = current_timestamp, updated_at = current_timestamp, stage_updated_at = current_timestamp
-            where id = ?
-            """,
-            (doc_url, title, int(job_id)),
-        )
-        self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (int(job_id), "done", doc_url))
-        self.conn.commit()
-
-    def fail_queue_job(self, job_id: int, error: str) -> None:
-        self.conn.execute(
-            """
-            update queue_jobs
-            set status = 'failed', error = ?, worker_id = '', stage = 'failed',
-                finished_at = current_timestamp, updated_at = current_timestamp, stage_updated_at = current_timestamp
-            where id = ?
-            """,
-            (str(error), int(job_id)),
-        )
-        self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (int(job_id), "failed", str(error)[:1000]))
-        self.conn.commit()
-
-    def heartbeat_queue_job(self, job_id: int, worker_id: str = "", stage: str = "") -> None:
-        if stage:
+    def complete_queue_job(self, job_id: int, doc_url: str, title: str = "", worker_id: str = "") -> bool:
+        self.conn.execute("begin immediate")
+        try:
+            row = self.conn.execute("select * from queue_jobs where id = ?", (int(job_id),)).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            if worker_id and str(row["worker_id"] or "") != str(worker_id):
+                self.conn.rollback()
+                return False
+            current = self._queue_workflow_state(row)
+            if current is WorkflowState.COMPLETED:
+                result = None
+            else:
+                result = transition(current, WorkflowEvent.COMPLETE)
+            if result is not None:
+                self._update_queue_workflow_locked(
+                    job_id,
+                    result.to_state,
+                    WorkflowEvent.COMPLETE,
+                    doc_url,
+                    int(row["state_version"] or 0) + 1,
+                )
+                self._insert_transition_event(job_id, result, doc_url)
             self.conn.execute(
                 """
                 update queue_jobs
-                set heartbeat_at = current_timestamp, updated_at = current_timestamp, worker_id = ?,
-                    stage = ?, stage_updated_at = current_timestamp
-                where id = ? and status = 'running'
+                set status = 'done', doc_url = ?, title = ?, error = '', worker_id = '', stage = 'done',
+                    workflow_state = 'completed', finished_at = current_timestamp,
+                    updated_at = current_timestamp, stage_updated_at = current_timestamp
+                where id = ?
                 """,
-                (worker_id, stage, int(job_id)),
+                (doc_url, title, int(job_id)),
+            )
+            self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (int(job_id), "done", doc_url))
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def fail_queue_job(self, job_id: int, error: str, worker_id: str = "") -> bool:
+        detail = str(error)[:1000]
+        self.conn.execute("begin immediate")
+        try:
+            row = self.conn.execute("select * from queue_jobs where id = ?", (int(job_id),)).fetchone()
+            if row is None:
+                self.conn.rollback()
+                return False
+            if worker_id and str(row["worker_id"] or "") != str(worker_id):
+                self.conn.rollback()
+                return False
+            current = self._queue_workflow_state(row)
+            if current is WorkflowState.COMPLETED:
+                self.conn.execute(
+                    "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
+                    (int(job_id), "ignored_failure_after_done", detail),
+                )
+                self.conn.commit()
+                return True
+            result = None
+            next_state = current
+            if current not in {
+                WorkflowState.NEEDS_SOURCE,
+                WorkflowState.GENERATION_INCOMPLETE,
+                WorkflowState.QUALITY_FAILED,
+                WorkflowState.FAILED,
+            }:
+                result = transition(current, WorkflowEvent.FAIL)
+                next_state = result.to_state
+                self._update_queue_workflow_locked(
+                    job_id,
+                    next_state,
+                    WorkflowEvent.FAIL,
+                    detail,
+                    int(row["state_version"] or 0) + 1,
+                )
+                self._insert_transition_event(job_id, result, detail)
+            self.conn.execute(
+                """
+                update queue_jobs
+                set status = 'failed', error = ?, worker_id = '', stage = 'failed',
+                    workflow_state = ?, finished_at = current_timestamp,
+                    updated_at = current_timestamp, stage_updated_at = current_timestamp
+                where id = ?
+                """,
+                (detail, next_state.value, int(job_id)),
+            )
+            self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (int(job_id), "failed", detail))
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def heartbeat_queue_job(self, job_id: int, worker_id: str = "", stage: str = "") -> bool:
+        if not worker_id:
+            return False
+        if stage:
+            cur = self.conn.execute(
+                """
+                update queue_jobs
+                set heartbeat_at = current_timestamp, updated_at = current_timestamp,
+                    stage = ?, stage_updated_at = current_timestamp
+                where id = ? and status = 'running' and worker_id = ?
+                """,
+                (stage, int(job_id), worker_id),
             )
         else:
-            self.conn.execute(
+            cur = self.conn.execute(
                 """
                 update queue_jobs
-                set heartbeat_at = current_timestamp, updated_at = current_timestamp, worker_id = ?
-                where id = ? and status = 'running'
+                set heartbeat_at = current_timestamp, updated_at = current_timestamp
+                where id = ? and status = 'running' and worker_id = ?
                 """,
-                (worker_id, int(job_id)),
+                (int(job_id), worker_id),
             )
         self.conn.commit()
+        return cur.rowcount == 1
 
-    def update_queue_job_stage(self, job_id: int, stage: str) -> None:
-        self.conn.execute(
-            """
+    def update_queue_job_stage(self, job_id: int, stage: str, worker_id: str = "") -> bool:
+        params = [stage, int(job_id)]
+        owner_clause = ""
+        if worker_id:
+            owner_clause = " and worker_id = ?"
+            params.append(worker_id)
+        cur = self.conn.execute(
+            f"""
             update queue_jobs
             set stage = ?, stage_updated_at = current_timestamp, heartbeat_at = current_timestamp, updated_at = current_timestamp
-            where id = ? and status = 'running'
+            where id = ? and status = 'running'{owner_clause}
             """,
-            (stage, int(job_id)),
+            params,
         )
-        self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (int(job_id), "stage", stage))
+        if cur.rowcount == 1:
+            self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (int(job_id), "stage", stage))
         self.conn.commit()
+        return cur.rowcount == 1
 
     def recover_stale_queue_jobs(self, stale_minutes: int) -> int:
         rows = self.conn.execute(
@@ -692,23 +824,65 @@ class Store:
             return 0
         ids = [int(row["id"]) for row in rows]
         placeholders = ",".join("?" for _ in ids)
-        self.conn.execute(
-            f"""
-            update queue_jobs
-            set status = 'queued', worker_id = '', stage = 'recovered', started_at = null,
-                heartbeat_at = null, updated_at = current_timestamp, stage_updated_at = current_timestamp
-            where id in ({placeholders})
-            """,
-            ids,
-        )
-        for row in rows:
-            detail = f"worker={row['worker_id'] or ''} stage={row['stage'] or ''} heartbeat={row['heartbeat_at'] or ''} started={row['started_at'] or ''}"
+        self.conn.execute("begin immediate")
+        try:
+            current_rows = self.conn.execute(
+                f"""
+                select id, worker_id, stage, workflow_state, heartbeat_at, started_at
+                from queue_jobs
+                where id in ({placeholders}) and status = 'running'
+                """,
+                ids,
+            ).fetchall()
+            if not current_rows:
+                self.conn.commit()
+                return 0
+            current_ids = [int(row["id"]) for row in current_rows]
+            current_placeholders = ",".join("?" for _ in current_ids)
             self.conn.execute(
-                "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
-                (int(row["id"]), event_type, detail.strip()),
+                f"""
+                update queue_jobs
+                set status = 'queued', worker_id = '', stage = 'recovered', started_at = null,
+                    heartbeat_at = null, updated_at = current_timestamp, stage_updated_at = current_timestamp,
+                    workflow_state = 'queued', state_version = coalesce(state_version, 0) + 1,
+                    last_event = 'recover'
+                where id in ({current_placeholders}) and status = 'running'
+                """,
+                current_ids,
             )
-        self.conn.commit()
-        return len(rows)
+            for row in current_rows:
+                detail = f"worker={row['worker_id'] or ''} stage={row['stage'] or ''} heartbeat={row['heartbeat_at'] or ''} started={row['started_at'] or ''}"
+                from_state = str(row["workflow_state"] or "").strip()
+                if not from_state:
+                    try:
+                        from_state = state_from_legacy("running", row["stage"] or "").value
+                    except ValueError:
+                        from_state = WorkflowState.CLAIMED.value
+                self.conn.execute(
+                    "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
+                    (
+                        int(row["id"]),
+                        "transition",
+                        json.dumps(
+                            {
+                                "from": from_state,
+                                "to": WorkflowState.QUEUED.value,
+                                "event": WorkflowEvent.RECOVER.value,
+                                "detail": detail.strip(),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+                self.conn.execute(
+                    "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
+                    (int(row["id"]), event_type, detail.strip()),
+                )
+            self.conn.commit()
+            return len(current_rows)
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def get_job_watchers(self, job_id: int):
         rows = self.conn.execute(
@@ -792,23 +966,145 @@ class Store:
         return stats
 
     def retry_queue_job(self, job_id: int) -> bool:
-        cur = self.conn.execute(
+        self.conn.execute("begin immediate")
+        try:
+            row = self.conn.execute("select * from queue_jobs where id = ?", (int(job_id),)).fetchone()
+            if row is None or row["status"] != "failed":
+                self.conn.commit()
+                return False
+            current = self._queue_workflow_state(row)
+            result = transition(current, WorkflowEvent.RETRY)
+            self._update_queue_workflow_locked(
+                job_id,
+                result.to_state,
+                WorkflowEvent.RETRY,
+                "manual retry",
+                int(row["state_version"] or 0) + 1,
+            )
+            self.conn.execute(
+                """
+                update queue_jobs
+                set status = 'queued', error = '', worker_id = '', stage = 'retry_queued',
+                    started_at = null, finished_at = null, heartbeat_at = null,
+                    updated_at = current_timestamp, stage_updated_at = current_timestamp
+                where id = ? and workflow_state = 'queued'
+                """,
+                (int(job_id),),
+            )
+            self.conn.execute("update job_watchers set notified = 0 where job_id = ?", (int(job_id),))
+            self._insert_transition_event(job_id, result, "manual retry")
+            self.conn.execute(
+                "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
+                (int(job_id), "retry", "manual retry"),
+            )
+            self.conn.commit()
+            return True
+        except (InvalidWorkflowTransition, ValueError):
+            self.conn.rollback()
+            return False
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def transition_queue_job(
+        self,
+        job_id: int,
+        event: WorkflowEvent | str,
+        detail: str = "",
+        expected_worker_id: str = "",
+    ):
+        """Apply one validated workflow transition and append an audit event.
+
+        The legacy ``status`` and ``stage`` columns remain available for old
+        workers and the admin UI. ``workflow_state`` is the canonical state;
+        old rows are lazily upgraded from those legacy columns on first use.
+        """
+        trigger = WorkflowEvent(event)
+        self.conn.execute("begin immediate")
+        try:
+            row = self.conn.execute("select * from queue_jobs where id = ?", (int(job_id),)).fetchone()
+            if row is None:
+                raise KeyError(f"queue job not found: {job_id}")
+            if expected_worker_id and str(row["worker_id"] or "") != str(expected_worker_id):
+                raise QueueLeaseLostError(f"queue job lease lost: job={job_id} worker={expected_worker_id}")
+            current = self._queue_workflow_state(row)
+            result = transition(current, trigger)
+            version = int(row["state_version"] or 0) + 1
+            next_state = result.to_state
+            self._update_queue_workflow_locked(job_id, next_state, trigger, detail, version)
+            self._insert_transition_event(job_id, result, detail)
+            self.conn.commit()
+            return result
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _update_queue_workflow_locked(
+        self,
+        job_id: int,
+        state: WorkflowState,
+        event: WorkflowEvent,
+        detail: str,
+        version: int,
+    ) -> None:
+        checkpoint = None
+        if event is WorkflowEvent.PUBLISH_SUCCEEDED:
+            raw_detail = str(detail or "").strip()
+            fallback_url = raw_detail if raw_detail.startswith(("http://", "https://")) else ""
+            checkpoint = PublishedCheckpoint.from_json(raw_detail, fallback_url=fallback_url)
+        if checkpoint is not None:
+            self.conn.execute(
+                """
+                update queue_jobs
+                set status = ?, workflow_state = ?, state_version = ?, last_event = ?, doc_url = ?, checkpoint_json = ?,
+                    updated_at = current_timestamp, stage_updated_at = current_timestamp
+                where id = ?
+                """,
+                (
+                    queue_status_for_state(state),
+                    state.value,
+                    int(version),
+                    event.value,
+                    checkpoint.doc_url,
+                    checkpoint.to_json(),
+                    int(job_id),
+                ),
+            )
+            return
+        self.conn.execute(
             """
             update queue_jobs
-            set status = 'queued', error = '', worker_id = '', stage = 'retry_queued',
-                started_at = null, finished_at = null, heartbeat_at = null,
+            set status = ?, workflow_state = ?, state_version = ?, last_event = ?,
                 updated_at = current_timestamp, stage_updated_at = current_timestamp
-            where id = ? and status in ('failed', 'running')
+            where id = ?
             """,
-            (int(job_id),),
+            (queue_status_for_state(state), state.value, int(version), event.value, int(job_id)),
         )
-        self.conn.commit()
-        if cur.rowcount:
-            self.conn.execute("update job_watchers set notified = 0 where job_id = ?", (int(job_id),))
-            self.conn.commit()
-            self.add_job_event(job_id, "retry", "manual retry")
-            return True
-        return False
+
+    def _insert_transition_event(self, job_id: int, result, detail: str = "") -> None:
+        event_detail = json.dumps(
+            {
+                "from": result.from_state.value,
+                "to": result.to_state.value,
+                "event": result.event.value,
+                "detail": str(detail)[:1000],
+            },
+            ensure_ascii=False,
+        )
+        self.conn.execute(
+            "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
+            (int(job_id), "transition", event_detail),
+        )
+
+    @staticmethod
+    def _queue_workflow_state(row) -> WorkflowState:
+        raw = str(row["workflow_state"] or "").strip()
+        if raw:
+            try:
+                return WorkflowState(raw)
+            except ValueError:
+                pass
+        return state_from_legacy(row["status"], row["stage"])
 
 
 

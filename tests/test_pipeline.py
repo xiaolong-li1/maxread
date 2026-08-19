@@ -6,6 +6,7 @@ from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
 from maxread.pipeline import MaxReadPipeline, _describe_figures_for_prompt, _generate_complete_paper_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _write_paper_artifact
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
+from maxread.workflow import WorkflowState
 
 
 class FakeArxiv:
@@ -151,6 +152,11 @@ class FakeArxivNoSource(FakeArxiv):
         return bundle
 
 
+class ExplodingArxiv:
+    def fetch(self, paper_id):
+        raise AssertionError("published-document resume unexpectedly fetched source")
+
+
 def test_pipeline_process_and_cache(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     feishu = FakeFeishu()
@@ -172,6 +178,65 @@ def test_pipeline_process_and_cache(tmp_path):
     assert forced.doc_url == first.doc_url
     assert forced.cached is False
     assert feishu.published == ["doc123", "doc123"]
+    store.close()
+
+
+def test_pipeline_emits_durable_workflow_milestones(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om", "oc", "p2p", "ou", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om", "oc", "p2p", "ou", usage_id)
+    store.claim_next_queue_job(worker_id="worker-a")
+    pipeline = MaxReadPipeline(
+        store,
+        FakeArxiv(),
+        FakeFeishu(),
+        FakeLLM(),
+        require_source=True,
+        on_workflow_event=lambda event, detail="": store.transition_queue_job(queued["job_id"], event, detail),
+    )
+
+    result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
+
+    assert result.error == ""
+    job = store.list_queue_jobs()[0]
+    assert job["status"] == "done"
+    assert job["workflow_state"] == WorkflowState.COMPLETED.value
+    transitions = [
+        json.loads(item["detail"])
+        for item in reversed(store.list_job_events(queued["job_id"], 30))
+        if item["event_type"] == "transition"
+    ]
+    assert [item["to"] for item in transitions] == [
+        "claimed",
+        "fetching",
+        "source_ready",
+        "generating",
+        "reviewing",
+        "quality_checking",
+        "publishing",
+        "post_publish_checking",
+        "completed",
+    ]
+    store.close()
+
+
+def test_pipeline_resumes_published_quality_failure_without_model_or_source_fetch(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    store.upsert_paper(
+        "2604.12946",
+        "quality_failed",
+        title="Fake Paper",
+        doc_url="https://tenant.feishu.cn/docx/existing",
+        doc_token="existing",
+        error="visual-qa:high:invalid-formula",
+    )
+    pipeline = MaxReadPipeline(store, ExplodingArxiv(), FakeFeishu(), None, require_source=True)
+
+    result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
+
+    assert result.doc_url == "https://tenant.feishu.cn/docx/existing"
+    assert result.error == ""
+    assert store.get_paper("2604.12946").status == "done"
     store.close()
 
 

@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Protocol
 from .feishu import normalize_doc_url
 from .openai_client import OpenAIClient
 from .render import _is_valid_latex_body, _normalize_latex_body, _strip_latex_for_text
+from .workflow import WorkflowEvent
 
 
 class VisualFeishuClient(Protocol):
@@ -183,6 +184,7 @@ class VisualQAController:
         expected_image_min: int = 0,
         expected_formula_min: int = 0,
         expected_table_min: int = 0,
+        on_workflow_event=None,
     ) -> VisualRepairResult:
         result = VisualRepairResult()
         initial = list(initial_warnings)
@@ -230,6 +232,11 @@ class VisualQAController:
                 result.warnings.extend(_finding_warning("visual-qa", finding) for finding in remote.findings)
                 break
 
+            if on_workflow_event is not None:
+                on_workflow_event(
+                    WorkflowEvent.VISUAL_REPAIR_REQUIRED,
+                    f"round={round_index + 1}; findings={len(remote.findings)}",
+                )
             changed, repair_warnings, repaired, strategy, model_response = self._repair_remote_findings(
                 feishu, doc_url, remote.findings
             )
@@ -245,6 +252,8 @@ class VisualQAController:
             if changed:
                 result.changed = True
                 result.repaired_blocks.extend(repaired)
+            if on_workflow_event is not None:
+                on_workflow_event(WorkflowEvent.VISUAL_RECHECK, f"round={round_index + 1}")
 
         return result
 

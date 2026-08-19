@@ -53,6 +53,25 @@ def test_quality_repair_loops_until_deterministic_checks_pass():
     assert llm.calls == 1
 
 
+def test_quality_repair_emits_state_machine_loop_events():
+    bad = "# T\n\n正文里残留 \\textbf{bad}。\n"
+    llm = RepairLLM("# T\n\n正文已修复。\n")
+    events = []
+
+    result = repair_until_quality_passes(
+        llm,
+        bad,
+        [],
+        render_xml=lambda markdown: f"<doc><p>{markdown}</p></doc>",
+        normalize_markdown=lambda markdown: markdown.strip() + "\n",
+        max_repair_rounds=1,
+        on_workflow_event=lambda event, detail: events.append((event.value, detail)),
+    )
+
+    assert result.passed is True
+    assert [event for event, _detail in events] == ["quality_repair_required", "quality_recheck"]
+
+
 def test_quality_repair_stops_after_configured_rounds_when_model_makes_no_change():
     bad = "# T\n\n正文里残留 \\textbf{bad}。\n"
     llm = NoChangeLLM(bad)

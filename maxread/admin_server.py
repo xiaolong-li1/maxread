@@ -380,9 +380,9 @@ async function setFeedback(id, status) { await api(`/api/feedback/${id}/status`,
 
 async function renderJobs() {
   const rows = await api('/api/jobs?limit=120');
-  $('jobs').innerHTML = table(['ID','来源','状态','阶段','尝试','标题 / 错误','文档','操作'], rows.map(r => [r.id, `${r.source_kind}<br><span class="mono">${esc(r.source_id)}</span>`, pill(r.status), esc(r.stage || ''), r.attempts, esc(r.title || r.error || ''), link(r.doc_url), jobActions(r)]));
+  $('jobs').innerHTML = table(['ID','来源','状态','工作流状态','阶段','尝试','标题 / 错误','文档','操作'], rows.map(r => [r.id, `${r.source_kind}<br><span class="mono">${esc(r.source_id)}</span>`, pill(r.status), `<span class="mono">${esc(r.workflow_state || '')}</span>`, esc(r.stage || ''), r.attempts, esc(r.title || r.error || ''), link(r.doc_url), jobActions(r)]));
 }
-function jobActions(r) { return (r.status === 'failed' || r.status === 'running') ? `<button onclick="retryJob(${r.id})">重试</button>` : '<span class="muted">-</span>'; }
+function jobActions(r) { return r.status === 'failed' ? `<button onclick="retryJob(${r.id})">重试</button>` : '<span class="muted">-</span>'; }
 async function retryJob(id) { await api(`/api/jobs/${id}/retry`, {method:'POST', body:'{}'}); renderJobs(); renderOverview(); }
 
 async function renderReview() {

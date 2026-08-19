@@ -100,7 +100,8 @@ class QueueManager:
         raw_feishu = FeishuClient(self.settings.lark_cli, self.settings.feishu_as)
 
         def progress(text: str, event_type: str, prefix: str) -> None:
-            store.update_queue_job_stage(job_id, event_type)
+            if not store.update_queue_job_stage(job_id, event_type, worker_id=worker_id):
+                return
             _notify_watchers_progress(store, raw_feishu, job_id, text, event_type, prefix)
 
         feishu = _LimitedFeishu(
@@ -124,7 +125,7 @@ class QueueManager:
         )
         title = ""
         store.add_job_event(job_id, "start", source_id)
-        store.update_queue_job_stage(job_id, "downloading")
+        store.update_queue_job_stage(job_id, "downloading", worker_id=worker_id)
         heartbeat_stop, heartbeat_thread = self._start_job_heartbeat(job_id, worker_id)
         _notify_watchers_started(store, raw_feishu, job_id, source_id)
         try:
@@ -143,12 +144,19 @@ class QueueManager:
                     review_reasoning_effort=self.settings.openai_review_reasoning_effort,
                     visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
                     quality_repair_rounds=self.settings.quality_repair_rounds,
+                    on_workflow_event=lambda event, detail="": store.transition_queue_job(
+                        job_id, event, detail, expected_worker_id=worker_id
+                    ),
                 )
                 result = pipeline.process_ref(
                     PaperRef(source_id, source_url),
                     event=None,
                     send_progress=False,
-                    force=int(job.get("attempts") or 0) > 1,
+                    # A completed paper is the idempotency boundary. Retrying
+                    # a queue finalization must not create another document.
+                    force=False,
+                    resume_published_url=str(job.get("doc_url") or ""),
+                    resume_published_checkpoint=str(job.get("checkpoint_json") or ""),
                 )
                 record = store.get_paper(source_id)
                 title = record.title if record else ""
@@ -161,24 +169,33 @@ class QueueManager:
                     review_reasoning_effort=self.settings.openai_review_reasoning_effort,
                     visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
                     quality_repair_rounds=self.settings.quality_repair_rounds,
+                    on_workflow_event=lambda event, detail="": store.transition_queue_job(
+                        job_id, event, detail, expected_worker_id=worker_id
+                    ),
                 )
-                result = pipeline.process_ref(WebRef(source_url), event=None, send_progress=False)
+                result = pipeline.process_ref(
+                    WebRef(source_url),
+                    event=None,
+                    send_progress=False,
+                    resume_published_url=str(job.get("doc_url") or ""),
+                    resume_published_checkpoint=str(job.get("checkpoint_json") or ""),
+                )
                 record = store.get_document(result.article_id)
                 title = record.title if record else ""
             if result.error:
-                store.fail_queue_job(int(job["id"]), result.error)
-                _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, result.error)
+                if store.fail_queue_job(int(job["id"]), result.error, worker_id=worker_id):
+                    _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, result.error)
             elif result.doc_url:
-                store.complete_queue_job(int(job["id"]), result.doc_url, title=title)
-                _notify_watchers(store, feishu, int(job["id"]), source_id, result.doc_url, title, "")
+                if store.complete_queue_job(int(job["id"]), result.doc_url, title=title, worker_id=worker_id):
+                    _notify_watchers(store, feishu, int(job["id"]), source_id, result.doc_url, title, "")
             else:
                 error = result.error or "unknown processing error"
-                store.fail_queue_job(int(job["id"]), error)
-                _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, error)
+                if store.fail_queue_job(int(job["id"]), error, worker_id=worker_id):
+                    _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, error)
         except Exception as exc:
             error = str(exc)
-            store.fail_queue_job(int(job["id"]), error)
-            _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, error)
+            if store.fail_queue_job(int(job["id"]), error, worker_id=worker_id):
+                _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, error)
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=2)
@@ -191,7 +208,9 @@ class QueueManager:
             while not stop.wait(interval):
                 hb_store = Store(self.settings.db_path)
                 try:
-                    hb_store.heartbeat_queue_job(job_id, worker_id)
+                    if not hb_store.heartbeat_queue_job(job_id, worker_id):
+                        stop.set()
+                        break
                 except Exception:
                     pass
                 finally:

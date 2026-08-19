@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 from .arxiv import ArxivClient
 from .db import Store
-from .feishu import FeishuClient
+from .feishu import FeishuClient, doc_token_from_url
 from .models import ArxivMetadata, FeishuEvent, PaperBundle, PaperRef
 from .openai_client import OpenAIClient
 from .prompts import FINAL_SYSTEM_PROMPT, build_final_user_prompt
@@ -23,6 +23,7 @@ from .repository import find_repository_url
 from .render import ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning
 from .review import review_markdown_with_report
 from .visual_qa import VisualQAController
+from .workflow import PublishedCheckpoint, WorkflowEvent
 
 
 @dataclass
@@ -53,6 +54,7 @@ class MaxReadPipeline:
         review_reasoning_effort: str = "",
         visual_qa: Optional[VisualQAController] = None,
         quality_repair_rounds: int = 3,
+        on_workflow_event=None,
     ):
         self.store = store
         self.arxiv = arxiv
@@ -62,6 +64,7 @@ class MaxReadPipeline:
         self.review_reasoning_effort = review_reasoning_effort
         self.visual_qa = visual_qa
         self.quality_repair_rounds = max(0, int(quality_repair_rounds))
+        self.on_workflow_event = on_workflow_event
 
     def process_ref(
         self,
@@ -69,6 +72,8 @@ class MaxReadPipeline:
         event: Optional[FeishuEvent] = None,
         send_progress: bool = True,
         force: bool = False,
+        resume_published_url: str = "",
+        resume_published_checkpoint: str = "",
     ) -> ProcessResult:
         record = self.store.get_paper(ref.paper_id)
         if not force and record and record.status == "done" and record.doc_url:
@@ -82,6 +87,13 @@ class MaxReadPipeline:
         try:
             if event and send_progress:
                 self._reply(event, f"[了解] 收到了：{ref.paper_id}", "start", ref.paper_id)
+            published_url = str(resume_published_url or "").strip()
+            if not published_url and record and record.status == "quality_failed":
+                published_url = record.doc_url
+            checkpoint = PublishedCheckpoint.from_json(resume_published_checkpoint, fallback_url=published_url)
+            if checkpoint:
+                return self._resume_published_doc(ref, record, checkpoint)
+            self._workflow(WorkflowEvent.FETCH_STARTED, ref.paper_id)
             self.store.upsert_paper(ref.paper_id, "fetching", arxiv_url=ref.url)
             try:
                 if event and send_progress:
@@ -118,6 +130,7 @@ class MaxReadPipeline:
             _remove_paper_artifact(bundle, "08-failure.txt")
             if self.require_source and not bundle.source_text:
                 message = _source_required_message(ref.paper_id, bundle.parse_warnings)
+                self._workflow(WorkflowEvent.SOURCE_MISSING, message)
                 self.store.upsert_paper(ref.paper_id, "needs_source", error=message)
                 if event and send_progress:
                     self._reply(event, message, "need-source", ref.paper_id)
@@ -125,6 +138,8 @@ class MaxReadPipeline:
 
             if event and send_progress:
                 self._reply(event, f"[在做了] 正在读论文：{ref.paper_id}", "reading", ref.paper_id)
+            self._workflow(WorkflowEvent.SOURCE_READY, ref.paper_id)
+            self._workflow(WorkflowEvent.GENERATION_STARTED, ref.paper_id)
 
             try:
                 if not self.llm:
@@ -147,6 +162,7 @@ class MaxReadPipeline:
                         bundle, generation_run, attempt, raw, errors
                     ),
                 )
+                self._workflow(WorkflowEvent.DRAFT_READY, ref.paper_id)
                 _write_paper_artifact(bundle, "01-generated.md", markdown)
                 markdown = _sanitize_repository_markdown(markdown, repository_url)
                 markdown = polish_markdown(markdown, **macro_kwargs)
@@ -166,6 +182,7 @@ class MaxReadPipeline:
                         review_warnings.append(f"review:{issue.category}:{issue.severity}:{issue.detail}")
                 except Exception as review_exc:
                     review_warnings.append(f"Review pass failed: {review_exc}")
+                self._workflow(WorkflowEvent.REVIEW_COMPLETED, ref.paper_id)
                 def normalize_for_quality(candidate: str) -> str:
                     candidate = _sanitize_repository_markdown(candidate, repository_url)
                     candidate = polish_markdown(candidate, **macro_kwargs)
@@ -195,6 +212,7 @@ class MaxReadPipeline:
                     kind="paper",
                     reasoning_effort=self.review_reasoning_effort,
                     completeness_check=lambda candidate: paper_markdown_completeness_errors(candidate, markers),
+                    on_workflow_event=self._workflow,
                 )
                 _write_quality_repair_artifacts(bundle, quality_result)
                 markdown = quality_result.markdown
@@ -227,7 +245,9 @@ class MaxReadPipeline:
                 )
                 publish_warnings.extend(quality_result.warnings)
                 if quality_result.blocking_warnings:
+                    self._workflow(WorkflowEvent.QUALITY_REJECTED, "; ".join(quality_result.blocking_warnings))
                     raise PrePublishQualityError("; ".join(quality_result.blocking_warnings))
+                self._workflow(WorkflowEvent.QUALITY_PASSED, ref.paper_id)
             except PrePublishQualityError as exc:
                 message = f"论文已读完，但发布前格式质检未通过，未发布文档：{exc}"
                 _write_paper_artifact(bundle, "08-failure.txt", message)
@@ -237,6 +257,7 @@ class MaxReadPipeline:
                 return ProcessResult(ref.paper_id, "", cached=False, error=message)
             except IncompleteGenerationError as exc:
                 message = f"生成格式不完整，未发布文档：{exc}"
+                self._workflow(WorkflowEvent.GENERATION_INCOMPLETE, message)
                 _write_paper_artifact(bundle, "08-failure.txt", message)
                 self.store.upsert_paper(ref.paper_id, "summary_incomplete", error=message)
                 if event and send_progress:
@@ -244,6 +265,7 @@ class MaxReadPipeline:
                 return ProcessResult(ref.paper_id, "", cached=False, error=message)
             except Exception as exc:
                 message = f"总结模型调用失败，未发布文档：{exc}"
+                self._workflow(WorkflowEvent.FAIL, message)
                 _write_paper_artifact(bundle, "08-failure.txt", message)
                 self.store.upsert_paper(ref.paper_id, "summary_failed", error=message)
                 if event and send_progress:
@@ -262,6 +284,16 @@ class MaxReadPipeline:
                 publish_result = publish_marker_image(self.feishu, doc["url"], image_path, caption, marker)
                 figure_warnings.extend(publish_result.warnings)
             self.feishu.publish_docx(doc["token"])
+            self._workflow(
+                WorkflowEvent.PUBLISH_SUCCEEDED,
+                PublishedCheckpoint(
+                    doc_url=doc["url"],
+                    expected_title=bundle.metadata.title or ref.paper_id,
+                    expected_image_min=expected_image_count,
+                    expected_latex_min=expected_latex_count,
+                    expected_table_min=expected_table_count,
+                ).to_json(),
+            )
             post_publish_warnings = verify_published_docx(
                 self.feishu,
                 doc["url"],
@@ -271,6 +303,7 @@ class MaxReadPipeline:
                 expected_table_min=expected_table_count,
             )
             if self.visual_qa:
+                self._workflow(WorkflowEvent.VISUAL_QA_STARTED, doc["url"])
                 visual_result = self.visual_qa.run(
                     self.feishu,
                     doc["url"],
@@ -279,6 +312,7 @@ class MaxReadPipeline:
                     expected_image_min=expected_image_count,
                     expected_formula_min=expected_latex_count,
                     expected_table_min=expected_table_count,
+                    on_workflow_event=self._workflow,
                 )
                 _write_visual_qa_artifact(bundle, visual_result)
                 figure_warnings.extend(visual_result.warnings)
@@ -300,6 +334,7 @@ class MaxReadPipeline:
             post_publish_blocking = blocking_quality_warnings(figure_warnings)
             if post_publish_blocking:
                 message = "文档已生成，但发布后质检失败，暂不交付：" + "; ".join(post_publish_blocking)
+                self._workflow(WorkflowEvent.QUALITY_REJECTED, message)
                 self.store.upsert_paper(
                     ref.paper_id,
                     "quality_failed",
@@ -311,15 +346,92 @@ class MaxReadPipeline:
                     self._reply(event, f"这篇发布后质检未通过：{ref.paper_id}\n原因：{message}", "quality-fail", ref.paper_id)
                 return ProcessResult(ref.paper_id, doc["url"], cached=False, error=message)
             self.store.upsert_paper(ref.paper_id, "done", doc_url=doc["url"], doc_token=doc["token"], error="; ".join(figure_warnings))
+            self._workflow(WorkflowEvent.COMPLETE, doc["url"])
             if event and send_progress:
                 self._reply(event, f"哥，读完了：{doc['url']}", "done", ref.paper_id)
             return ProcessResult(ref.paper_id, doc["url"], cached=False)
         except Exception as exc:
             error = f"{exc}\n{traceback.format_exc()}"
+            self._workflow(WorkflowEvent.FAIL, _short_error(exc))
             self.store.upsert_paper(ref.paper_id, "failed", error=error)
             if event and send_progress:
                 self._reply(event, f"这篇我没读成：{ref.paper_id}\n原因：{_short_error(exc)}", "fail", ref.paper_id)
             return ProcessResult(ref.paper_id, "", cached=False, error=str(exc))
+
+    def _workflow(self, event: WorkflowEvent, detail: str = "") -> None:
+        if self.on_workflow_event is not None:
+            self.on_workflow_event(event, detail)
+
+    def _resume_published_doc(self, ref: PaperRef, record, checkpoint: PublishedCheckpoint) -> ProcessResult:
+        """Recheck and repair an existing published document without rerunning the LLM."""
+        doc_url = checkpoint.doc_url
+        doc_token = record.doc_token if record else doc_token_from_url(doc_url)
+        expected_title = checkpoint.expected_title or (record.title if record else "")
+        try:
+            self._workflow(WorkflowEvent.RESUME_PUBLISHED, doc_url)
+            warnings = list(
+                verify_published_docx(
+                    self.feishu,
+                    doc_url,
+                    expected_title=expected_title,
+                    expected_image_min=checkpoint.expected_image_min,
+                    expected_latex_min=checkpoint.expected_latex_min,
+                    expected_table_min=checkpoint.expected_table_min,
+                )
+            )
+            if self.visual_qa:
+                self._workflow(WorkflowEvent.VISUAL_QA_STARTED, doc_url)
+                visual_result = self.visual_qa.run(
+                    self.feishu,
+                    doc_url,
+                    initial_warnings=warnings,
+                    source_id=ref.paper_id,
+                    expected_image_min=checkpoint.expected_image_min,
+                    expected_formula_min=checkpoint.expected_latex_min,
+                    expected_table_min=checkpoint.expected_table_min,
+                    on_workflow_event=self._workflow,
+                )
+                warnings.extend(visual_result.warnings)
+                if visual_result.changed:
+                    warnings.extend(
+                        verify_published_docx(
+                            self.feishu,
+                            doc_url,
+                            expected_title=expected_title,
+                            expected_image_min=checkpoint.expected_image_min,
+                            expected_latex_min=checkpoint.expected_latex_min,
+                            expected_table_min=checkpoint.expected_table_min,
+                        )
+                    )
+            blocking = blocking_quality_warnings(warnings)
+            if blocking:
+                message = "文档已生成，但发布后质检失败，暂不交付：" + "; ".join(blocking)
+                self._workflow(WorkflowEvent.QUALITY_REJECTED, message)
+                self.store.upsert_paper(
+                    ref.paper_id,
+                    "quality_failed",
+                    doc_url=doc_url,
+                    doc_token=doc_token,
+                    error=message,
+                )
+                return ProcessResult(ref.paper_id, doc_url, cached=False, error=message)
+            self.store.upsert_paper(
+                ref.paper_id,
+                "done",
+                doc_url=doc_url,
+                doc_token=doc_token,
+                error="; ".join(warnings),
+            )
+            self._workflow(WorkflowEvent.COMPLETE, doc_url)
+            return ProcessResult(ref.paper_id, doc_url, cached=False)
+        except Exception as exc:
+            message = f"发布后复检失败，未重新生成文档：{_short_error(exc)}"
+            try:
+                self._workflow(WorkflowEvent.FAIL, message)
+            except Exception:
+                pass
+            self.store.upsert_paper(ref.paper_id, "quality_failed", error=message)
+            return ProcessResult(ref.paper_id, doc_url, cached=False, error=message)
 
     def _reply(self, event: FeishuEvent, text: str, prefix: str, paper_id: str) -> None:
         stage = _progress_stage(prefix)
