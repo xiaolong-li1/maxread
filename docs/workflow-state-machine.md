@@ -22,8 +22,12 @@ stateDiagram-v2
     fetching --> source_ready: source_ready
     fetching --> needs_source: source_missing
     source_ready --> generating: generation_started
-    generating --> reviewing: draft_ready
-    generating --> generation_incomplete: generation_incomplete
+    generating --> generation_checking: generation_check_started
+    generation_checking --> generation_repairing: generation_repair_required
+    generation_repairing --> generation_checking: generation_recheck
+    generation_checking --> reviewing: draft_ready
+    generation_checking --> generation_incomplete: generation_incomplete
+    generation_repairing --> generation_incomplete: generation_incomplete
     reviewing --> quality_checking: review_completed
     quality_checking --> quality_repairing: quality_repair_required
     quality_repairing --> quality_checking: quality_recheck
@@ -73,7 +77,10 @@ but their durable lifecycle is the same. They can therefore share queue
 recovery, retry policy, progress reporting, and audit tooling without forcing
 their parsing or publishing code into one large function.
 
-Quality repair and visual QA are bounded subloops. A round can move from
+Generation, quality repair, and visual QA are bounded subloops. A generation
+round moves from `generation_checking` to `generation_repairing` and back;
+deterministic repair runs before the model receives the previous draft and the
+exact validation errors. A quality round can move from
 `quality_checking` to `quality_repairing` and back, or from `visual_checking`
 to `visual_repairing` and back. The configured round limit remains in those
 controllers; the main state machine records where the loop is and why it
@@ -103,5 +110,4 @@ represented as bounded state transitions, and published-document recovery is
 idempotent. The remaining steps are:
 
 1. Move terminal notification policy into a single queue finalizer.
-2. Use the same transition log in the admin panel to show the exact blocked phase and retryability.
-3. Add more resumable checkpoints for expensive phases, so a retry can skip a verified source fetch or document render.
+2. Add more resumable checkpoints for expensive phases, so a retry can skip a verified source fetch or document render.

@@ -247,6 +247,40 @@ def failure_kind_for_state(state: WorkflowState | str) -> FailureKind:
     }.get(current, FailureKind.NONE)
 
 
+def workflow_spec() -> dict:
+    """Return a serialization-safe description of the executable state machine."""
+    return {
+        "states": [
+            {
+                "id": state.value,
+                "terminal": state in TERMINAL_STATES,
+                "retryable": state in RETRYABLE_STATES,
+                "active": state in ACTIVE_STATES,
+            }
+            for state in WorkflowState
+        ],
+        "transitions": [
+            {
+                "from": source.value,
+                "event": event.value,
+                "to": target.value,
+            }
+            for (source, event), target in _TRANSITIONS.items()
+        ],
+        "policies": [
+            {"event": WorkflowEvent.FAIL.value, "from": "non_terminal", "to": WorkflowState.FAILED.value},
+            {"event": WorkflowEvent.RECOVER.value, "from": "active_except_queued", "to": WorkflowState.QUEUED.value},
+            {"event": WorkflowEvent.RETRY.value, "from": "retryable", "to": WorkflowState.QUEUED.value},
+            {"event": WorkflowEvent.CANCEL.value, "from": "non_terminal", "to": WorkflowState.CANCELLED.value},
+            {
+                "event": WorkflowEvent.COMPLETE.value,
+                "from": "publish_or_visual_check",
+                "to": WorkflowState.COMPLETED.value,
+            },
+        ],
+    }
+
+
 def state_from_legacy(status: str, stage: str = "") -> WorkflowState:
     stage_value = str(stage or "").strip().lower().replace("-", "_")
     try:

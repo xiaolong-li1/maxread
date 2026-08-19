@@ -1,3 +1,5 @@
+import json
+
 from maxread.workflow import (
     FailureKind,
     InvalidWorkflowTransition,
@@ -8,6 +10,7 @@ from maxread.workflow import (
     queue_status_for_state,
     state_from_legacy,
     transition,
+    workflow_spec,
 )
 
 
@@ -104,3 +107,10 @@ def test_legacy_queue_state_mapping_keeps_existing_database_compatible():
     assert state_from_legacy("running", "visual-qa") is WorkflowState.VISUAL_CHECKING
     assert state_from_legacy("done", "done") is WorkflowState.COMPLETED
     assert state_from_legacy("failed", "quality_failed") is WorkflowState.QUALITY_FAILED
+
+
+def test_workflow_spec_is_complete_and_json_serializable():
+    spec = workflow_spec()
+    assert {item["id"] for item in spec["states"]} == {state.value for state in WorkflowState}
+    assert any(item["event"] == "generation_repair_required" for item in spec["transitions"])
+    assert json.loads(json.dumps(spec))["states"] == spec["states"]

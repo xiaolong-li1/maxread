@@ -172,7 +172,7 @@ python3 -m maxread.cli feedback --limit 50 --resolve-users
 
 `listen` now enqueues supported Feishu messages and starts background worker threads in the same process. This keeps the event listener responsive while papers are processed concurrently.
 
-The durable queue lifecycle is modeled as a state machine with audited transitions, bounded quality/visual repair loops, worker leases, and publish checkpoints. See [`docs/workflow-state-machine.md`](docs/workflow-state-machine.md) for the lifecycle and recovery invariants.
+The durable queue lifecycle is modeled as a state machine with audited transitions, bounded generation/quality/visual repair loops, worker leases, and publish checkpoints. See [`docs/workflow-state-machine.md`](docs/workflow-state-machine.md) for the lifecycle and recovery invariants. The admin server exposes the live executable specification at `/architecture` and `/api/workflow-spec`; both are generated from `maxread/workflow.py` instead of a second handwritten state graph.
 
 ```bash
 python3 -m maxread.cli listen

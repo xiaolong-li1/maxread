@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
 import maxread.admin_server as admin_server
+from maxread.admin_architecture import architecture_html, architecture_spec
 from maxread.admin_server import _admin_summary, _attach_user_names, _limit
 from maxread.db import Store
+from maxread.workflow import transition
 
 
 def test_admin_summary_uses_existing_records(tmp_path):
@@ -75,3 +77,23 @@ def test_attach_user_names_persists_contact_mapping(tmp_path):
 
     assert rows[0]['sender_name'] == '李晓龙'
     assert calls == [['lark-cli', 'contact', '+search-user', '--as', 'user', '--user-ids', 'ou_1', '--format', 'json']]
+
+
+def test_architecture_spec_covers_states_and_scenarios_follow_real_transitions():
+    spec = architecture_spec()
+    state_ids = {item["id"] for item in spec["states"]}
+    assert spec["metrics"]["states"] == len(state_ids)
+    assert spec["metrics"]["repair_loops"] == 3
+
+    for scenario in spec["scenarios"]:
+        assert len(scenario["events"]) == len(scenario["states"]) - 1
+        assert set(scenario["states"]) <= state_ids
+        for source, event, target in zip(scenario["states"], scenario["events"], scenario["states"][1:]):
+            assert transition(source, event).to_state.value == target
+
+
+def test_architecture_html_is_self_contained_and_uses_workflow_api():
+    html = architecture_html()
+    assert "MaxRead Pipeline Architecture" in html
+    assert "fetch('/api/workflow-spec'" in html
+    assert "https://" not in html

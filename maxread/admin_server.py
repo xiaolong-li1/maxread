@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .admin_architecture import architecture_html, architecture_spec
 from .config import Settings
 from .db import Store
 from .feedback import count_feedback_by_status, visible_feedback_rows
@@ -47,6 +48,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._html(INDEX_HTML)
+            return
+        if parsed.path == "/architecture":
+            self._html(architecture_html())
+            return
+        if parsed.path == "/api/workflow-spec":
+            self._json_response(architecture_spec())
             return
         if parsed.path == "/api/summary":
             self._json_response(self._with_store(_admin_summary))
@@ -257,6 +264,9 @@ INDEX_HTML = r'''
     h1 { margin: 0; font-size: 30px; line-height: 1.15; letter-spacing: 0; }
     .sub { margin-top: 8px; color: var(--muted); }
     .actions { display: flex; gap: 10px; align-items: center; }
+    .architecture-link { height: 36px; display: inline-flex; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--text); text-decoration: none; }
+    .architecture-link:hover { text-decoration: none; border-color: #b9beb7; }
+    .architecture-link svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     button, select { border: 1px solid var(--line); background: #fff; color: var(--text); border-radius: 8px; padding: 8px 11px; font: inherit; }
     button { cursor: pointer; transition: transform .15s, box-shadow .15s; }
     button:hover { transform: translateY(-1px); box-shadow: 0 6px 16px -12px rgba(0,0,0,.25); }
@@ -296,7 +306,10 @@ INDEX_HTML = r'''
         <h1>MaxRead 控制台</h1>
         <div class="sub">查看使用记录、反馈、队列和 AI review 问题。仅监听 5090 ZeroTier 内网地址。</div>
       </div>
-      <div class="actions"><button class="primary" onclick="refreshAll()">刷新</button></div>
+      <div class="actions">
+        <a class="architecture-link" href="/architecture"><svg viewBox="0 0 24 24"><path d="M4 6h6v6H4zM14 3h6v6h-6zM14 15h6v6h-6zM10 9l4-3M10 11l4 6"/></svg>Pipeline 架构</a>
+        <button class="primary" onclick="refreshAll()">刷新</button>
+      </div>
     </header>
 
     <nav class="tabs">
