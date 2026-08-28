@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure
-from maxread.render import display_caption, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning, _pretty_grid_label, _render_asset
+from maxread.render import compose_related_figure_groups, constrain_rendered_image, display_caption, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning, _figure_section_target, _pretty_grid_label, _render_asset
 
 
 def test_polish_markdown_converts_math():
@@ -48,6 +48,100 @@ def test_polish_markdown_repairs_common_latex_join_errors():
     assert "block_size" in out
     assert "&lt;" not in out
     assert "D_{JS}<\\tau" in out
+
+
+def test_polish_markdown_restores_snake_case_function_with_single_letter_segment():
+    polished = polish_markdown("调用 <latex>apply_p_rope</latex> 完成旋转。")
+
+    assert "`apply_p_rope`" in polished
+    assert "<latex>apply_p_rope</latex>" not in polished
+
+
+def test_polish_markdown_repairs_single_backslash_cases_spacing_break():
+    out = polish_markdown(
+        r"<latex>\begin{cases}a=1 \[4pt] b=2\end{cases}</latex>"
+    )
+
+    assert r"<latex>\begin{cases}a=1 \\[4pt] b=2\end{cases}</latex>" in out
+
+
+def test_polish_markdown_keeps_array_formula_with_mm_row_break():
+    out = polish_markdown(
+        r"<latex>\begin{array}{l}Y_C=Attn(Q_C,K_C,V_C),\\[1mm]Y_X=Attn(Q_X,K_X,V_X)\end{array}</latex>"
+    )
+
+    assert r"<latex>\begin{array}{l}Y_C=Attn(Q_C,K_C,V_C),\\[1mm]Y_X=Attn(Q_X,K_X,V_X)\end{array}</latex>" in out
+    assert "`\\begin{array}" not in out
+
+
+def test_polish_markdown_keeps_r_stitch_cases_formula_across_repeated_normalization():
+    formula = (
+        r"<latex>\mathrm{Switch}(t)=\begin{cases}"
+        r"\mathrm{SLM}\rightarrow\mathrm{LLM} & \mathrm{if}\mathcal{H}_t^{\mathrm{SLM}}>\tau,\\ "
+        r"\mathrm{LLM}\rightarrow\mathrm{SLM} & \mathrm{if}\mathcal{H}_t^{\mathrm{LLM}}\le \tau."
+        r"\end{cases}</latex>"
+    )
+
+    once = polish_markdown(formula)
+    twice = polish_markdown(once)
+    xml = markdown_to_docx_xml(twice)
+
+    assert once == twice
+    assert r"\begin{cases}" in twice
+    assert "<latex>" in xml
+    assert "<code>" not in xml
+
+
+def test_polish_markdown_does_not_treat_rvert_as_rv_vector_macro():
+    source = r"<latex>\lvert\mathrm{Compile}(C)\rvert\le B_G</latex>"
+
+    polished = polish_markdown(source)
+
+    assert r"\lvert\mathrm{Compile}(C)\rvert" in polished
+    assert r"\mathbf{ert}" not in polished
+    assert "<code>" not in markdown_to_docx_xml(polished)
+
+
+def test_polish_markdown_recovers_historical_rvert_corruption_when_delimiters_prove_intent():
+    source = r"<latex>\lvert\mathrm{Compile}(C)\mathbf{ert}\le B_G</latex>"
+
+    polished = polish_markdown(source)
+
+    assert r"\lvert\mathrm{Compile}(C)\rvert" in polished
+    assert "<code>" not in markdown_to_docx_xml(polished)
+
+
+def test_polish_markdown_keeps_escaped_currency_out_of_inline_math_and_table_columns():
+    source = r"""
+主指标 CumReg、\$Total、Perf/\$；成本约 \$0.054/M。
+
+| Mode | AvgPerf% | CumReg↓ | \$Total | Perf/\$↑ |
+| --- | --- | --- | --- | --- |
+| Agent | 62.50 | 17.0 | 52.97 | 1.18 |
+"""
+
+    once = polish_markdown(source)
+    twice = polish_markdown(once)
+    xml = markdown_to_docx_xml(twice)
+
+    assert once == twice
+    assert "`$Total`" in twice
+    assert "`Perf/$`↑" in twice
+    assert "`$0.054/M`" in twice
+    assert "<latex>Total" not in twice
+    assert "<code>$Total</code>" in xml
+    assert "<code>Perf/$</code>↑" in xml
+    assert xml.count("<td>") == 10
+
+
+def test_polish_markdown_expands_legacy_cal_declarations():
+    source = r"公式：<latex>{\cal T}_\sigma + v_{\cal S}(x)</latex>"
+
+    out = polish_markdown(source)
+
+    assert r"\mathcal{T}_\sigma" in out
+    assert r"v_{\mathcal{S}}(x)" in out
+    assert r"\cal" not in out
 
 
 def test_polish_markdown_preserves_valid_latex_commands():
@@ -353,7 +447,8 @@ def test_markdown_to_docx_xml_preserves_latex_and_tables():
 | A | <latex>a+b</latex> |
 """
     xml = markdown_to_docx_xml(md)
-    assert "<h1>标题</h1>" in xml
+    assert "<title>标题</title>" in xml
+    assert "<h1>标题</h1>" not in xml
     assert "<latex>x &lt; y</latex>" in xml
     assert "<table>" in xml
     assert "<latex>a+b</latex>" in xml
@@ -372,6 +467,56 @@ def test_polish_markdown_compiles_raw_uncertainty_values_inside_tables():
     assert r"<latex>1.27_{-0.12}^{+0.13}</latex>" in polished
     assert "<td><p>40041022325608704</p></td>" in xml
     assert r"<td><p><latex>1.28^{+0.11}_{-0.10}</latex></p></td>" in xml
+
+
+def test_polish_markdown_splits_adjacent_tables_without_blank_line():
+    markdown = """| Encoding | Property |
+| --- | --- |
+| RoPE | relative |
+| Dataset | PPL | Score |
+| --- | ---: | ---: |
+| Wiki | 10.2 | 88 |
+"""
+
+    polished = polish_markdown(markdown)
+    xml = markdown_to_docx_xml(polished)
+
+    assert "| RoPE | relative |\n\n| Dataset | PPL | Score |" in polished
+    assert xml.count("<table>") == 2
+
+
+def test_table_formula_vertical_bars_do_not_split_into_extra_cells():
+    markdown = r"""| 语义 | 约束 |
+| --- | --- |
+| 组内 | <latex>|\mathcal{T}_D|=|\mathcal{T}_A|\le q_e</latex> |
+"""
+
+    polished = polish_markdown(markdown)
+    xml = markdown_to_docx_xml(polished)
+
+    assert r"<latex>\vert \mathcal{T}_D\vert =\vert \mathcal{T}_A\vert \le q_e</latex>" in xml
+    assert "&lt;latex&gt;" not in xml
+    assert xml.count("<td>") == 4
+
+
+def test_accuracy_vs_budget_figure_is_assigned_to_experiments():
+    target = _figure_section_target(
+        Path("llava15_llava_next_acc_vs_budget_1collum.png"),
+        "Aggregate performance under different visual-token reduction ratios.",
+    )
+
+    assert target == "experiments"
+
+
+def test_display_caption_localizes_performance_figures():
+    assert display_caption(
+        "Aggregate performance under a 94.4% visual-token reduction ratio.",
+        Path("acc_drop_ratio_comparison_v5_3.png"),
+    ) == "性能对比图"
+    assert display_caption(
+        "Aggregate performance under different visual-token reduction ratios.",
+        Path("acc_vs_budget.png"),
+    ) == "视觉 Token 削减性能图"
 
 
 def test_render_asset_converts_eps_with_ghostscript(tmp_path, monkeypatch):
@@ -402,6 +547,21 @@ def test_markdown_to_docx_xml_keeps_multiline_latex_with_norm_bars_intact():
 
     assert "&lt;latex&gt;" not in xml
     assert "<latex>d=\\left\\|x\\right\\|\n=1</latex>" in xml
+
+
+def test_polish_markdown_downgrades_unsupported_big_middle_delimiters():
+    markdown = r"""合法候选进入全局池：
+
+<latex>\mathcal{V}=\bigcup_{t=1}^{T}\Big\{(\alpha_{t,i},e_{t,i})\;\middle|\;\mathrm{Valid}(d_{t,i})=1\Big\}</latex>
+"""
+
+    polished = polish_markdown(markdown)
+    xml = markdown_to_docx_xml(polished)
+
+    assert r"\Big" not in polished
+    assert r"\middle" not in polished
+    assert r"\{(\alpha_{t,i},e_{t,i})\;\mid \;\mathrm{Valid}(d_{t,i})=1\}" in polished
+    assert "<latex>" in xml
     assert "<table>" not in xml
     assert "<code>" not in xml
 
@@ -434,13 +594,13 @@ def test_markdown_to_docx_xml_avoids_break_immediately_after_latex():
     )
 
     assert "</latex><br/>" not in xml
-    assert "</latex> 先计算" in xml
+    assert "<code>apply_p_rope</code><br/>先计算" in xml
 
 
 def test_markdown_to_docx_xml_heading_with_following_lines():
     xml = markdown_to_docx_xml("# Paper Title\n**English Title**\nAuthors")
     assert "<title>Paper Title</title>" in xml
-    assert "<h1>Paper Title</h1>" in xml
+    assert "<h1>Paper Title</h1>" not in xml
     assert "# Paper Title" not in xml
     assert "<b>English Title</b><br/>Authors" in xml
 
@@ -663,6 +823,31 @@ def test_prepare_key_figures_uses_tex_figure_caption(tmp_path):
     assert figures[0][1] == "Different Attention Mechanisms in DiTs."
 
 
+def test_prepare_key_figures_keeps_referenced_figures_under_assets(tmp_path):
+    from PIL import Image
+
+    source_dir = tmp_path / "source"
+    figure_path = source_dir / "presentation" / "assets" / "overview.png"
+    figure_path.parent.mkdir(parents=True)
+    Image.new("RGB", (120, 80), "white").save(figure_path)
+    bundle = _bundle(
+        source_dir=source_dir,
+        source_assets=["presentation/assets/overview.png"],
+        source_figures=[
+            PaperFigure(
+                asset="presentation/assets/overview.png",
+                caption="Overview of the recurrent architecture.",
+                tex_file="ms.tex",
+                figure_index=0,
+            )
+        ],
+    )
+
+    figures = prepare_key_figures(bundle)
+
+    assert [path.name for path, _caption in figures] == ["overview.png"]
+
+
 def test_prepare_key_figures_skips_logo_assets_without_caption(tmp_path):
     from PIL import Image
 
@@ -750,6 +935,221 @@ def test_prepare_key_figures_composes_same_label_pdf_images(tmp_path):
     assert [path.name for path, _caption in figures] == ["fig_training_run.png"]
     assert figures[0][1] == caption
     assert figures[0][0].exists()
+
+
+def test_prepare_key_figures_defaults_to_all_semantic_figures(tmp_path):
+    from PIL import Image
+
+    source_dir = tmp_path / "source"
+    (source_dir / "figures").mkdir(parents=True)
+    source_figures = []
+    assets = []
+    for index in range(7):
+        rel = f"figures/result-{index}.png"
+        Image.new("RGB", (120, 80), "white").save(source_dir / rel)
+        assets.append(rel)
+        source_figures.append(PaperFigure(asset=rel, caption=f"Result comparison {index}.", label=f"fig:{index}", figure_index=index))
+    bundle = _bundle(source_dir=source_dir, source_assets=assets, source_figures=source_figures)
+
+    figures = prepare_key_figures(bundle)
+
+    assert len(figures) == 7
+
+
+def test_prepare_key_figures_keeps_all_body_figures_and_excludes_appendix(tmp_path):
+    from PIL import Image
+
+    source_dir = tmp_path / "source"
+    (source_dir / "figures").mkdir(parents=True)
+    for name in ("method", "result", "appendix"):
+        Image.new("RGB", (120, 80), "white").save(source_dir / "figures" / f"{name}.png")
+    bundle = _bundle(
+        source_dir=source_dir,
+        source_assets=[f"figures/{name}.png" for name in ("method", "result", "appendix")],
+        source_figures=[
+            PaperFigure(asset="figures/method.png", caption="Method overview.", figure_index=0),
+            PaperFigure(asset="figures/result.png", caption="Main result comparison.", figure_index=1),
+            PaperFigure(asset="figures/appendix.png", caption="Extra examples.", figure_index=2, is_appendix=True),
+        ],
+    )
+
+    figures = prepare_key_figures(bundle)
+
+    assert {path.name for path, _caption in figures} == {"method.png", "result.png"}
+
+
+def test_compose_related_figure_groups_places_similar_figures_side_by_side(tmp_path):
+    from PIL import Image
+
+    left = tmp_path / "indexer_topk.png"
+    right = tmp_path / "main_attention_topk.png"
+    Image.new("RGB", (640, 480), "white").save(left)
+    Image.new("RGB", (640, 480), "white").save(right)
+    inserts = [
+        ("[MaxReadFigure:1:indexer]", left, "Indexer top-k selection probability across layers."),
+        ("[MaxReadFigure:2:main]", right, "Main attention top-k selection probability across layers."),
+    ]
+    visuals = {
+        inserts[0][0]: "展示 indexer 在不同层选择的 top-k 索引概率",
+        inserts[1][0]: "展示主干注意力在不同层计算的 top-k 索引概率",
+    }
+
+    grouped, grouped_visuals = compose_related_figure_groups(inserts, visuals)
+
+    assert len(grouped) == 1
+    assert "related-indexer_topk-main_attention_topk" in grouped[0][0]
+    assert grouped[0][1].exists()
+    assert grouped[0][0] in grouped_visuals
+    with Image.open(grouped[0][1]) as image:
+        assert image.width > image.height
+
+
+def test_compose_related_figure_groups_keeps_unrelated_figures_separate(tmp_path):
+    from PIL import Image
+
+    method = tmp_path / "architecture.png"
+    result = tmp_path / "accuracy.png"
+    Image.new("RGB", (400, 300), "white").save(method)
+    Image.new("RGB", (400, 300), "white").save(result)
+    inserts = [
+        ("[MaxReadFigure:1:method]", method, "Overview of the model architecture and modules."),
+        ("[MaxReadFigure:2:result]", result, "Accuracy benchmark on ImageNet."),
+    ]
+
+    grouped, _visuals = compose_related_figure_groups(inserts, {})
+
+    assert grouped == inserts
+
+
+def test_related_panel_label_falls_back_to_ascii_without_cjk_font(monkeypatch):
+    import maxread.render as render_module
+
+    monkeypatch.setattr(render_module, "_cjk_figure_font_path", lambda: "")
+
+    label = render_module._related_panel_label(
+        "图中展示不同层的索引概率。",
+        "Indexer top-k selection probability across layers.",
+        Path("indexer.png"),
+        0,
+    )
+
+    assert label.startswith("(a) Indexer top-k selection probability")
+    assert all(ord(char) < 128 for char in label)
+
+
+def test_compose_grid_figure_preserves_subfigure_captions(tmp_path):
+    from PIL import Image
+    from maxread.render import _compose_grid_figure
+
+    items = []
+    captions = [
+        "Vanilla RoPE / V2PE",
+        "MRoPE",
+        "VideoRoPE / HoPE",
+        "CircleRoPE",
+        "IL-RoPE / Omni-RoPE",
+        "MHRoPE / MRoPE-I",
+    ]
+    for index, caption in enumerate(captions):
+        path = tmp_path / f"panel-{index}.png"
+        Image.new("RGB", (320, 220), "white").save(path)
+        items.append(
+            (
+                path,
+                PaperFigure(
+                    asset=path.name,
+                    caption="Parent caption",
+                    panel_caption=caption,
+                    label="fig:parent",
+                    asset_index=index,
+                    row=index // 3,
+                    col=index % 3,
+                ),
+            )
+        )
+
+    output = tmp_path / "grid.png"
+    assert _compose_grid_figure(items, output, "Parent caption") == output
+    with Image.open(output) as image:
+        # Two rows each reserve a panel-caption band below the image.
+        assert image.height >= 2 * 220 + 2 * 58
+
+
+def test_pdf_render_cache_invalidates_low_resolution_output(tmp_path, monkeypatch):
+    import maxread.render as render_module
+    from PIL import Image
+
+    source = tmp_path / "figure.pdf"
+    source.write_bytes(b"%PDF-placeholder")
+
+    def render_high_resolution(_source, output):
+        Image.new("RGB", (1190, 850), "white").save(output)
+        return output
+
+    monkeypatch.setattr(render_module, "_render_pdf_with_pymupdf", render_high_resolution)
+    original_which = render_module.shutil.which
+    monkeypatch.setattr(
+        render_module.shutil,
+        "which",
+        lambda name: None if name in {"qlmanage", "pdftoppm"} else original_which(name),
+    )
+
+    output_dir = tmp_path / "rendered"
+    output_dir.mkdir()
+    old = output_dir / "figure.png"
+    Image.new("RGB", (595, 425), "white").save(old)
+
+    rendered = _render_asset(source, output_dir)
+
+    assert rendered == old
+    with Image.open(rendered) as image:
+        assert max(image.size) >= 1000
+
+
+def test_pdf_render_falls_back_when_platform_thumbnailer_times_out(tmp_path, monkeypatch):
+    import subprocess
+
+    import maxread.render as render_module
+    from PIL import Image
+
+    source = tmp_path / "figure.pdf"
+    source.write_bytes(b"%PDF-placeholder")
+    output_dir = tmp_path / "rendered"
+    output_dir.mkdir()
+
+    def fake_which(name):
+        return "/usr/bin/qlmanage" if name == "qlmanage" else None
+
+    def fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("qlmanage", 30)
+
+    def render_fallback(_source, output):
+        Image.new("RGB", (1200, 800), "white").save(output)
+        return output
+
+    monkeypatch.setattr(render_module.shutil, "which", fake_which)
+    monkeypatch.setattr(render_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(render_module, "_render_pdf_with_pymupdf", render_fallback)
+
+    rendered = _render_asset(source, output_dir)
+
+    assert rendered == output_dir / "figure.png"
+    assert rendered.exists()
+
+
+def test_constrain_rendered_image_bounds_conversion_output(tmp_path):
+    from PIL import Image
+
+    source = tmp_path / "large-conversion.png"
+    Image.effect_noise((2400, 1800), 96).convert("RGB").save(source)
+
+    result = constrain_rendered_image(source, max_bytes=300_000, max_side=1600, max_pixels=2_000_000)
+
+    assert result == source
+    assert source.stat().st_size <= 300_000
+    with Image.open(source) as opened:
+        assert max(opened.size) <= 1600
+        assert opened.width * opened.height <= 2_000_000
 
 
 def test_prepare_key_figures_composes_multi_row_grid_figure(tmp_path):

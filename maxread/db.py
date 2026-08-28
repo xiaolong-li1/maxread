@@ -11,6 +11,7 @@ from .workflow import (
     PublishedCheckpoint,
     WorkflowEvent,
     WorkflowState,
+    legacy_stage_for_state,
     queue_status_for_state,
     state_from_legacy,
     transition,
@@ -106,6 +107,17 @@ class Store:
                 updated_at datetime not null default current_timestamp
             );
 
+            create table if not exists service_status (
+                id integer primary key check (id = 1),
+                mode text not null default 'operational',
+                reason text not null default '',
+                expected_recovery_at text not null default '',
+                updated_by text not null default '',
+                updated_at datetime not null default current_timestamp
+            );
+
+            insert or ignore into service_status (id) values (1);
+
             create table if not exists feedback (
                 id integer primary key autoincrement,
                 event_id text not null default '',
@@ -157,7 +169,11 @@ class Store:
                 created_at datetime not null default current_timestamp,
                 updated_at datetime not null default current_timestamp,
                 started_at datetime,
-                finished_at datetime
+                finished_at datetime,
+                suppress_progress_notifications integer not null default 0,
+                recovery_reason text not null default '',
+                recovery_attempts integer not null default 0,
+                rebuild_pipeline integer not null default 0
             );
 
             create table if not exists job_watchers (
@@ -243,6 +259,10 @@ class Store:
         self._ensure_column("queue_jobs", "state_version", "integer not null default 0")
         self._ensure_column("queue_jobs", "last_event", "text not null default ''")
         self._ensure_column("queue_jobs", "checkpoint_json", "text not null default ''")
+        self._ensure_column("queue_jobs", "suppress_progress_notifications", "integer not null default 0")
+        self._ensure_column("queue_jobs", "recovery_reason", "text not null default ''")
+        self._ensure_column("queue_jobs", "recovery_attempts", "integer not null default 0")
+        self._ensure_column("queue_jobs", "rebuild_pipeline", "integer not null default 0")
         self._ensure_column("feedback", "feedback_source", "text not null default ''")
         self._ensure_column("feedback", "feedback_category", "text not null default ''")
         self._ensure_column("feedback", "feedback_confidence", "real not null default 0")
@@ -334,6 +354,34 @@ class Store:
             self.conn.execute(f"update documents set {','.join(assignments)} where doc_id = ?", values)
         self.conn.commit()
 
+    def mark_cache_legacy_before(self, cutoff: str) -> dict[str, int]:
+        paper = self.conn.execute(
+            "update papers set status='legacy' where status='cache_expired' or (status='done' and updated_at < ?)",
+            (str(cutoff),),
+        )
+        document = self.conn.execute(
+            "update documents set status='legacy' where status='cache_expired' or (status='done' and updated_at < ?)",
+            (str(cutoff),),
+        )
+        self.conn.commit()
+        return {"papers": int(paper.rowcount), "documents": int(document.rowcount)}
+
+    def list_cache_cleanup_candidates(self, cutoff: str):
+        rows = self.conn.execute(
+            """
+            select 'paper' source_kind, paper_id source_id, updated_at
+            from papers
+            where status in ('done', 'legacy') and updated_at <= ?
+            union all
+            select 'article' source_kind, doc_id source_id, updated_at
+            from documents
+            where status in ('done', 'legacy') and updated_at <= ?
+            order by updated_at asc
+            """,
+            (str(cutoff), str(cutoff)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
 
     def should_send_intro_to_user(self, sender_id: str) -> bool:
         row = self.conn.execute("select intro_sent from users where sender_id = ?", (sender_id,)).fetchone()
@@ -405,28 +453,29 @@ class Store:
         row = self.conn.execute("select count(*) as n from feedback").fetchone()
         return int(row["n"])
 
-    def list_feedback(self, limit: int = 50, status: str = ""):
+    def list_feedback(self, limit: int = 50, status: str = "", since: str = "", sender_id: str = ""):
+        where = []
+        params = []
         if status:
-            rows = self.conn.execute(
-                """
-                select id, event_id, message_id, chat_id, chat_type, sender_id, content, status, feedback_source, feedback_category, feedback_confidence, created_at
-                from feedback
-                where status = ?
-                order by id desc
-                limit ?
-                """,
-                (status, int(limit)),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                """
-                select id, event_id, message_id, chat_id, chat_type, sender_id, content, status, feedback_source, feedback_category, feedback_confidence, created_at
-                from feedback
-                order by id desc
-                limit ?
-                """,
-                (int(limit),),
-            ).fetchall()
+            where.append("status = ?")
+            params.append(status)
+        if since:
+            where.append("created_at >= ?")
+            params.append(since)
+        if sender_id:
+            where.append("sender_id = ?")
+            params.append(sender_id)
+        clause = " where " + " and ".join(where) if where else ""
+        rows = self.conn.execute(
+            f"""
+            select id, event_id, message_id, chat_id, chat_type, sender_id, content, status, feedback_source, feedback_category, feedback_confidence, created_at
+            from feedback
+            {clause}
+            order by id desc
+            limit ?
+            """,
+            (*params, int(limit)),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def update_feedback_status(self, feedback_id: int, status: str) -> bool:
@@ -468,6 +517,48 @@ class Store:
             "active_users": int(active_users["n"]),
         }
 
+    def get_service_status(self):
+        row = self.conn.execute(
+            "select mode, reason, expected_recovery_at, updated_by, updated_at from service_status where id = 1"
+        ).fetchone()
+        if row is None:
+            return {
+                "mode": "operational",
+                "reason": "",
+                "expected_recovery_at": "",
+                "updated_by": "",
+                "updated_at": "",
+            }
+        return dict(row)
+
+    def set_service_status(
+        self,
+        mode: str,
+        reason: str = "",
+        expected_recovery_at: str = "",
+        updated_by: str = "",
+    ):
+        clean_mode = str(mode or "").strip().lower()
+        if clean_mode not in {"operational", "degraded", "maintenance", "outage"}:
+            raise ValueError(f"Unsupported service mode: {mode}")
+        clean_reason = str(reason or "").strip()[:1000]
+        clean_eta = str(expected_recovery_at or "").strip()[:120]
+        clean_by = str(updated_by or "").strip()[:120]
+        if clean_mode != "operational" and not clean_reason:
+            raise ValueError("reason is required when service is not operational")
+        self.conn.execute(
+            """
+            insert into service_status (id, mode, reason, expected_recovery_at, updated_by, updated_at)
+            values (1, ?, ?, ?, ?, current_timestamp)
+            on conflict(id) do update set mode=excluded.mode, reason=excluded.reason,
+                expected_recovery_at=excluded.expected_recovery_at, updated_by=excluded.updated_by,
+                updated_at=current_timestamp
+            """,
+            (clean_mode, clean_reason, clean_eta, clean_by),
+        )
+        self.conn.commit()
+        return self.get_service_status()
+
 
     def add_usage_event(
         self,
@@ -503,15 +594,43 @@ class Store:
         )
         self.conn.commit()
 
-    def list_usage_events(self, limit: int = 50):
+    def list_usage_events(self, limit: int = 50, since: str = "", sender_id: str = ""):
+        where = []
+        params = []
+        if since:
+            where.append("created_at >= ?")
+            params.append(since)
+        if sender_id:
+            where.append("sender_id = ?")
+            params.append(sender_id)
+        clause = " where " + " and ".join(where) if where else ""
         rows = self.conn.execute(
-            """
+            f"""
             select id, event_id, message_id, chat_id, chat_type, sender_id, source_kind, source_id, source_url, title, status, doc_url, error, created_at, updated_at
             from usage_events
+            {clause}
             order by id desc
             limit ?
             """,
-            (int(limit),),
+            (*params, int(limit)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_usage_users(self, since: str = ""):
+        where = ["sender_id <> ''"]
+        params = []
+        if since:
+            where.append("created_at >= ?")
+            params.append(since)
+        rows = self.conn.execute(
+            f"""
+            select sender_id, count(*) as event_count, max(created_at) as last_seen_at
+            from usage_events
+            where {' and '.join(where)}
+            group by sender_id
+            order by last_seen_at desc, sender_id asc
+            """,
+            params,
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -531,6 +650,80 @@ class Store:
         ).fetchone()
         return dict(row) if row else None
 
+    def find_retryable_queue_jobs(
+        self,
+        chat_id: str,
+        sender_id: str = "",
+        message_ids: tuple[str, ...] = (),
+        dedupe_keys: tuple[str, ...] = (),
+        limit: int = 20,
+    ):
+        """Resolve a retry command to durable jobs, not quoted message text.
+
+        Related message IDs identify the original topic request.  Once its
+        source keys are known, select the user's newest failed attempt for
+        each source so a previous retry does not leave us replaying an older
+        row.  Explicit source keys use the same ownership boundary.
+        """
+        keys = [str(item) for item in dedupe_keys if str(item)]
+        if not keys:
+            params: list[object] = [str(chat_id)]
+            sender_clause = ""
+            if sender_id:
+                sender_clause = "and w.sender_id = ?"
+                params.append(str(sender_id))
+            message_clause = ""
+            ids = [str(item) for item in message_ids if str(item)]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                message_clause = f"and w.message_id in ({placeholders})"
+                params.extend(ids)
+            elif not sender_id:
+                return []
+            rows = self.conn.execute(
+                f"""
+                select distinct q.dedupe_key
+                from queue_jobs q
+                join job_watchers w on w.job_id = q.id
+                where w.chat_id = ? {sender_clause} {message_clause}
+                order by q.id desc
+                limit ?
+                """,
+                (*params, max(1, int(limit))),
+            ).fetchall()
+            keys = [str(row["dedupe_key"]) for row in rows]
+            # A plain private-chat retry without thread metadata means the
+            # most recent failed source, not every failure in that DM.
+            if not ids and keys:
+                keys = keys[:1]
+        if not keys:
+            return []
+
+        output = []
+        for key in keys[: max(1, int(limit))]:
+            params = [key, str(chat_id)]
+            sender_clause = ""
+            if sender_id:
+                sender_clause = "and w.sender_id = ?"
+                params.append(str(sender_id))
+            row = self.conn.execute(
+                f"""
+                select q.*
+                from queue_jobs q
+                where q.dedupe_key = ? and q.status = 'failed'
+                  and exists (
+                      select 1 from job_watchers w
+                      where w.job_id = q.id and w.chat_id = ? {sender_clause}
+                  )
+                order by q.id desc
+                limit 1
+                """,
+                params,
+            ).fetchone()
+            if row is not None:
+                output.append(dict(row))
+        return output
+
     def enqueue_job(
         self,
         source_kind: str,
@@ -542,6 +735,7 @@ class Store:
         chat_type: str,
         sender_id: str,
         usage_event_id: int,
+        suppress_progress_notifications: bool = False,
     ):
         dedupe_key = self.dedupe_key(source_kind, source_id)
         self.conn.execute("begin immediate")
@@ -562,6 +756,11 @@ class Store:
             else:
                 job_id = int(job["id"])
                 self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (job_id, "watch", sender_id))
+                if suppress_progress_notifications:
+                    self.conn.execute(
+                        "update queue_jobs set suppress_progress_notifications = 1 where id = ? and status in ('queued', 'running')",
+                        (job_id,),
+                    )
             cur = self.conn.execute(
                 """
                 insert into job_watchers (job_id, event_id, message_id, chat_id, chat_type, sender_id, usage_event_id)
@@ -583,7 +782,7 @@ class Store:
         pos = self.conn.execute(
             """
             select count(*) as n from queue_jobs
-            where status = 'queued' and id <= ?
+            where status = 'running' or (status = 'queued' and id <= ?)
             """,
             (int(job_id),),
         ).fetchone()
@@ -717,7 +916,8 @@ class Store:
                 update queue_jobs
                 set status = 'done', doc_url = ?, title = ?, error = '', worker_id = '', stage = 'done',
                     workflow_state = 'completed', finished_at = current_timestamp,
-                    updated_at = current_timestamp, stage_updated_at = current_timestamp
+                    updated_at = current_timestamp, stage_updated_at = current_timestamp,
+                    suppress_progress_notifications = 0, recovery_attempts = 0
                 where id = ?
                 """,
                 (doc_url, title, int(job_id)),
@@ -729,7 +929,7 @@ class Store:
             self.conn.rollback()
             raise
 
-    def fail_queue_job(self, job_id: int, error: str, worker_id: str = "") -> bool:
+    def fail_queue_job(self, job_id: int, error: str, worker_id: str = "", doc_url: str = "") -> bool:
         detail = str(error)[:1000]
         self.conn.execute("begin immediate")
         try:
@@ -769,12 +969,15 @@ class Store:
             self.conn.execute(
                 """
                 update queue_jobs
-                set status = 'failed', error = ?, worker_id = '', stage = 'failed',
+                set status = 'failed', error = ?,
+                    doc_url = case when ? != '' then ? else doc_url end,
+                    worker_id = '', stage = 'failed',
                     workflow_state = ?, finished_at = current_timestamp,
-                    updated_at = current_timestamp, stage_updated_at = current_timestamp
+                    updated_at = current_timestamp, stage_updated_at = current_timestamp,
+                    suppress_progress_notifications = 0, recovery_attempts = 0
                 where id = ?
                 """,
-                (detail, next_state.value, int(job_id)),
+                (detail, str(doc_url or ""), str(doc_url or ""), next_state.value, int(job_id)),
             )
             self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (int(job_id), "failed", detail))
             self.conn.commit()
@@ -827,22 +1030,22 @@ class Store:
         self.conn.commit()
         return cur.rowcount == 1
 
-    def recover_stale_queue_jobs(self, stale_minutes: int) -> int:
+    def recover_stale_queue_jobs(self, stale_minutes: int, max_recovery_attempts: int = 3) -> int:
         rows = self.conn.execute(
             """
-            select id, worker_id, stage, heartbeat_at, started_at
+            select id, worker_id, stage, heartbeat_at, started_at, recovery_attempts
             from queue_jobs
             where status = 'running'
               and (heartbeat_at is null or heartbeat_at < datetime('now', ?))
             """,
             (f"-{int(stale_minutes)} minutes",),
         ).fetchall()
-        return self._recover_queue_job_rows(rows, "recover_stale")
+        return self._recover_queue_job_rows(rows, "recover_stale", max_recovery_attempts)
 
-    def recover_dead_worker_queue_jobs(self, host: str, is_pid_alive) -> int:
+    def recover_dead_worker_queue_jobs(self, host: str, is_pid_alive, max_recovery_attempts: int = 3) -> int:
         rows = self.conn.execute(
             """
-            select id, worker_id, stage, heartbeat_at, started_at
+            select id, worker_id, stage, heartbeat_at, started_at, recovery_attempts
             from queue_jobs
             where status = 'running' and worker_id != ''
             """
@@ -852,9 +1055,9 @@ class Store:
             parsed_host, pid = _parse_worker_host_pid(row["worker_id"] or "")
             if parsed_host == host and pid is not None and not is_pid_alive(pid):
                 dead_rows.append(row)
-        return self._recover_queue_job_rows(dead_rows, "recover_dead_worker")
+        return self._recover_queue_job_rows(dead_rows, "recover_dead_worker", max_recovery_attempts)
 
-    def _recover_queue_job_rows(self, rows, event_type: str) -> int:
+    def _recover_queue_job_rows(self, rows, event_type: str, max_recovery_attempts: int = 3) -> int:
         if not rows:
             return 0
         ids = [int(row["id"]) for row in rows]
@@ -863,7 +1066,7 @@ class Store:
         try:
             current_rows = self.conn.execute(
                 f"""
-                select id, worker_id, stage, workflow_state, heartbeat_at, started_at
+                select id, worker_id, stage, workflow_state, heartbeat_at, started_at, recovery_attempts
                 from queue_jobs
                 where id in ({placeholders}) and status = 'running'
                 """,
@@ -872,19 +1075,7 @@ class Store:
             if not current_rows:
                 self.conn.commit()
                 return 0
-            current_ids = [int(row["id"]) for row in current_rows]
-            current_placeholders = ",".join("?" for _ in current_ids)
-            self.conn.execute(
-                f"""
-                update queue_jobs
-                set status = 'queued', worker_id = '', stage = 'recovered', started_at = null,
-                    heartbeat_at = null, updated_at = current_timestamp, stage_updated_at = current_timestamp,
-                    workflow_state = 'queued', state_version = coalesce(state_version, 0) + 1,
-                    last_event = 'recover'
-                where id in ({current_placeholders}) and status = 'running'
-                """,
-                current_ids,
-            )
+            handled = 0
             for row in current_rows:
                 detail = f"worker={row['worker_id'] or ''} stage={row['stage'] or ''} heartbeat={row['heartbeat_at'] or ''} started={row['started_at'] or ''}"
                 from_state = str(row["workflow_state"] or "").strip()
@@ -893,6 +1084,48 @@ class Store:
                         from_state = state_from_legacy("running", row["stage"] or "").value
                     except ValueError:
                         from_state = WorkflowState.CLAIMED.value
+                recovery_count = int(row["recovery_attempts"] or 0)
+                if recovery_count >= max(0, int(max_recovery_attempts)):
+                    recovery_reason = f"服务异常中断，自动恢复次数已达上限 {max_recovery_attempts}（{event_type}）：{detail.strip()}"
+                    self.conn.execute(
+                        """
+                        update queue_jobs
+                        set status = 'failed', workflow_state = 'failed', state_version = coalesce(state_version, 0) + 1,
+                            error = ?, recovery_reason = ?, worker_id = '', stage = 'recovery_exhausted',
+                            heartbeat_at = null, finished_at = current_timestamp, updated_at = current_timestamp,
+                            stage_updated_at = current_timestamp, last_event = 'recovery_exhausted',
+                            suppress_progress_notifications = 1
+                        where id = ? and status = 'running'
+                        """,
+                        (recovery_reason, recovery_reason, int(row["id"])),
+                    )
+                    self.conn.execute("update job_watchers set notified = 1 where job_id = ?", (int(row["id"]),))
+                    self.conn.execute(
+                        """
+                        update usage_events set status = 'failed', error = ?, updated_at = current_timestamp
+                        where id in (select usage_event_id from job_watchers where job_id = ? and usage_event_id != 0)
+                        """,
+                        (recovery_reason, int(row["id"])),
+                    )
+                    self.conn.execute(
+                        "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
+                        (int(row["id"]), "recovery_exhausted", recovery_reason),
+                    )
+                    handled += 1
+                    continue
+                recovery_reason = f"服务异常中断后自动恢复（{event_type}）：{detail.strip()}"
+                self.conn.execute(
+                    """
+                    update queue_jobs
+                    set status = 'queued', worker_id = '', stage = 'recovered', started_at = null,
+                        heartbeat_at = null, updated_at = current_timestamp, stage_updated_at = current_timestamp,
+                        workflow_state = 'queued', state_version = coalesce(state_version, 0) + 1,
+                        last_event = 'recover', suppress_progress_notifications = 1,
+                        error = ?, recovery_reason = ?, recovery_attempts = coalesce(recovery_attempts, 0) + 1
+                    where id = ? and status = 'running'
+                    """,
+                    (recovery_reason, recovery_reason, int(row["id"])),
+                )
                 self.conn.execute(
                     "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
                     (
@@ -913,8 +1146,9 @@ class Store:
                     "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
                     (int(row["id"]), event_type, detail.strip()),
                 )
+                handled += 1
             self.conn.commit()
-            return len(current_rows)
+            return handled
         except Exception:
             self.conn.rollback()
             raise
@@ -934,26 +1168,62 @@ class Store:
         self.conn.execute("update job_watchers set notified = 1 where id = ?", (int(watcher_id),))
         self.conn.commit()
 
-    def list_queue_jobs(self, limit: int = 50, status: str = ""):
+    def list_queue_jobs(self, limit: int = 50, status: str = "", since: str = "", sender_id: str = ""):
+        # Queue rows are created before arXiv metadata is available. Resolve
+        # the title from the durable paper/article record when the worker has
+        # reached that point, while retaining the queue's final title.
+        title_expr = """
+            coalesce(
+                nullif(q.title, ''),
+                nullif(p.title, ''),
+                nullif(d.title, ''),
+                (
+                    select ue.title
+                    from usage_events ue
+                    where ue.source_kind = q.source_kind and ue.source_id = q.source_id
+                      and ue.title <> ''
+                    order by ue.id desc
+                    limit 1
+                ),
+                ''
+            ) as resolved_title
+        """
+        watcher_expr = """
+            coalesce(
+                (
+                    select w.sender_id
+                    from job_watchers w
+                    where w.job_id = q.id and w.sender_id <> ''
+                    order by w.id asc
+                    limit 1
+                ),
+                ''
+            ) as sender_id
+        """
+        where = []
+        params = []
         if status:
-            rows = self.conn.execute(
-                """
-                select * from queue_jobs
-                where status = ?
-                order by id desc
-                limit ?
-                """,
-                (status, int(limit)),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                """
-                select * from queue_jobs
-                order by id desc
-                limit ?
-                """,
-                (int(limit),),
-            ).fetchall()
+            where.append("q.status = ?")
+            params.append(status)
+        if since:
+            where.append("q.created_at >= ?")
+            params.append(since)
+        if sender_id:
+            where.append("exists (select 1 from job_watchers wf where wf.job_id = q.id and wf.sender_id = ?)")
+            params.append(sender_id)
+        clause = " where " + " and ".join(where) if where else ""
+        rows = self.conn.execute(
+            f"""
+            select q.*, {title_expr}, {watcher_expr}
+            from queue_jobs q
+            left join papers p on q.source_kind = 'paper' and p.paper_id = q.source_id
+            left join documents d on q.source_kind = 'article' and d.doc_id = q.source_id
+            {clause}
+            order by q.id desc
+            limit ?
+            """,
+            (*params, int(limit)),
+        ).fetchall()
         return [dict(row) for row in rows]
 
 
@@ -965,28 +1235,36 @@ class Store:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def list_job_events(self, job_id: int = 0, limit: int = 100):
+    def list_job_events(self, job_id: int = 0, limit: int = 100, since: str = "", sender_id: str = ""):
+        where = []
+        params = []
         if job_id:
-            rows = self.conn.execute(
-                """
-                select id, job_id, event_type, detail, created_at
-                from job_events
-                where job_id = ?
-                order by id desc
-                limit ?
-                """,
-                (int(job_id), int(limit)),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                """
-                select id, job_id, event_type, detail, created_at
-                from job_events
-                order by id desc
-                limit ?
-                """,
-                (int(limit),),
-            ).fetchall()
+            where.append("e.job_id = ?")
+            params.append(int(job_id))
+        if since:
+            where.append("e.created_at >= ?")
+            params.append(since)
+        if sender_id:
+            where.append("exists (select 1 from job_watchers wf where wf.job_id = e.job_id and wf.sender_id = ?)")
+            params.append(sender_id)
+        clause = " where " + " and ".join(where) if where else ""
+        rows = self.conn.execute(
+            f"""
+            select e.id, e.job_id, e.event_type, e.detail, e.created_at,
+                   coalesce(q.source_kind, '') as source_kind,
+                   coalesce(q.source_id, '') as source_id,
+                   coalesce(
+                       (select w.sender_id from job_watchers w where w.job_id = e.job_id and w.sender_id <> '' order by w.id asc limit 1),
+                       ''
+                   ) as sender_id
+            from job_events e
+            left join queue_jobs q on q.id = e.job_id
+            {clause}
+            order by e.id desc
+            limit ?
+            """,
+            (*params, int(limit)),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def queue_stats(self):
@@ -1000,7 +1278,14 @@ class Store:
         stats["pending_watchers"] = int(pending_watchers["n"])
         return stats
 
-    def retry_queue_job(self, job_id: int) -> bool:
+    def retry_queue_job(
+        self,
+        job_id: int,
+        reason: str = "manual retry",
+        event_type: str = "retry",
+        suppress_progress_notifications: bool = False,
+        rebuild_pipeline: bool = True,
+    ) -> bool:
         self.conn.execute("begin immediate")
         try:
             row = self.conn.execute("select * from queue_jobs where id = ?", (int(job_id),)).fetchone()
@@ -1013,7 +1298,7 @@ class Store:
                 job_id,
                 result.to_state,
                 WorkflowEvent.RETRY,
-                "manual retry",
+                reason,
                 int(row["state_version"] or 0) + 1,
             )
             self.conn.execute(
@@ -1021,22 +1306,83 @@ class Store:
                 update queue_jobs
                 set status = 'queued', error = '', worker_id = '', stage = 'retry_queued',
                     started_at = null, finished_at = null, heartbeat_at = null,
-                    updated_at = current_timestamp, stage_updated_at = current_timestamp
+                    updated_at = current_timestamp, stage_updated_at = current_timestamp,
+                    suppress_progress_notifications = ?, recovery_reason = '', recovery_attempts = 0,
+                    checkpoint_json = case when ? then '' else checkpoint_json end,
+                    rebuild_pipeline = ?
                 where id = ? and workflow_state = 'queued'
+                """,
+                (
+                    1 if suppress_progress_notifications else 0,
+                    1 if rebuild_pipeline else 0,
+                    1 if rebuild_pipeline else 0,
+                    int(job_id),
+                ),
+            )
+            self.conn.execute("update job_watchers set notified = 0 where job_id = ?", (int(job_id),))
+            self.conn.execute(
+                """
+                update usage_events
+                set status = 'queued', error = '', updated_at = current_timestamp
+                where id in (
+                    select usage_event_id from job_watchers
+                    where job_id = ? and usage_event_id != 0
+                )
                 """,
                 (int(job_id),),
             )
-            self.conn.execute("update job_watchers set notified = 0 where job_id = ?", (int(job_id),))
-            self._insert_transition_event(job_id, result, "manual retry")
+            self._insert_transition_event(job_id, result, reason)
             self.conn.execute(
                 "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
-                (int(job_id), "retry", "manual retry"),
+                (
+                    int(job_id),
+                    str(event_type or "retry"),
+                    f"{str(reason)[:900]} retry_mode={'rebuild' if rebuild_pipeline else 'resume'}",
+                ),
             )
             self.conn.commit()
             return True
         except (InvalidWorkflowTransition, ValueError):
             self.conn.rollback()
             return False
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def requeue_interrupted_job(self, job_id: int, reason: str) -> bool:
+        """Requeue one job recovered by an operator after an infrastructure stop.
+
+        This deliberately does not make the terminal ``cancelled`` state
+        generally retryable. It is an explicit, audited recovery operation for
+        a task that was stopped by the service rather than by its user.
+        """
+        detail = str(reason or "service interruption recovery")[:1000]
+        self.conn.execute("begin immediate")
+        try:
+            row = self.conn.execute("select * from queue_jobs where id = ?", (int(job_id),)).fetchone()
+            if row is None or str(row["workflow_state"] or "") != WorkflowState.CANCELLED.value:
+                self.conn.commit()
+                return False
+            version = int(row["state_version"] or 0) + 1
+            self.conn.execute(
+                """
+                update queue_jobs
+                set status = 'queued', workflow_state = 'queued', state_version = ?,
+                    error = ?, recovery_reason = ?, worker_id = '', stage = 'recovered',
+                    started_at = null, finished_at = null, heartbeat_at = null,
+                    updated_at = current_timestamp, stage_updated_at = current_timestamp,
+                    last_event = 'recover', suppress_progress_notifications = 1, recovery_attempts = 0
+                where id = ? and workflow_state = 'cancelled'
+                """,
+                (version, detail, detail, int(job_id)),
+            )
+            self.conn.execute("update job_watchers set notified = 0 where job_id = ?", (int(job_id),))
+            self.conn.execute(
+                "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",
+                (int(job_id), "operator_recovery", detail),
+            )
+            self.conn.commit()
+            return True
         except Exception:
             self.conn.rollback()
             raise
@@ -1091,12 +1437,13 @@ class Store:
             self.conn.execute(
                 """
                 update queue_jobs
-                set status = ?, workflow_state = ?, state_version = ?, last_event = ?, doc_url = ?, checkpoint_json = ?,
+                set status = ?, stage = ?, workflow_state = ?, state_version = ?, last_event = ?, doc_url = ?, checkpoint_json = ?,
                     updated_at = current_timestamp, stage_updated_at = current_timestamp
                 where id = ?
                 """,
                 (
                     queue_status_for_state(state),
+                    legacy_stage_for_state(state),
                     state.value,
                     int(version),
                     event.value,
@@ -1109,11 +1456,18 @@ class Store:
         self.conn.execute(
             """
             update queue_jobs
-            set status = ?, workflow_state = ?, state_version = ?, last_event = ?,
+            set status = ?, stage = ?, workflow_state = ?, state_version = ?, last_event = ?,
                 updated_at = current_timestamp, stage_updated_at = current_timestamp
             where id = ?
             """,
-            (queue_status_for_state(state), state.value, int(version), event.value, int(job_id)),
+            (
+                queue_status_for_state(state),
+                legacy_stage_for_state(state),
+                state.value,
+                int(version),
+                event.value,
+                int(job_id),
+            ),
         )
 
     def _insert_transition_event(self, job_id: int, result, detail: str = "") -> None:
@@ -1167,7 +1521,14 @@ class Store:
             count += 1
         return count
 
-    def list_review_issues(self, limit: int = 50, source_kind: str = "", source_id: str = ""):
+    def list_review_issues(
+        self,
+        limit: int = 50,
+        source_kind: str = "",
+        source_id: str = "",
+        since: str = "",
+        sender_id: str = "",
+    ):
         where = []
         params = []
         if source_kind:
@@ -1176,6 +1537,15 @@ class Store:
         if source_id:
             where.append("source_id = ?")
             params.append(source_id)
+        if since:
+            where.append("created_at >= ?")
+            params.append(since)
+        if sender_id:
+            where.append(
+                "exists (select 1 from usage_events ue where ue.source_kind = review_issues.source_kind "
+                "and ue.source_id = review_issues.source_id and ue.sender_id = ?)"
+            )
+            params.append(sender_id)
         clause = " where " + " and ".join(where) if where else ""
         rows = self.conn.execute(
             f"""

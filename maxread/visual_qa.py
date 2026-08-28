@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import threading
@@ -116,7 +118,14 @@ class VisualRepairRound:
         }
 
 
-_QA_LOCK = threading.BoundedSemaphore(1)
+def _visual_qa_concurrency() -> int:
+    try:
+        return max(1, int(os.environ.get("MAXREAD_VISUAL_QA_CONCURRENCY", "2")))
+    except ValueError:
+        return 2
+
+
+_QA_LOCK = threading.BoundedSemaphore(_visual_qa_concurrency())
 _BLOCK_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "table"}
 _RESOURCE_TAGS = {"img", "source", "whiteboard", "sheet", "bitable", "cite", "synced_reference"}
 _FORMULA_RE = re.compile(r"<latex>(.*?)</latex>", flags=re.S | re.I)
@@ -134,9 +143,9 @@ class VisualQAController:
     def __init__(
         self,
         enabled: bool = False,
-        host: str = "ziplab-5090",
-        runner: str = "/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh",
-        remote_root: str = "/home/lixiaolong/.local/share/maxread-browser",
+        host: str = "",
+        runner: str = "run_visual_qa.sh",
+        remote_root: str = "",
         timeout: int = 90,
         inspect_retries: int = 2,
         max_sections: int = 12,
@@ -146,7 +155,7 @@ class VisualQAController:
         reasoning_effort: str = "high",
     ):
         self.enabled = bool(enabled)
-        self.host = str(host or "ziplab-5090")
+        self.host = str(host or "").strip()
         self.runner = str(runner)
         self.remote_root = str(remote_root).rstrip("/")
         self.timeout = max(15, int(timeout or 90))
@@ -172,9 +181,9 @@ class VisualQAController:
             )
         return cls(
             enabled=getattr(settings, "visual_qa_enabled", False),
-            host=getattr(settings, "visual_qa_host", "ziplab-5090"),
-            runner=getattr(settings, "visual_qa_runner", "/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh"),
-            remote_root=getattr(settings, "visual_qa_remote_root", "/home/lixiaolong/.local/share/maxread-browser"),
+            host=getattr(settings, "visual_qa_host", ""),
+            runner=getattr(settings, "visual_qa_runner", ""),
+            remote_root=getattr(settings, "visual_qa_remote_root", ""),
             timeout=getattr(settings, "visual_qa_timeout", 90),
             inspect_retries=getattr(settings, "visual_qa_inspect_retries", 2),
             max_sections=getattr(settings, "visual_qa_max_sections", 12),
@@ -236,12 +245,31 @@ class VisualQAController:
             if remote.error:
                 result.warnings.append(f"visual-qa:remote-error:{_clip(remote.error)}")
                 break
-            ignored = [finding for finding in remote.findings if _is_nonblocking_visual_finding(finding)]
+            ignored = [
+                finding
+                for finding in remote.findings
+                if _is_nonblocking_visual_finding(
+                    finding,
+                    remote=remote,
+                    api_warnings=initial,
+                    max_sections=self.max_sections,
+                )
+            ]
             if ignored:
                 result.warnings.extend(
-                    _finding_warning("visual-qa", finding, severity="medium") for finding in ignored
+                    _nonblocking_finding_warning(finding, remote, initial, self.max_sections)
+                    for finding in ignored
                 )
-                remote.findings = [finding for finding in remote.findings if not _is_nonblocking_visual_finding(finding)]
+                remote.findings = [
+                    finding
+                    for finding in remote.findings
+                    if not _is_nonblocking_visual_finding(
+                        finding,
+                        remote=remote,
+                        api_warnings=initial,
+                        max_sections=self.max_sections,
+                    )
+                ]
             if not remote.findings:
                 audit_round.status = "passed-with-warnings" if ignored else "passed"
                 break
@@ -280,10 +308,27 @@ class VisualQAController:
             if on_workflow_event is not None:
                 on_workflow_event(WorkflowEvent.VISUAL_RECHECK, f"round={round_index + 1}")
             if not changed:
+                retryable = any(
+                    any(
+                        token in warning
+                        for token in (
+                            "visual-repair:model-call-failed",
+                            "visual-repair:model-fetch-failed",
+                            "visual-repair:model-invalid-json",
+                            "visual-repair:model-invalid-schema",
+                        )
+                    )
+                    for warning in repair_warnings
+                )
+                if retryable and round_index < self.repair_rounds:
+                    audit_round.status = "retryable-failure"
+                    continue
                 result.warnings.extend(_finding_warning("visual-qa", finding) for finding in remote.findings)
                 audit_round.status = "stalled"
                 break
 
+        if result.passed:
+            _cleanup_successful_visual_runs(self.remote_root, result)
         return result
 
     def _repair_remote_findings(
@@ -355,6 +400,17 @@ class VisualQAController:
     ) -> RemoteVisualResult:
         if not self.enabled:
             return RemoteVisualResult(status="disabled")
+        if not self.runner.strip():
+            return RemoteVisualResult(
+                status="error",
+                error="visual QA is enabled but MAXREAD_VISUAL_QA_RUNNER is not configured",
+            )
+        local_hosts = {"", "local", "localhost", "127.0.0.1", "::1", socket.gethostname().lower()}
+        if self.host.strip().lower() not in local_hosts and not self.remote_root:
+            return RemoteVisualResult(
+                status="error",
+                error="remote visual QA requires MAXREAD_VISUAL_QA_REMOTE_ROOT",
+            )
         normalized_url = normalize_doc_url(doc_url)
         if not normalized_url:
             return RemoteVisualResult(status="error", error=f"invalid Feishu doc URL: {_clip(doc_url)}")
@@ -384,7 +440,6 @@ class VisualQAController:
             )
             attempt_timeout = self.timeout if attempt_index == 0 else self.timeout * 2
             try:
-                local_hosts = {"", "local", "localhost", "127.0.0.1", "::1", socket.gethostname().lower()}
                 if self.host.strip().lower() in local_hosts:
                     argv = shlex.split(command)
                 else:
@@ -850,6 +905,7 @@ def _structural_warning_is_repairable(warning: str) -> bool:
             "unsupported-paper-macro",
             "unsupported-tensor-macro",
             "unsupported-position-macro",
+            "internal-display-delimiter",
             "visual-qa:repairable-structural",
         )
     )
@@ -883,6 +939,30 @@ def _remote_to_dict(remote: RemoteVisualResult) -> Dict[str, Any]:
         "raw": dict(remote.raw),
         "error": remote.error,
     }
+
+
+def _cleanup_successful_visual_runs(remote_root: str, result: VisualRepairResult) -> int:
+    """Remove exported PDFs and page images only after final visual success."""
+
+    if not remote_root or not result.passed:
+        return 0
+    runs_root = (Path(remote_root).expanduser().resolve() / "runs").resolve()
+    candidates = set()
+    for audit_round in result.rounds:
+        for screenshot in audit_round.screenshots:
+            try:
+                parent = Path(screenshot).expanduser().resolve().parent
+            except OSError:
+                continue
+            if parent.parent == runs_root:
+                candidates.add(parent)
+    removed = 0
+    for directory in candidates:
+        if not directory.exists() or not directory.is_dir():
+            continue
+        shutil.rmtree(directory)
+        removed += 1
+    return removed
 
 
 def _parse_model_json(text: str) -> Dict[str, Any]:
@@ -951,8 +1031,74 @@ def _visual_finding_feedback(finding: VisualFinding, round_index: int) -> str:
     return f"visual round {round_index}: {finding.kind}: {_clip(finding.detail, 320)}{location}{block}"
 
 
-def _is_nonblocking_visual_finding(finding: VisualFinding) -> bool:
-    return finding.kind in {"table-overflow", "table-clipped", "formula-count-drift"}
+def _is_nonblocking_visual_finding(
+    finding: VisualFinding,
+    remote: Optional[RemoteVisualResult] = None,
+    api_warnings: Iterable[str] = (),
+    max_sections: int = 0,
+) -> bool:
+    if finding.kind in {"table-overflow", "table-clipped", "formula-count-drift", "image-large-white-border"}:
+        return True
+    if finding.kind not in {"missing-formula", "missing-table", "missing-image"}:
+        return False
+    if not _api_verified_count(finding.kind, api_warnings):
+        return False
+    raw = dict((remote.raw if remote else {}) or {})
+    metrics = dict(raw.get("metrics") or {})
+    try:
+        actual = int((finding.data or {}).get("actual") or 0)
+        invalid_formula_count = int(metrics.get("invalid_formula_count") or 0)
+        raw_formatting_count = int(metrics.get("raw_formatting_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    # Feishu virtualizes formulas and tables even on medium documents. The
+    # authoritative API fetch has already verified the full persisted count;
+    # browser DOM counts are useful only alongside an actual render-error
+    # signal. Keep zero-render cases blocking, and keep invalid formulas/raw
+    # Markdown as their own high-severity findings.
+    if actual <= 0:
+        return False
+    if finding.kind == "missing-formula":
+        return invalid_formula_count == 0
+    if finding.kind == "missing-image":
+        findings = list((remote.findings if remote else []) or [])
+        return not any(item.kind == "image-render-failed" for item in findings)
+    return raw_formatting_count == 0
+
+
+def _api_verified_count(kind: str, warnings: Iterable[str]) -> bool:
+    values = [str(item or "") for item in warnings]
+    if any("fetch-failed" in item or "fetch-empty" in item for item in values):
+        return False
+    token = {
+        "missing-formula": "missing-latex",
+        "missing-table": "missing-tables",
+        "missing-image": "marker-left-after-publish",
+    }.get(kind, "")
+    if not token:
+        return False
+    return not any(token in item for item in values)
+
+
+def _nonblocking_finding_warning(
+    finding: VisualFinding,
+    remote: RemoteVisualResult,
+    api_warnings: Iterable[str],
+    max_sections: int,
+) -> str:
+    if finding.kind in {"missing-formula", "missing-table", "missing-image"} and _is_nonblocking_visual_finding(
+        finding,
+        remote=remote,
+        api_warnings=api_warnings,
+        max_sections=max_sections,
+    ):
+        actual = int((finding.data or {}).get("actual") or 0)
+        expected = int((finding.data or {}).get("expected") or 0)
+        return (
+            f"visual-qa:medium:{finding.kind}-sampling-drift:"
+            f"长文抽样 DOM 仅加载 {actual}/{expected}；API 全文结构计数已通过"
+        )
+    return _finding_warning("visual-qa", finding, severity="medium")
 
 
 def _finding_warning(prefix: str, finding: VisualFinding, severity: str = "") -> str:

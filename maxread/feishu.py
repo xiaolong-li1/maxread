@@ -461,6 +461,50 @@ class FeishuClient:
 
         return "\n".join(part for part in parts if part).strip()
 
+    def fetch_related_message_ids(self, event: FeishuEvent) -> List[str]:
+        """Resolve concrete message IDs for a topic without reading its text."""
+        exclude = {str(event.message_id or "")}
+        ids = _related_message_ids(event.raw, exclude=exclude)
+        thread_ids = _related_thread_ids(event.raw)
+        if not thread_ids and event.message_id:
+            try:
+                current = self._json([
+                    self.cli,
+                    "im",
+                    "+messages-mget",
+                    "--as",
+                    self.identity,
+                    "--message-ids",
+                    event.message_id,
+                    "--format",
+                    "json",
+                ]).data
+                thread_ids = _related_thread_ids(current)
+                ids.extend(item for item in _related_message_ids(current, exclude=exclude) if item not in ids)
+            except Exception:
+                pass
+        for thread_id in thread_ids[:3]:
+            try:
+                fetched = self._json([
+                    self.cli,
+                    "im",
+                    "+threads-messages-list",
+                    "--as",
+                    self.identity,
+                    "--thread",
+                    thread_id,
+                    "--sort",
+                    "asc",
+                    "--page-size",
+                    "50",
+                    "--format",
+                    "json",
+                ]).data
+                ids.extend(item for item in _message_ids_from_payload(fetched, exclude=exclude) if item not in ids)
+            except Exception:
+                continue
+        return ids
+
     def event_stream(self) -> Iterator[FeishuEvent]:
         while True:
             proc = subprocess.Popen(
@@ -754,6 +798,18 @@ def _message_texts_from_payload(payload: Any) -> List[str]:
             if text and text not in texts:
                 texts.append(text)
     return texts
+
+
+def _message_ids_from_payload(payload: Any, exclude: set[str] | None = None) -> List[str]:
+    excluded = {item for item in (exclude or set()) if item}
+    ids: List[str] = []
+    for key, value in _iter_key_values(payload):
+        if str(key).lower() != "message_id":
+            continue
+        message_id = str(value or "")
+        if message_id.startswith("om_") and message_id not in excluded and message_id not in ids:
+            ids.append(message_id)
+    return ids
 
 
 def doc_token_from_url(url: str) -> str:

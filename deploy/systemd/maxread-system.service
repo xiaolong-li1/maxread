@@ -1,0 +1,18 @@
+[Unit]
+Description=MaxRead Feishu listener (system service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__INSTALL_DIR__
+Environment=HOME=__SERVICE_HOME__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__INSTALL_DIR__/run-listener.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

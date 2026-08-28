@@ -54,9 +54,11 @@ def polish_markdown(
     markdown = compile_formula_markup(markdown).text
     markdown = _flatten_nested_latex_wrappers(markdown)
     markdown = _restore_code_like_latex(markdown)
+    markdown = _normalize_escaped_currency(markdown)
     markdown = _normalize_backticked_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _normalize_display_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _normalize_inline_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
+    markdown = _split_adjacent_markdown_tables(markdown)
     markdown = _normalize_table_math(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _sanitize_latex_blocks(markdown, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
     markdown = _replace_breaks_outside_latex(markdown)
@@ -66,6 +68,29 @@ def polish_markdown(
     markdown = _flatten_nested_latex_wrappers(markdown)
     markdown = re.sub(r"\n{3,}", "\n\n", markdown)
     return markdown.strip() + "\n"
+
+
+def _split_adjacent_markdown_tables(markdown: str) -> str:
+    """Insert a blank line when a second table starts without a separator."""
+    output: List[str] = []
+    seen_separator = False
+    for line in str(markdown or "").splitlines():
+        stripped = line.strip()
+        table_row = _looks_like_table_row(line)
+        separator = bool(re.fullmatch(r"\|?[\s:|\-]+\|?", stripped)) if table_row else False
+        if separator and seen_separator and output and _looks_like_table_row(output[-1]):
+            header = output.pop()
+            if output and output[-1].strip():
+                output.append("")
+            output.extend([header, line])
+            seen_separator = True
+            continue
+        output.append(line)
+        if separator:
+            seen_separator = True
+        elif not table_row:
+            seen_separator = False
+    return "\n".join(output)
 
 
 def _flatten_nested_latex_wrappers(markdown: str) -> str:
@@ -87,6 +112,8 @@ def _normalize_backticked_math(
 ) -> str:
     def repl(match: re.Match[str]) -> str:
         raw = match.group(1).strip()
+        if _looks_like_currency_code(raw):
+            return match.group(0)
         if _looks_like_code_identifier(raw):
             return match.group(0)
         if not _looks_like_math_code(raw):
@@ -147,7 +174,12 @@ def _looks_like_code_identifier(text: str) -> bool:
     if root in _MATH_SNAKE_PREFIXES or name.lower() in _MATH_FUNCTION_NAMES:
         return False
     segments = name.split("_")
-    descriptive_snake_case = len(segments) >= 2 and all(len(segment) >= 2 for segment in segments)
+    descriptive_segments = sum(len(segment) >= 2 for segment in segments)
+    descriptive_snake_case = (
+        len(segments) >= 2
+        and descriptive_segments >= 2
+        and all(segment.isalnum() for segment in segments)
+    )
     call_with_code_argument = arguments is not None and "_" in arguments and len(name) >= 3
     return descriptive_snake_case or call_with_code_argument
 
@@ -231,8 +263,178 @@ def figure_prompt_lines(inserts: List[Tuple[str, Path, str]], visual_description
     for marker, path, caption in inserts:
         visual = visual_descriptions.get(marker, "").strip()
         suffix = f" visual：{visual}" if visual else ""
+        if str(caption or "").startswith("并列图组"):
+            suffix += " layout：panel 说明已内嵌，正文只写图组共同结论"
         lines.append(f"- {marker} 文件：{path.as_posix()} caption：{caption or path.stem}{suffix}")
     return lines
+
+
+def compose_related_figure_groups(
+    inserts: List[Tuple[str, Path, str]],
+    visual_descriptions: Optional[Dict[str, str]] = None,
+) -> Tuple[List[Tuple[str, Path, str]], Dict[str, str]]:
+    """Combine adjacent, semantically related figures into readable pairs."""
+    visuals = dict(visual_descriptions or {})
+    output: List[Tuple[str, Path, str]] = []
+    grouped_visuals: Dict[str, str] = {}
+    index = 0
+    while index < len(inserts):
+        current = inserts[index]
+        if index + 1 >= len(inserts):
+            output.append(current)
+            if current[0] in visuals:
+                grouped_visuals[current[0]] = visuals[current[0]]
+            break
+        following = inserts[index + 1]
+        if not _should_group_related_figures(current, following, visuals):
+            output.append(current)
+            if current[0] in visuals:
+                grouped_visuals[current[0]] = visuals[current[0]]
+            index += 1
+            continue
+        marker_a, path_a, caption_a = current
+        marker_b, path_b, caption_b = following
+        group_dir = Path(path_a).parent / "related_groups"
+        group_path = group_dir / f"{_safe_stem(Path(path_a).stem)}--{_safe_stem(Path(path_b).stem)}.png"
+        labels = [
+            _related_panel_label(visuals.get(marker_a, ""), caption_a, Path(path_a), 0),
+            _related_panel_label(visuals.get(marker_b, ""), caption_b, Path(path_b), 1),
+        ]
+        composed = _compose_related_pair(Path(path_a), Path(path_b), group_path, labels)
+        if composed is None:
+            output.append(current)
+            if marker_a in visuals:
+                grouped_visuals[marker_a] = visuals[marker_a]
+            index += 1
+            continue
+        marker_index = re.search(r"\[MaxReadFigure:(\d+):", marker_a)
+        ordinal = marker_index.group(1) if marker_index else str(len(output) + 1)
+        marker = f"[MaxReadFigure:{ordinal}:related-{_safe_stem(Path(path_a).stem)}-{_safe_stem(Path(path_b).stem)}]"
+        caption = f"并列图组：(a) {caption_a[:260]}；(b) {caption_b[:260]}"
+        output.append((marker, composed, caption))
+        grouped_visuals[marker] = (
+            f"(a) {visuals.get(marker_a, caption_a)}；(b) {visuals.get(marker_b, caption_b)}"
+        )[:480]
+        index += 2
+    return output, grouped_visuals
+
+
+_RELATED_FIGURE_STOPWORDS = {
+    "figure", "fig", "shows", "showing", "results", "result", "comparison", "different",
+    "proposed", "method", "model", "models", "visual", "image", "images", "plot", "plots",
+    "performance", "example", "examples", "using", "with", "from", "under", "across", "our",
+}
+
+
+def _should_group_related_figures(a, b, visuals: Dict[str, str]) -> bool:
+    marker_a, path_a, caption_a = a
+    marker_b, path_b, caption_b = b
+    target_a = _figure_section_target(Path(path_a), caption_a, visuals.get(marker_a, ""))
+    target_b = _figure_section_target(Path(path_b), caption_b, visuals.get(marker_b, ""))
+    if target_a and target_b and target_a != target_b:
+        return False
+    tokens_a = _figure_relation_tokens(Path(path_a), caption_a, visuals.get(marker_a, ""))
+    tokens_b = _figure_relation_tokens(Path(path_b), caption_b, visuals.get(marker_b, ""))
+    common = tokens_a & tokens_b
+    required = 2 if target_a or target_b else 3
+    return len(common) >= required
+
+
+def _figure_relation_tokens(path: Path, caption: str, visual: str) -> set[str]:
+    text = f"{path.stem} {caption} {visual}".lower().replace("_", " ").replace("-", " ")
+    return {
+        token for token in re.findall(r"[a-z0-9]{3,}", text)
+        if token not in _RELATED_FIGURE_STOPWORDS and not token.isdigit()
+    }
+
+
+def _related_panel_label(visual: str, caption: str, path: Path, index: int) -> str:
+    has_cjk_font = bool(_cjk_figure_font_path())
+    if has_cjk_font:
+        text = re.sub(r"\s+", " ", str(visual or "")).strip()
+        if not text:
+            text = display_caption(caption, path, max_chars=30)
+    else:
+        text = _plain_english_panel_label(caption, path)
+    text = re.sub(r"^(?:图中|该图|这张图)(?:展示|显示|给出|对比)?", "", text).strip(" ：:。")
+    text = re.split(r"[。；;]", text, maxsplit=1)[0].strip()
+    max_chars = 30 if has_cjk_font else 48
+    if len(text) > max_chars:
+        text = text[: max_chars - 2].rstrip() + "..."
+    letter = chr(ord("a") + index)
+    return f"({letter}) {text or display_caption(caption, path, max_chars=26)}"
+
+
+def _plain_english_panel_label(caption: str, path: Path) -> str:
+    text = re.sub(r"\\[A-Za-z]+\s*(?:\{([^{}]*)\})?", lambda match: match.group(1) or "", str(caption or ""))
+    text = re.sub(r"[^\x20-\x7E]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" .:;")
+    text = re.split(r"[.;]", text, maxsplit=1)[0].strip()
+    if not text:
+        text = re.sub(r"[_-]+", " ", path.stem).strip()
+    return text[:44].rstrip() + ("..." if len(text) > 44 else "")
+
+
+def _compose_related_pair(path_a: Path, path_b: Path, output_path: Path, labels: List[str]) -> Optional[Path]:
+    try:
+        from PIL import Image, ImageDraw
+    except Exception:
+        return None
+    try:
+        opened = [Image.open(path).convert("RGBA") for path in (path_a, path_b)]
+        ratios = [image.width / max(1, image.height) for image in opened]
+        horizontal = max(ratios) < 1.8
+        gap = 28
+        padding = 24
+        label_height = 78
+        font = _figure_label_font()
+        if horizontal:
+            cell_width = 1080
+            rendered = []
+            heights = []
+            for image in opened:
+                scale = min(cell_width / image.width, 900 / image.height)
+                resized = image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))), Image.LANCZOS)
+                rendered.append(resized)
+                heights.append(resized.height)
+            card_height = max(heights) + label_height + padding * 2
+            width = cell_width * 2 + gap + padding * 2
+            height = card_height
+            canvas = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+            draw = ImageDraw.Draw(canvas)
+            for idx, image in enumerate(rendered):
+                x0 = padding + idx * (cell_width + gap)
+                draw.rounded_rectangle((x0, 0, x0 + cell_width, card_height - 1), radius=10, fill=(247, 247, 246, 255))
+                image_x = x0 + (cell_width - image.width) // 2
+                image_y = padding + (max(heights) - image.height) // 2
+                canvas.alpha_composite(image, (image_x, image_y))
+                if font:
+                    _draw_centered_text(draw, labels[idx], x0 + 12, padding + max(heights), cell_width - 24, label_height, font)
+        else:
+            cell_width = 1800
+            rendered = []
+            for image in opened:
+                scale = min(cell_width / image.width, 900 / image.height)
+                rendered.append(image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))), Image.LANCZOS))
+            card_heights = [image.height + label_height + padding * 2 for image in rendered]
+            width = cell_width + padding * 2
+            height = sum(card_heights) + gap
+            canvas = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+            draw = ImageDraw.Draw(canvas)
+            y0 = 0
+            for idx, image in enumerate(rendered):
+                card_height = card_heights[idx]
+                draw.rounded_rectangle((padding, y0, padding + cell_width, y0 + card_height - 1), radius=10, fill=(247, 247, 246, 255))
+                image_x = padding + (cell_width - image.width) // 2
+                canvas.alpha_composite(image, (image_x, y0 + padding))
+                if font:
+                    _draw_centered_text(draw, labels[idx], padding + 12, y0 + padding + image.height, cell_width - 24, label_height, font)
+                y0 += card_height + gap
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.convert("RGB").save(output_path, format="PNG", optimize=True)
+        return output_path
+    except Exception:
+        return None
 
 
 def markdown_to_docx_xml(
@@ -267,12 +469,14 @@ def markdown_to_docx_xml(
             level = min(len(match.group(1)), 6)
             if not xml_parts and level == 1:
                 xml_parts.append(f"<title>{_inline_xml(match.group(2))}</title>")
-            xml_parts.append(f"<h{level}>{_inline_xml(match.group(2))}</h{level}>")
+            else:
+                xml_parts.append(f"<h{level}>{_inline_xml(match.group(2))}</h{level}>")
         elif match := re.match(r"^(#{1,6})\s+([^\n]+)\n(.+)$", stripped, flags=re.S):
             level = min(len(match.group(1)), 6)
             if not xml_parts and level == 1:
                 xml_parts.append(f"<title>{_inline_xml(match.group(2))}</title>")
-            xml_parts.append(f"<h{level}>{_inline_xml(match.group(2))}</h{level}>")
+            else:
+                xml_parts.append(f"<h{level}>{_inline_xml(match.group(2))}</h{level}>")
             rest = re.sub(r"\n+", "<br/>", match.group(3).strip())
             if rest:
                 xml_parts.append(f"<p>{_inline_xml(rest)}</p>")
@@ -437,6 +641,11 @@ def _caption_keyword_title(text: str, image_path: Path | str | None = None) -> s
         ("overview", "整体设计图"),
         ("attention", "注意力对比图"),
         ("ablation", "消融实验图"),
+        ("token reduction", "视觉 Token 削减性能图"),
+        ("visual-token reduction", "视觉 Token 削减性能图"),
+        ("different visual-token", "跨预算性能图"),
+        ("accuracy", "精度对比图"),
+        ("performance", "性能对比图"),
         ("speed", "速度与性能对比图"),
         ("memory", "显存与性能对比图"),
         ("perplexity", "困惑度结果图"),
@@ -650,8 +859,38 @@ def _normalize_inline_math(
             return match.group(0)
         return f"<latex>{body}</latex>"
 
-    markdown = re.sub(r"\\\((.{1,240}?)\\\)", repl, markdown)
-    return re.sub(r"(?<!\$)\$([^\n$]{1,240})\$(?!\$)", repl, markdown)
+    parts = re.split(r"(<latex>.*?</latex>|`[^`\n]*`)", str(markdown or ""), flags=re.S | re.I)
+    for index in range(0, len(parts), 2):
+        segment = re.sub(r"\\\((.{1,240}?)\\\)", repl, parts[index])
+        parts[index] = re.sub(r"(?<![\\$])\$([^\n$]{1,240})(?<!\\)\$(?!\$)", repl, segment)
+    return "".join(parts)
+
+
+def _looks_like_currency_code(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(
+        re.fullmatch(r"\$(?:[A-Za-z][A-Za-z0-9._/-]*|\d+(?:\.\d+)?(?:/[A-Za-z0-9._/-]+)?)", text)
+        or re.fullmatch(r"(?i)Perf/\$", text)
+    )
+
+
+def _normalize_escaped_currency(markdown: str) -> str:
+    r"""Keep Markdown currency escapes out of the inline-math lexer.
+
+    Models correctly use ``\$`` for labels such as ``$Total`` and ``Perf/$``.
+    Treating two escaped currency signs as math delimiters can consume an
+    entire sentence or merge two table columns into one invalid formula.
+    """
+    parts = re.split(r"(<latex>.*?</latex>|`[^`\n]*`)", str(markdown or ""), flags=re.S | re.I)
+    for index in range(0, len(parts), 2):
+        segment = re.sub(r"(?i)\bPerf/\\\$", "`Perf/$`", parts[index])
+        segment = re.sub(
+            r"\\\$([A-Za-z0-9][A-Za-z0-9._/\-–]*)",
+            lambda match: f"`{match.group(0)[1:]}`",
+            segment,
+        )
+        parts[index] = segment.replace(r"\$", "`$`")
+    return "".join(parts)
 
 
 _NUMBER_TOKEN = r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)"
@@ -669,6 +908,14 @@ def _normalize_table_math(
     latex_arg_macros: Optional[Dict[str, str]] = None,
 ) -> str:
     """Compile un-delimited numeric uncertainty notation inside Markdown tables."""
+
+    def normalize_formula_pipes(line: str) -> str:
+        def repl(match: re.Match[str]) -> str:
+            body = match.group(1).replace(r"\|", r"\vert ")
+            body = body.replace("|", r"\vert ")
+            return f"<latex>{body}</latex>"
+
+        return re.sub(r"<latex>(.*?)</latex>", repl, line, flags=re.S | re.I)
 
     def normalize_cell(cell: str) -> str:
         parts = re.split(r"(<latex>.*?</latex>|`[^`\n]*`)", cell, flags=re.S | re.I)
@@ -692,6 +939,10 @@ def _normalize_table_math(
         if not _looks_like_table_row(line) or re.fullmatch(r"\|?[\s:|\-]+\|?", line.strip()):
             lines.append(line)
             continue
+        # Raw absolute-value/set-builder bars inside a formula are valid TeX
+        # but our Markdown table parser would treat them as cell delimiters.
+        # Compile them before splitting the row so the formula stays atomic.
+        line = normalize_formula_pipes(line)
         cells = line.split("|")
         lines.append("|".join(normalize_cell(cell) for cell in cells))
     return "\n".join(lines)
@@ -710,10 +961,13 @@ def _normalize_latex_body(
     body = _repair_split_latex_commands(body)
     body = _strip_latex_publish_metadata(body)
     body = _normalize_paper_math_macros(body)
+    body = _repair_latex_delimiter_corruption(body)
     body = _normalize_fused_latex_accents(body)
     body = _normalize_latex_text_macros(body)
     body = _normalize_boldsymbol(body)
     body = _normalize_latex_control_spaces(body)
+    body = _normalize_latex_delimiter_sizing(body)
+    body = _repair_internal_display_delimiters(body)
     body = _repair_cases_missing_row_breaks(body)
     body = re.sub(r"\\bm\s*\{([^{}]+)\}", r"\\mathbf{\1}", body)
     body = re.sub(r"\\bm([A-Za-z])(?=[^A-Za-z]|$)", r"\\mathbf{\1}", body)
@@ -737,6 +991,14 @@ def _normalize_latex_body(
     body = re.sub(r"(\d+)\\mathrm\{e\}\{(-?\d+)\}", r"\1\\times10^{\2}", body)
     body = re.sub(r"(\d+)\\mathrm\{e\}\s*([+-]\d+)", r"\1\\times10^{\2}", body)
     return body
+
+
+def _normalize_latex_delimiter_sizing(body: str) -> str:
+    """Downgrade delimiter sizing commands unsupported by Feishu formulas."""
+    text = str(body or "")
+    text = re.sub(r"\\middle\s*(?:\\vert|\\\||\|)", r"\\mid ", text)
+    text = re.sub(r"\\(?:big|Big|bigg|Bigg)\s*(?=[()\[\]{}|]|\\[{}|])", "", text)
+    return text
 
 
 def _decode_latex_html(body: str) -> str:
@@ -890,6 +1152,29 @@ def _repair_cases_missing_row_breaks(body: str) -> str:
     return re.sub(r"\\begin\{cases\}(.*?)\\end\{cases\}", repl, body, flags=re.S)
 
 
+def _repair_internal_display_delimiters(body: str) -> str:
+    """Turn a model's ``\\[4pt]`` row separator into valid LaTeX.
+
+    Display delimiters are not valid inside a Feishu formula body. Models
+    sometimes drop one backslash from the usual ``\\\\[4pt]`` cases row break,
+    leaving the visually similar but invalid ``\\[4pt]`` sequence.
+    """
+
+    def row_break(match: re.Match[str]) -> str:
+        spacing = re.sub(r"\s+", "", match.group(1))
+        return rf"\\[{spacing}]"
+
+    repaired = re.sub(
+        r"(?<!\\)\\\[\s*([0-9]+(?:\.[0-9]+)?\s*(?:pt|em|ex|mm|cm|in|bp|dd|cc|sp))\s*\]",
+        row_break,
+        str(body or ""),
+    )
+    # A bare display delimiter can only be a wrapper leak once the content is
+    # already inside <latex>; remove the delimiters while preserving the math.
+    repaired = re.sub(r"(?<!\\)\\\]", "", repaired)
+    return repaired
+
+
 def _normalize_latex_control_spaces(body: str) -> str:
     return re.sub(r"(?<!\\)\\(?!\\)\s+", " ", body)
 
@@ -949,18 +1234,43 @@ def _replace_simple_latex_command(body: str, command: str, repl) -> str:
 
 
 def _normalize_paper_math_macros(body: str) -> str:
+    # ``\cal`` is a TeX declaration rather than a portable command.  Paper
+    # sources commonly emit ``{\cal T}``/``{\cal S}``; Feishu's formula
+    # renderer accepts the explicit braced form but marks the declaration as
+    # an invalid formula in the real document.
+    body = re.sub(r"(?<![_^])\{\s*\\cal\s*\{([^{}]+)\}\s*\}", r"\\mathcal{\1}", body)
+    body = re.sub(r"(?<![_^])\{\s*\\cal\s+([A-Za-z])\s*\}", r"\\mathcal{\1}", body)
+    body = re.sub(r"\\cal\s*\{([^{}]+)\}", r"\\mathcal{\1}", body)
+    body = re.sub(r"\\cal\s+([A-Za-z])", r"\\mathcal{\1}", body)
+    body = re.sub(r"\\cal([A-Za-z])", r"\\mathcal{\1}", body)
     body = re.sub(r"\\mathsfit\s*\{([^{}]+)\}", r"\\mathbf{\1}", body)
     body = re.sub(r"\\(?:tens|etens)\s*\{([^{}]+)\}", r"\\mathbf{\1}", body)
     for command in ("matrix", "vector"):
         body = _replace_simple_latex_command(body, command, lambda content: rf"\mathbf{{{content.strip()}}}")
     body = _replace_simple_latex_command(body, "tr", _transpose_latex_content)
-    body = re.sub(r"\\rv([A-Za-z]+)(?=[^A-Za-z]|$)", lambda m: _styled_macro(m.group(1), "mathbf"), body)
+    body = re.sub(r"\\rv(?!ert\b)([A-Za-z]+)(?=[^A-Za-z]|$)", lambda m: _styled_macro(m.group(1), "mathbf"), body)
     body = re.sub(r"\\rm([A-Z])(?=[^A-Za-z]|$)", r"\\mathbf{\1}", body)
     body = re.sub(r"\\erv([A-Za-z])(?=[^A-Za-z]|$)", r"\\mathrm{\1}", body)
     body = re.sub(r"\\erm([A-Za-z])(?=[^A-Za-z]|$)", r"\\mathrm{\1}", body)
     body = re.sub(r"\\et([A-Z][A-Za-z]*)(?=[^A-Za-z]|$)", lambda m: _styled_macro(m.group(1), "mathbf"), body)
     body = re.sub(r"\\t([A-Z][A-Za-z]*)(?=[^A-Za-z]|$)", lambda m: _styled_macro(m.group(1), "mathbf"), body)
     return body
+
+
+def _repair_latex_delimiter_corruption(body: str) -> str:
+    r"""Recover ``\rvert`` when a paper-vector macro consumed its prefix.
+
+    The legacy ``\rvName`` normalizer used to read ``\rvert`` as ``\rv`` +
+    ``ert`` and emit ``\mathbf{ert}``.  Only reverse that artifact when an
+    unmatched left delimiter proves the intended role.
+    """
+    text = str(body or "")
+    missing = text.count(r"\lvert") - text.count(r"\rvert")
+    for _ in range(max(0, missing)):
+        if r"\mathbf{ert}" not in text:
+            break
+        text = text.replace(r"\mathbf{ert}", r"\rvert", 1)
+    return text
 
 
 def _transpose_latex_content(content: str) -> str:
@@ -1065,11 +1375,15 @@ def _is_valid_latex_body(body: str) -> bool:
         return False
     if _latex_command_count(text, "left") != _latex_command_count(text, "right"):
         return False
+    if _latex_command_count(text, "lvert") != _latex_command_count(text, "rvert"):
+        return False
     if re.search(r"\\(?:def|newcommand|renewcommand|usepackage|RequirePackage)\b", text):
         return False
     if re.search(r"\\(?:begin|end)\s*\{(?!aligned|align|array|matrix|pmatrix|bmatrix|cases)[^{}]+\}", text):
         return False
     if re.search(r"\\(?:qquad|quad)[A-Za-z]", text):
+        return False
+    if re.search(r"(?<!\\)\\(?:\[|\])", text):
         return False
     if re.search(r"\\rm\b", text):
         return False
@@ -1106,7 +1420,7 @@ def _strip_latex_for_text(body: str) -> str:
     return text.replace("`", "'")
 
 
-def prepare_key_figures(bundle: PaperBundle, max_figures: int = 5) -> List[Tuple[Path, str]]:
+def prepare_key_figures(bundle: PaperBundle, max_figures: Optional[int] = None) -> List[Tuple[Path, str]]:
     if not bundle.source_dir:
         return []
     output_dir = bundle.source_dir.parent / "rendered_figures"
@@ -1141,7 +1455,8 @@ def prepare_key_figures(bundle: PaperBundle, max_figures: int = 5) -> List[Tuple
             continue
         seen_paths.add(resolved)
         unique_candidates.append((path, caption))
-    return _render_key_figure_candidates(unique_candidates, output_dir, max_figures)
+    limit = len(unique_candidates) if max_figures is None else max(0, int(max_figures))
+    return _render_key_figure_candidates(unique_candidates, output_dir, limit)
 
 
 def _render_key_figure_candidates(candidates: List[Tuple[Path, str]], output_dir: Path, max_figures: int) -> List[Tuple[Path, str]]:
@@ -1254,7 +1569,11 @@ def _figure_section_target(path: Path, caption: str = "", visual_description: st
         "detach", "sliding-window", "消融", "敏感", "附录", "失败",
     )):
         return "analysis"
-    if any(word in text for word in ("experiment", "benchmark", "comparison", "result", "quality", "validation", "accuracy", "loss", "rank", "实验", "结果", "对比", "指标")):
+    if any(word in text for word in (
+        "experiment", "benchmark", "comparison", "result", "quality", "validation",
+        "accuracy", "aggregate performance", "performance under", "acc_vs", "acc-vs",
+        "loss", "rank", "实验", "结果", "对比", "指标",
+    )):
         return "experiments"
     if any(word in text for word in ("overview", "workflow", "framework", "architecture", "mechanism", "attention", "pipeline", "流程", "架构", "框架", "机制")):
         return "method"
@@ -1299,6 +1618,8 @@ def _grouped_figure_items(bundle: PaperBundle, output_dir: Path) -> dict[str, li
         return {"figures": [], "skip": []}
     by_key: dict[tuple[str, int, str, str], List[PaperFigure]] = defaultdict(list)
     for figure in bundle.source_figures:
+        if _is_appendix_asset(bundle.source_dir / figure.asset, figure):
+            continue
         if not figure.label or not figure.caption:
             continue
         by_key[(figure.tex_file, figure.figure_index, figure.label, figure.caption)].append(figure)
@@ -1316,13 +1637,18 @@ def _grouped_figure_items(bundle: PaperBundle, output_dir: Path) -> dict[str, li
             rendered = _render_asset(path, output_dir)
             if rendered:
                 items.append((rendered, figure))
-        if len(items) < 2 or len(items) > 16:
+        if len(items) < 2 or len(items) > 36:
             continue
         output_path = output_dir / f"{_safe_stem(label)}.png"
         if _should_compose_as_grid(items):
             composed = _compose_grid_figure(items, output_path, caption)
         else:
-            composed = _compose_horizontal_figure([path for path, _figure in items], output_path, caption)
+            composed = _compose_horizontal_figure(
+                [path for path, _figure in items],
+                output_path,
+                caption,
+                figures=[figure for _path, figure in items],
+            )
         if composed:
             ranks = [_figure_rank(path, figure) for path, figure in items]
             rank = min(ranks) if ranks else (20, 0, str(composed))
@@ -1330,7 +1656,12 @@ def _grouped_figure_items(bundle: PaperBundle, output_dir: Path) -> dict[str, li
             skip.extend((bundle.source_dir / figure.asset, caption) for _path, figure in items)
     return {"figures": figures, "skip": skip}
 
-def _compose_horizontal_figure(paths: List[Path], output_path: Path, caption: str = "") -> Optional[Path]:
+def _compose_horizontal_figure(
+    paths: List[Path],
+    output_path: Path,
+    caption: str = "",
+    figures: Optional[List[PaperFigure]] = None,
+) -> Optional[Path]:
     try:
         from PIL import Image, ImageDraw, ImageFont
     except Exception:
@@ -1345,7 +1676,9 @@ def _compose_horizontal_figure(paths: List[Path], output_path: Path, caption: st
         for image in images:
             width = max(1, round(image.width * target_height / image.height))
             resized.append(image.resize((width, target_height), Image.LANCZOS))
-        labels = _side_labels_from_caption(caption, len(resized))
+        labels = _panel_labels(figures or [])
+        if len(labels) != len(resized):
+            labels = _side_labels_from_caption(caption, len(resized))
         gap = max(24, target_height // 30)
         padding = gap
         label_height = 58 if labels else 0
@@ -1360,12 +1693,12 @@ def _compose_horizontal_figure(paths: List[Path], output_path: Path, caption: st
                 label = labels[index]
                 bbox = draw.textbbox((0, 0), label, font=font)
                 text_x = x + max(0, (image.width - (bbox[2] - bbox[0])) // 2)
-                draw.text((text_x, padding // 2), label, fill=(20, 20, 20, 255), font=font)
-            canvas.alpha_composite(image, (x, padding + label_height))
+                draw.text((text_x, padding + target_height + 8), label, fill=(20, 20, 20, 255), font=font)
+            canvas.alpha_composite(image, (x, padding))
             x += image.width + gap
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        canvas.convert("RGB").save(output_path)
-        return output_path
+        canvas.convert("RGB").save(output_path, format="PNG", optimize=True)
+        return constrain_rendered_image(output_path)
     except Exception:
         return None
 
@@ -1408,13 +1741,19 @@ def _compose_grid_figure(items: List[Tuple[Path, PaperFigure]], output_path: Pat
 
         col_labels = _grid_column_labels([(path, figure, row, col) for _image, path, figure, row, col in opened], cols)
         row_labels = _grid_row_labels([(path, figure, row, col) for _image, path, figure, row, col in opened], rows)
+        panel_labels = {
+            (row, col): label
+            for (_image, _path, figure, row, col), label in zip(resized, _panel_labels([item[2] for item in resized]))
+            if label
+        }
         font = _figure_label_font()
         gap = 18 if cols >= 4 else 24
         padding = gap
         header_height = 48 if col_labels else 0
         row_label_width = 128 if row_labels else 0
         width = row_label_width + cols * cell_width + (cols - 1) * gap + padding * 2
-        height = header_height + sum(row_heights) + (rows - 1) * gap + padding * 2
+        panel_label_heights = [58 if any((row, col) in panel_labels for col in range(cols)) else 0 for row in range(rows)]
+        height = header_height + sum(row_heights) + sum(panel_label_heights) + (rows - 1) * gap + padding * 2
         canvas = Image.new("RGBA", (width, height), (255, 255, 255, 255))
         draw = ImageDraw.Draw(canvas)
 
@@ -1435,12 +1774,15 @@ def _compose_grid_figure(items: List[Tuple[Path, PaperFigure]], output_path: Pat
                 if image:
                     image_y = y + max(0, (row_heights[row] - image.height) // 2)
                     canvas.alpha_composite(image, (x, image_y))
+                label = panel_labels.get((row, col), "")
+                if label and font:
+                    _draw_centered_text(draw, label, x, y + row_heights[row], cell_width, panel_label_heights[row], font)
                 x += cell_width + gap
-            y += row_heights[row] + gap
+            y += row_heights[row] + panel_label_heights[row] + gap
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        canvas.convert("RGB").save(output_path)
-        return output_path
+        canvas.convert("RGB").save(output_path, format="PNG", optimize=True)
+        return constrain_rendered_image(output_path)
     except Exception:
         return None
 
@@ -1579,19 +1921,52 @@ def _side_labels_from_caption(caption: str, count: int) -> List[str]:
     return labels[:2] if len(labels) >= 2 else []
 
 
+def _panel_labels(figures: List[PaperFigure]) -> List[str]:
+    if not figures or not any(str(figure.panel_caption or "").strip() for figure in figures):
+        return []
+    labels: List[str] = []
+    for index, figure in enumerate(figures):
+        caption = re.sub(r"\s+", " ", str(figure.panel_caption or "")).strip()
+        if not caption:
+            labels.append("")
+            continue
+        if re.match(r"^\s*\([a-z]\)", caption, re.I):
+            labels.append(caption)
+        else:
+            letter = chr(ord("a") + index) if index < 26 else str(index + 1)
+            labels.append(f"({letter}) {caption}")
+    return labels
+
+
 def _figure_label_font():
     try:
         from PIL import ImageFont
+        cjk = _cjk_figure_font_path()
         for path in [
+            cjk,
             "/System/Library/Fonts/Supplemental/Arial.ttf",
             "/Library/Fonts/Arial.ttf",
             "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         ]:
-            if Path(path).exists():
+            if path and Path(path).exists():
                 return ImageFont.truetype(path, 32)
         return ImageFont.load_default()
     except Exception:
         return None
+
+
+def _cjk_figure_font_path() -> str:
+    for path in (
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+    ):
+        if Path(path).exists():
+            return path
+    return ""
 
 
 def _safe_stem(text: str) -> str:
@@ -1625,6 +2000,8 @@ def _ranked_figure_assets(bundle: PaperBundle) -> List[Path]:
         path = bundle.source_dir / figure.asset
         if not path.exists() or path in seen:
             continue
+        if _is_appendix_asset(path, figure):
+            continue
         if _is_non_content_asset(path, figure.caption, figure):
             continue
         label = figure.label or ""
@@ -1635,8 +2012,16 @@ def _ranked_figure_assets(bundle: PaperBundle) -> List[Path]:
         seen.add(path)
         if label:
             label_counts[label] = label_counts.get(label, 0) + 1
-    fallback = [bundle.source_dir / asset for asset in bundle.source_assets]
-    fallback = [path for path in fallback if path.exists() and path not in seen and not _is_non_content_asset(path, "", None)]
+    fallback = []
+    if not bundle.source_figures:
+        fallback = [bundle.source_dir / asset for asset in bundle.source_assets]
+        fallback = [
+            path for path in fallback
+            if path.exists()
+            and path not in seen
+            and not _is_appendix_asset(path, None)
+            and not _is_non_content_asset(path, "", None)
+        ]
     ranked.extend((_figure_rank(path, None), path) for path in fallback)
     ranked.sort(key=lambda item: item[0])
     return [path for _rank, path in ranked]
@@ -1681,7 +2066,7 @@ def _is_appendix_asset(path: Path, figure: Optional[PaperFigure]) -> bool:
     parts = {part.lower() for part in path.parts}
     label = (figure.label or "").lower() if figure else ""
     tex_file = (figure.tex_file or "").lower() if figure else ""
-    return "appendix" in parts or "appendix" in label or "appendix" in tex_file
+    return bool(getattr(figure, "is_appendix", False)) or "appendix" in parts or "appendix" in label or "appendix" in tex_file
 
 
 def _is_gallery_figure(path: Path, figure: Optional[PaperFigure]) -> bool:
@@ -1704,7 +2089,10 @@ def _is_non_content_asset(path: Path, caption: str = "", figure: Optional[PaperF
     stem = path.stem.lower()
     label = (figure.label or "").lower() if figure else ""
     caption_text = (caption or "").strip().lower()
-    if any(part in text for part in ("/assets/", "/logo/", "/logos/", "/brand/", "/icon/", "/icons/")):
+    # A paper may keep real figures under e.g. ``presentation/assets``.
+    # Only unreferenced assets are treated as decorative resources; a figure
+    # declaration from TeX is stronger evidence than the directory name.
+    if figure is None and any(part in text for part in ("/assets/", "/logo/", "/logos/", "/brand/", "/icon/", "/icons/")):
         return True
     if stem in {"logo", "mm", "minimax", "brand", "icon", "favicon"}:
         return True
@@ -1731,8 +2119,8 @@ def _render_asset(path: Path, output_dir: Path) -> Optional[Path]:
     if suffix not in {".pdf", ".eps", ".ps"}:
         return None
     out_png = output_dir / f"{path.stem}.png"
-    if out_png.exists() and out_png.stat().st_size > 0:
-        return out_png
+    if out_png.exists() and out_png.stat().st_size > 0 and _has_sufficient_pdf_resolution(out_png):
+        return constrain_rendered_image(out_png)
     if suffix in {".eps", ".ps"}:
         return _render_postscript_with_ghostscript(path, out_png)
     qlmanage = shutil.which("qlmanage")
@@ -1740,41 +2128,58 @@ def _render_asset(path: Path, output_dir: Path) -> Optional[Path]:
         tmp_dir = output_dir / f"{path.stem}_thumb"
         shutil.rmtree(tmp_dir, ignore_errors=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            [qlmanage, "-t", "-s", "1400", "-o", str(tmp_dir), str(path)],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=30,
-        )
-        generated = list(tmp_dir.glob("*.png")) if result.returncode == 0 else []
+        try:
+            result = subprocess.run(
+                [qlmanage, "-t", "-s", "1400", "-o", str(tmp_dir), str(path)],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            result = None
+        generated = list(tmp_dir.glob("*.png")) if result is not None and result.returncode == 0 else []
         if generated:
             shutil.copyfile(generated[0], out_png)
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            return out_png
+            return constrain_rendered_image(out_png)
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     pdftoppm = shutil.which("pdftoppm")
     if pdftoppm:
         prefix = output_dir / f"{path.stem}__pdftoppm"
-        result = subprocess.run(
-            [pdftoppm, "-png", "-r", "200", "-f", "1", "-l", "1", "-singlefile", str(path), str(prefix)],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=30,
-        )
-        if result.returncode == 0:
+        try:
+            result = subprocess.run(
+                [pdftoppm, "-png", "-r", str(_render_dpi()), "-f", "1", "-l", "1", "-singlefile", str(path), str(prefix)],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            result = None
+        if result is not None and result.returncode == 0:
             generated_png = output_dir / f"{path.stem}__pdftoppm.png"
             if generated_png.exists() and generated_png.stat().st_size > 0:
                 shutil.move(str(generated_png), str(out_png))
-                return out_png
+                return constrain_rendered_image(out_png)
 
     rendered = _render_pdf_with_pymupdf(path, out_png)
     if rendered:
         return rendered
 
     return None
+
+
+def _has_sufficient_pdf_resolution(path: Path) -> bool:
+    """Invalidate old low-resolution PDF renders after the renderer improves."""
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return max(image.size) >= 1000
+    except Exception:
+        return True
 
 
 def _render_postscript_with_ghostscript(path: Path, out_png: Path) -> Optional[Path]:
@@ -1790,7 +2195,7 @@ def _render_postscript_with_ghostscript(path: Path, out_png: Path) -> Optional[P
             "-dNOPAUSE",
             "-dEPSCrop",
             "-sDEVICE=png16m",
-            "-r200",
+            f"-r{_render_dpi()}",
             f"-sOutputFile={out_png}",
             str(path),
         ],
@@ -1801,7 +2206,7 @@ def _render_postscript_with_ghostscript(path: Path, out_png: Path) -> Optional[P
         env=runtime_env,
     )
     if result.returncode == 0 and out_png.exists() and out_png.stat().st_size > 0:
-        return out_png
+        return constrain_rendered_image(out_png)
     out_png.unlink(missing_ok=True)
     return None
 
@@ -1859,13 +2264,74 @@ def _render_pdf_with_pymupdf(path: Path, out_png: Path) -> Optional[Path]:
             doc.close()
             return None
         page = doc.load_page(0)
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
+        # Keep PDF conversion around print-quality 200 DPI; the shared raster
+        # bound below prevents large pages from producing hundred-MB PNGs.
+        scale = _render_dpi() / 72.0
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
         out_png.parent.mkdir(parents=True, exist_ok=True)
         pix.save(str(out_png))
         doc.close()
-        return out_png if out_png.exists() and out_png.stat().st_size > 0 else None
+        return constrain_rendered_image(out_png) if out_png.exists() and out_png.stat().st_size > 0 else None
     except Exception:
         return None
+
+
+def _render_dpi() -> int:
+    try:
+        value = int(os.environ.get("MAXREAD_FIGURE_RENDER_DPI", "200"))
+    except ValueError:
+        value = 200
+    return min(300, max(120, value))
+
+
+def constrain_rendered_image(
+    path: Path,
+    *,
+    max_bytes: Optional[int] = None,
+    max_side: Optional[int] = None,
+    max_pixels: Optional[int] = None,
+) -> Path:
+    """Rewrite a generated raster at bounded resolution and encoded size."""
+    try:
+        from PIL import Image
+    except Exception:
+        return path
+    if not path.exists() or path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+        return path
+    try:
+        byte_limit = max_bytes or int(os.environ.get("MAXREAD_MAX_RENDERED_IMAGE_BYTES", str(10 * 1024 * 1024)))
+        side_limit = max_side or int(os.environ.get("MAXREAD_MAX_RENDERED_IMAGE_SIDE", "3200"))
+        pixel_limit = max_pixels or int(os.environ.get("MAXREAD_MAX_RENDERED_IMAGE_PIXELS", "16000000"))
+    except ValueError:
+        byte_limit, side_limit, pixel_limit = 10 * 1024 * 1024, 3200, 16_000_000
+    byte_limit = max(256 * 1024, byte_limit)
+    side_limit = max(640, side_limit)
+    pixel_limit = max(1_000_000, pixel_limit)
+    try:
+        with Image.open(path) as opened:
+            image = opened.convert("RGB")
+        scale = min(1.0, side_limit / max(image.size), (pixel_limit / max(1, image.width * image.height)) ** 0.5)
+        if scale < 1.0:
+            image = image.resize(
+                (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                Image.LANCZOS,
+            )
+        temporary = path.with_name(f".{path.stem}.bounded.png")
+        for _attempt in range(10):
+            image.save(temporary, format="PNG", optimize=True, compress_level=9)
+            if temporary.stat().st_size <= byte_limit:
+                temporary.replace(path)
+                return path
+            ratio = (byte_limit / max(1, temporary.stat().st_size)) ** 0.5 * 0.92
+            ratio = min(0.88, max(0.55, ratio))
+            image = image.resize(
+                (max(1, round(image.width * ratio)), max(1, round(image.height * ratio))),
+                Image.LANCZOS,
+            )
+        temporary.replace(path)
+        return path
+    except Exception:
+        return path
 
 
 def _caption_for_asset(path: Path, figures: List[PaperFigure], captions: List[str], source_dir: Optional[Path] = None) -> str:

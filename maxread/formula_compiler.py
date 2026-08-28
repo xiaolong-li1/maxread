@@ -45,6 +45,7 @@ class FormulaCompilation:
 
 
 _LATEX_BLOCK_RE = re.compile(r"<latex\b[^>]*>(.*?)</latex\s*>", re.I | re.S)
+_PSEUDO_LABEL_RE = re.compile(r"^\s*<\s*[A-Za-z][A-Za-z0-9_.-]*\s*:\s*>")
 _KNOWN_WRAPPER_RE = re.compile(
     r"<\s*/?\s*(?:p|div|br)\b[^>]*>",
     re.I,
@@ -60,7 +61,10 @@ _FORMULA_WRAPPER_RE = re.compile(
     re.I | re.S,
 )
 _OVERESCAPED_COMMAND_RE = re.compile(r"\\\\([A-Za-z]+)")
-_OVERESCAPED_DELIMITER_RE = re.compile(r"\\\\(?=[{}\[\]()])")
+_ROW_BREAK_SPACING_UNITS = r"(?:pt|em|ex|mm|cm|in|bp|dd|cc|sp)"
+_OVERESCAPED_DELIMITER_RE = re.compile(
+    rf"\\\\(?!(?:\[\s*[0-9]+(?:\.[0-9]+)?\s*{_ROW_BREAK_SPACING_UNITS}\s*\]))(?=[{{}}\[\]()])"
+)
 _KNOWN_LATEX_COMMANDS = frozenset(
     {
         "alpha", "approx", "bar", "begin", "beta", "bmatrix", "cdot", "chi", "circ",
@@ -90,7 +94,7 @@ def compile_formula_markup(markdown: str) -> FormulaCompilation:
     corrupting the mathematical source.
     """
 
-    source = str(markdown or "")
+    source = _restore_pseudo_label_formulas(str(markdown or ""))
     source = _decode_wrapper_entities(source)
     diagnostics: List[FormulaDiagnostic] = []
     if _FORMULA_WRAPPER_RE.search(source):
@@ -131,6 +135,26 @@ def compile_formula_markup(markdown: str) -> FormulaCompilation:
     text, wrapper_diagnostics = _unwrap_formula_paragraphs(text, source)
     diagnostics.extend(wrapper_diagnostics)
     return FormulaCompilation(text=text, tokens=tokens, diagnostics=diagnostics)
+
+
+def _restore_pseudo_label_formulas(source: str) -> str:
+    """Move input/output labels out of ``<latex>`` when a model mis-tags them.
+
+    Examples such as ``<I:> x1...xn`` are protocol labels, not mathematics.
+    Treating them as formulas makes the label's angle brackets look like
+    unsupported HTML and blocks an otherwise readable document.
+    """
+    def replace(match: re.Match[str]) -> str:
+        body = html.unescape(match.group(1)).strip()
+        if not _PSEUDO_LABEL_RE.match(body):
+            return match.group(0)
+        # A JSON-escaped line break is presentation noise in these labels;
+        # keeping the backslash would make XML quality checks mistake it for
+        # a TeX command inside inline code.
+        body = re.sub(r"\s+", " ", body.replace("\\n", " ")).strip()
+        return f"`{body}`"
+
+    return _LATEX_BLOCK_RE.sub(replace, source)
 
 
 def _decode_wrapper_entities(text: str) -> str:

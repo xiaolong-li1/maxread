@@ -19,6 +19,27 @@ def test_store_job_dedupes(tmp_path):
     store.close()
 
 
+def test_service_status_is_persistent_and_requires_reason_when_degraded(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    assert store.get_service_status()["mode"] == "operational"
+    try:
+        store.set_service_status("outage")
+        raise AssertionError("outage without a reason was accepted")
+    except ValueError:
+        pass
+    status = store.set_service_status(
+        "outage",
+        "5090 的 NFS client 卡死，无法正常完成文件读写，造成服务异常",
+        "2026-08-22 12:00 Asia/Shanghai",
+        "xiaolong",
+    )
+    assert status["mode"] == "outage"
+    assert "NFS client 卡死" in status["reason"]
+    assert status["expected_recovery_at"] == "2026-08-22 12:00 Asia/Shanghai"
+    assert store.set_service_status("operational")["mode"] == "operational"
+    store.close()
+
+
 
 def test_store_tracks_intro_and_feedback(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
@@ -86,6 +107,7 @@ def test_store_queue_jobs_and_watchers(tmp_path):
     assert rows[0]["status"] == "done"
     assert rows[0]["workflow_state"] == WorkflowState.COMPLETED.value
     assert rows[0]["doc_url"] == "https://doc"
+    assert rows[0]["resolved_title"] == "Title"
     events = store.list_job_events(first["job_id"])
     assert any(event["event_type"] == "enqueue" for event in events)
     assert any(event["event_type"] == "claim" for event in events)
@@ -124,7 +146,14 @@ def test_store_validates_workflow_transitions_and_records_versions(tmp_path):
     store.transition_queue_job(queued["job_id"], WorkflowEvent.FETCH_STARTED, "download")
     second = store.list_queue_jobs()[0]
     assert second["workflow_state"] == WorkflowState.FETCHING.value
+    assert second["stage"] == "downloading"
     assert second["state_version"] == 2
+
+    store.transition_queue_job(queued["job_id"], WorkflowEvent.SOURCE_READY)
+    store.transition_queue_job(queued["job_id"], WorkflowEvent.GENERATION_STARTED)
+    generating = store.list_queue_jobs()[0]
+    assert generating["workflow_state"] == WorkflowState.GENERATING.value
+    assert generating["stage"] == "reading"
 
     try:
         store.transition_queue_job(queued["job_id"], WorkflowEvent.QUALITY_PASSED)
@@ -133,9 +162,34 @@ def test_store_validates_workflow_transitions_and_records_versions(tmp_path):
         pass
 
     unchanged = store.list_queue_jobs()[0]
-    assert unchanged["workflow_state"] == WorkflowState.FETCHING.value
-    assert unchanged["state_version"] == 2
+    assert unchanged["workflow_state"] == WorkflowState.GENERATING.value
+    assert unchanged["state_version"] == 4
     assert any(item["event_type"] == "transition" for item in store.list_job_events(queued["job_id"]))
+    store.close()
+
+
+def test_admin_record_queries_filter_by_time_and_watcher_user(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    first_usage = store.add_usage_event("evt-1", "om-1", "oc", "p2p", "ou_1", "paper", "p1", "url-1", status="queued")
+    second_usage = store.add_usage_event("evt-2", "om-2", "oc", "p2p", "ou_2", "paper", "p2", "url-2", status="queued")
+    first = store.enqueue_job("paper", "p1", "url-1", "evt-1", "om-1", "oc", "p2p", "ou_1", first_usage)
+    second = store.enqueue_job("paper", "p2", "url-2", "evt-2", "om-2", "oc", "p2p", "ou_2", second_usage)
+    store.add_job_event(first["job_id"], "first-event", "one")
+    store.add_job_event(second["job_id"], "second-event", "two")
+    store.add_feedback("evt-1", "om-1", "oc", "p2p", "ou_1", "反馈：one")
+    store.add_feedback("evt-2", "om-2", "oc", "p2p", "ou_2", "反馈：two")
+    store.add_review_issue("paper", "p1", "format", "low", "one")
+    store.add_review_issue("paper", "p2", "format", "low", "two")
+
+    assert [row["sender_id"] for row in store.list_usage_events(sender_id="ou_1")] == ["ou_1"]
+    assert {row["sender_id"] for row in store.list_usage_users()} == {"ou_1", "ou_2"}
+    assert [row["source_id"] for row in store.list_queue_jobs(sender_id="ou_1")] == ["p1"]
+    assert {row["event_type"] for row in store.list_job_events(sender_id="ou_2")} == {"enqueue", "second-event"}
+    assert [row["sender_id"] for row in store.list_feedback(sender_id="ou_1")] == ["ou_1"]
+    assert [row["source_id"] for row in store.list_review_issues(sender_id="ou_2")] == ["p2"]
+    assert store.list_usage_events(since="2999-01-01 00:00:00") == []
+    assert store.list_queue_jobs(since="2999-01-01 00:00:00") == []
+    assert store.list_job_events(since="2999-01-01 00:00:00") == []
     store.close()
 
 
@@ -186,7 +240,21 @@ def test_store_queue_job_heartbeat_and_stale_recovery(tmp_path):
     rows = store.list_queue_jobs()
     assert rows[0]["status"] == "queued"
     assert rows[0]["stage"] == "recovered"
+    assert rows[0]["suppress_progress_notifications"] == 1
     assert any(event["event_type"] == "recover_stale" for event in store.list_job_events(queued["job_id"]))
+    store.close()
+
+
+def test_queue_position_includes_running_workers_before_queued_job(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    first_usage = store.add_usage_event("evt-1", "om-1", "oc", "p2p", "ou", "paper", "p1", "url-1", status="queued")
+    second_usage = store.add_usage_event("evt-2", "om-2", "oc", "p2p", "ou", "paper", "p2", "url-2", status="queued")
+    first = store.enqueue_job("paper", "p1", "url-1", "evt-1", "om-1", "oc", "p2p", "ou", first_usage)
+    second = store.enqueue_job("paper", "p2", "url-2", "evt-2", "om-2", "oc", "p2p", "ou", second_usage)
+    store.claim_next_queue_job(worker_id="worker-a")
+
+    assert store.queue_position(second["job_id"]) == 2
+    assert store.queue_position(first["job_id"]) == 0
     store.close()
 
 
@@ -204,6 +272,7 @@ def test_store_recovers_dead_worker_jobs_without_waiting_for_stale_timeout(tmp_p
     assert rows[0]["id"] == queued["job_id"]
     assert rows[0]["status"] == "queued"
     assert rows[0]["stage"] == "recovered"
+    assert rows[0]["suppress_progress_notifications"] == 1
     assert any(event["event_type"] == "recover_dead_worker" for event in store.list_job_events(queued["job_id"]))
     store.close()
 
@@ -229,8 +298,84 @@ def test_store_retry_queue_job(tmp_path):
     rows = store.list_queue_jobs()
     assert rows[0]["status"] == "queued"
     assert rows[0]["error"] == ""
+    assert rows[0]["suppress_progress_notifications"] == 0
+    usage = store.list_usage_events(limit=1)[0]
+    assert usage["status"] == "queued"
+    assert usage["error"] == ""
     assert store.get_job_watchers(queued["job_id"])[0]["notified"] == 0
     assert any(event["event_type"] == "retry" for event in store.list_job_events(queued["job_id"]))
+    store.close()
+
+
+def test_find_retryable_jobs_uses_topic_source_but_selects_latest_attempt(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage1 = store.add_usage_event("evt1", "om-root", "oc", "group", "ou", "paper", "2410.06205", "url", status="queued")
+    first = store.enqueue_job("paper", "2410.06205", "url", "evt1", "om-root", "oc", "group", "ou", usage1)
+    store.fail_queue_job(first["job_id"], "first failure")
+    usage2 = store.add_usage_event("evt2", "om-retry", "oc", "group", "ou", "paper", "2410.06205", "url", status="queued")
+    second = store.enqueue_job("paper", "2410.06205", "url", "evt2", "om-retry", "oc", "group", "ou", usage2)
+    store.fail_queue_job(second["job_id"], "second failure")
+
+    jobs = store.find_retryable_queue_jobs("oc", "ou", message_ids=("om-root",))
+
+    assert [job["id"] for job in jobs] == [second["job_id"]]
+    store.close()
+
+
+def test_manual_retry_rebuilds_after_published_quality_failure(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om", "oc", "p2p", "ou_1", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om", "oc", "p2p", "ou_1", usage_id)
+    store.conn.execute(
+        "update queue_jobs set checkpoint_json = ?, doc_url = ?, rebuild_pipeline = 0 where id = ?",
+        ('{"doc_url":"https://old-doc"}', "https://old-doc", queued["job_id"]),
+    )
+    store.conn.commit()
+    store.fail_queue_job(queued["job_id"], "visual quality failed", doc_url="https://old-doc")
+
+    assert store.retry_queue_job(queued["job_id"], reason="formula compiler fixed") is True
+    row = store.list_queue_jobs()[0]
+    assert row["status"] == "queued"
+    assert row["checkpoint_json"] == ""
+    assert row["rebuild_pipeline"] == 1
+    assert "retry_mode=rebuild" in store.list_job_events(queued["job_id"])[0]["detail"]
+    store.close()
+
+
+def test_automatic_retry_can_resume_published_checkpoint(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om", "oc", "p2p", "ou_1", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om", "oc", "p2p", "ou_1", usage_id)
+    store.conn.execute(
+        "update queue_jobs set checkpoint_json = ?, doc_url = ? where id = ?",
+        ('{"doc_url":"https://old-doc"}', "https://old-doc", queued["job_id"]),
+    )
+    store.conn.commit()
+    store.fail_queue_job(queued["job_id"], "temporary browser timeout", doc_url="https://old-doc")
+
+    assert store.retry_queue_job(queued["job_id"], event_type="auto_retry", rebuild_pipeline=False) is True
+    row = store.list_queue_jobs()[0]
+    assert row["checkpoint_json"] == '{"doc_url":"https://old-doc"}'
+    assert row["rebuild_pipeline"] == 0
+    assert "retry_mode=resume" in store.list_job_events(queued["job_id"])[0]["detail"]
+    store.close()
+
+
+def test_store_requeues_operator_recovered_cancelled_job_silently(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event(
+        "evt", "om_1", "oc", "group", "ou", "paper", "2604.12946", "url", status="queued"
+    )
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om_1", "oc", "group", "ou", usage_id)
+    store.transition_queue_job(queued["job_id"], WorkflowEvent.CANCEL, "operator stopped old retry storm")
+
+    assert store.requeue_interrupted_job(queued["job_id"], "服务中断恢复：旧任务未完成") is True
+    row = store.list_queue_jobs()[0]
+    assert row["status"] == "queued"
+    assert row["workflow_state"] == WorkflowState.QUEUED.value
+    assert row["suppress_progress_notifications"] == 1
+    assert row["recovery_reason"] == "服务中断恢复：旧任务未完成"
+    assert store.get_job_watchers(queued["job_id"])[0]["notified"] == 0
     store.close()
 
 
@@ -296,6 +441,22 @@ def test_store_recovers_a_stale_job_only_once(tmp_path):
     row = store.list_queue_jobs()[0]
     assert row["status"] == "queued"
     assert row["workflow_state"] == WorkflowState.QUEUED.value
+    store.close()
+
+
+def test_store_caps_infrastructure_recovery_attempts_without_notifying(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om", "oc", "p2p", "ou_1", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om", "oc", "p2p", "ou_1", usage_id)
+    store.claim_next_queue_job(worker_id="host-a:12345:worker")
+
+    assert store.recover_dead_worker_queue_jobs("host-a", lambda _pid: False, max_recovery_attempts=0) == 1
+    row = store.list_queue_jobs()[0]
+    assert row["status"] == "failed"
+    assert row["stage"] == "recovery_exhausted"
+    assert row["suppress_progress_notifications"] == 1
+    assert store.conn.execute("select notified from job_watchers where job_id = ?", (queued["job_id"],)).fetchone()[0] == 1
+    assert "自动恢复次数已达上限" in row["error"]
     store.close()
 
 

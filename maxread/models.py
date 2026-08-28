@@ -9,12 +9,14 @@ from typing import Any, Dict, List, Optional
 class PaperFigure:
     asset: str
     caption: str
+    panel_caption: str = ""
     tex_file: str = ""
     label: str = ""
     figure_index: int = 0
     asset_index: int = 0
     row: int = 0
     col: int = 0
+    is_appendix: bool = False
 
 
 @dataclass

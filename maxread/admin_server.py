@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
+import secrets
 import socket
 import subprocess
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -18,13 +24,64 @@ from .review import visible_review_issues
 
 
 DEFAULT_LIMIT = 80
+DEFAULT_DAYS = 3
 CONTACT_LOOKUP_TIMEOUT_SECONDS = 5
+ADMIN_SESSION_COOKIE = "maxread_admin_session"
+ADMIN_SESSION_SECONDS = 8 * 60 * 60
+ADMIN_LOGIN_WINDOW_SECONDS = 10 * 60
+ADMIN_LOGIN_MAX_FAILURES = 5
 
 
 class AdminServer(ThreadingHTTPServer):
     def __init__(self, server_address, handler_class, settings: Settings):
         super().__init__(server_address, handler_class)
         self.settings = settings
+        self.admin_sessions: dict[str, float] = {}
+        self.admin_login_failures: dict[str, list[float]] = {}
+        self.admin_lock = threading.Lock()
+
+    def create_admin_session(self, password: str, client_id: str) -> tuple[str, str]:
+        now = time.time()
+        with self.admin_lock:
+            failures = [
+                timestamp
+                for timestamp in self.admin_login_failures.get(client_id, [])
+                if now - timestamp < ADMIN_LOGIN_WINDOW_SECONDS
+            ]
+            if len(failures) >= ADMIN_LOGIN_MAX_FAILURES:
+                self.admin_login_failures[client_id] = failures
+                return "", "too_many_attempts"
+            expected = str(getattr(self.settings, "admin_password_hash", "") or "").strip().lower()
+            candidate = hashlib.sha256(str(password or "").encode("utf-8")).hexdigest()
+            if not expected or not secrets.compare_digest(candidate, expected):
+                failures.append(now)
+                self.admin_login_failures[client_id] = failures
+                return "", "invalid_password"
+            self.admin_login_failures.pop(client_id, None)
+            token = secrets.token_urlsafe(32)
+            self.admin_sessions[token] = now + ADMIN_SESSION_SECONDS
+            self._discard_expired_sessions(now)
+            return token, ""
+
+    def is_admin_session(self, token: str) -> bool:
+        if not token:
+            return False
+        now = time.time()
+        with self.admin_lock:
+            self._discard_expired_sessions(now)
+            expires_at = self.admin_sessions.get(token, 0)
+            return bool(expires_at > now)
+
+    def delete_admin_session(self, token: str) -> None:
+        if not token:
+            return
+        with self.admin_lock:
+            self.admin_sessions.pop(token, None)
+
+    def _discard_expired_sessions(self, now: float) -> None:
+        expired = [token for token, expires_at in self.admin_sessions.items() if expires_at <= now]
+        for token in expired:
+            self.admin_sessions.pop(token, None)
 
 
 def run_admin_server(settings: Settings, host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -58,34 +115,49 @@ class AdminHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/summary":
             self._json_response(self._with_store(_admin_summary))
             return
+        if parsed.path == "/api/service-status":
+            self._json_response(self._with_store(lambda store: store.get_service_status()))
+            return
+        if parsed.path == "/api/admin/status":
+            self._json_response({"authenticated": self._is_admin()})
+            return
         if parsed.path == "/api/usage":
+            since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
-            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_usage_events(limit), store)))
+            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_usage_events(limit, since, sender_id), store)))
+            return
+        if parsed.path == "/api/users":
+            since, _sender_id = _record_filters(parsed.query)
+            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_usage_users(since), store)))
             return
         if parsed.path == "/api/feedback":
             query = parse_qs(parsed.query)
+            since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
             status = query.get("status", [""])[0]
-            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, visible_feedback_rows(store.list_feedback(limit, status)), store)))
+            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, visible_feedback_rows(store.list_feedback(limit, status, since, sender_id)), store)))
             return
         if parsed.path == "/api/jobs":
             query = parse_qs(parsed.query)
+            since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
             status = query.get("status", [""])[0]
-            self._json_response(self._with_store(lambda store: store.list_queue_jobs(limit, status)))
+            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_queue_jobs(limit, status, since, sender_id), store)))
             return
         if parsed.path == "/api/job-events":
             query = parse_qs(parsed.query)
+            since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
             job_id = int(query.get("job_id", ["0"])[0] or 0)
-            self._json_response(self._with_store(lambda store: store.list_job_events(job_id, limit)))
+            self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_job_events(job_id, limit, since, sender_id), store)))
             return
         if parsed.path == "/api/review-issues":
             query = parse_qs(parsed.query)
+            since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
             source_kind = query.get("source_kind", [""])[0]
             source_id = query.get("source_id", [""])[0]
-            self._json_response(self._with_store(lambda store: visible_review_issues(store.list_review_issues(limit, source_kind, source_id))))
+            self._json_response(self._with_store(lambda store: visible_review_issues(store.list_review_issues(limit, source_kind, source_id, since, sender_id))))
             return
         if parsed.path == "/api/review-stats":
             self._json_response(self._with_store(lambda store: store.review_issue_stats()))
@@ -94,6 +166,46 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/admin/login":
+            payload = self._read_json()
+            token, error = self.server.create_admin_session(
+                str(payload.get("password", "")),
+                str(self.client_address[0] if self.client_address else "unknown"),
+            )
+            if error:
+                status = HTTPStatus.TOO_MANY_REQUESTS if error == "too_many_attempts" else HTTPStatus.UNAUTHORIZED
+                self._error(status, "登录尝试过多，请稍后再试" if error == "too_many_attempts" else "管理员密码错误")
+                return
+            self._json_response(
+                {"ok": True, "authenticated": True},
+                headers={"set-cookie": self._session_cookie(token)},
+            )
+            return
+        if parsed.path == "/api/admin/logout":
+            self.server.delete_admin_session(self._admin_token())
+            self._json_response(
+                {"ok": True, "authenticated": False},
+                headers={"set-cookie": self._session_cookie("", max_age=0)},
+            )
+            return
+        if not self._require_admin():
+            return
+        if parsed.path == "/api/service-status":
+            payload = self._read_json()
+            try:
+                status = self._with_store(
+                    lambda store: store.set_service_status(
+                        payload.get("mode", "operational"),
+                        payload.get("reason", ""),
+                        payload.get("expected_recovery_at", ""),
+                        payload.get("updated_by", "admin"),
+                    )
+                )
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._json_response({"ok": True, **status})
+            return
         feedback_match = re.fullmatch(r"/api/feedback/(\d+)/status", parsed.path)
         if feedback_match:
             payload = self._read_json()
@@ -125,8 +237,40 @@ class AdminHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length") or 0)
         if not length:
             return {}
+        if length > 64 * 1024:
+            raise ValueError("request body too large")
         raw = self.rfile.read(length).decode("utf-8")
         return json.loads(raw or "{}")
+
+    def _admin_token(self) -> str:
+        try:
+            cookie = SimpleCookie(self.headers.get("cookie", ""))
+            morsel = cookie.get(ADMIN_SESSION_COOKIE)
+            return morsel.value if morsel else ""
+        except Exception:
+            return ""
+
+    def _is_admin(self) -> bool:
+        return self.server.is_admin_session(self._admin_token())
+
+    def _require_admin(self) -> bool:
+        if self._is_admin():
+            return True
+        self._error(HTTPStatus.UNAUTHORIZED, "需要管理员登录")
+        return False
+
+    def _session_cookie(self, token: str, max_age: int = ADMIN_SESSION_SECONDS) -> str:
+        secure = self.headers.get("x-forwarded-proto", "").lower() == "https"
+        parts = [
+            f"{ADMIN_SESSION_COOKIE}={token}",
+            "Path=/",
+            "HttpOnly",
+            "SameSite=Strict",
+            f"Max-Age={max(0, int(max_age))}",
+        ]
+        if secure:
+            parts.append("Secure")
+        return "; ".join(parts)
 
     def _html(self, content: str) -> None:
         data = content.encode("utf-8")
@@ -136,11 +280,13 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self._write_body(data)
 
-    def _json_response(self, payload: Any) -> None:
+    def _json_response(self, payload: Any, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("content-type", "application/json; charset=utf-8")
         self.send_header("cache-control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.send_header("content-length", str(len(data)))
         self.end_headers()
         self._write_body(data)
@@ -172,6 +318,20 @@ def _admin_summary(store: Store):
     summary["feedback"] = count_feedback_by_status(store.list_feedback(limit=10000))
     summary["review_issues"] = len(visible_review_issues(store.list_review_issues(limit=10000)))
     return summary
+
+
+def _record_filters(query_string: str) -> tuple[str, str]:
+    query = parse_qs(query_string)
+    raw_days = query.get("days", [str(DEFAULT_DAYS)])[0]
+    try:
+        days = max(0, min(3650, int(raw_days)))
+    except (TypeError, ValueError):
+        days = DEFAULT_DAYS
+    since = ""
+    if days:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    sender_id = str(query.get("sender_id", [""])[0] or "").strip()[:128]
+    return since, sender_id
 
 
 def _attach_user_names(settings: Settings, rows, store=None):
@@ -258,6 +418,7 @@ INDEX_HTML = r'''
       --ok: #147a54;
     }
     * { box-sizing: border-box; }
+    * { box-sizing: border-box; }
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; color: var(--text); background: var(--bg); font-size: 14px; }
     .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 24px 48px; }
     header { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
@@ -270,10 +431,12 @@ INDEX_HTML = r'''
     button, select { border: 1px solid var(--line); background: #fff; color: var(--text); border-radius: 8px; padding: 8px 11px; font: inherit; }
     button { cursor: pointer; transition: transform .15s, box-shadow .15s; }
     button:hover { transform: translateY(-1px); box-shadow: 0 6px 16px -12px rgba(0,0,0,.25); }
+    button:disabled { cursor: not-allowed; opacity: .6; transform: none; box-shadow: none; }
     .primary { background: var(--primary); border-color: var(--primary); color: #fff; }
     .tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--line); margin-bottom: 18px; overflow-x: auto; }
     .tab { border: 0; background: transparent; border-radius: 0; padding: 12px 8px 11px; color: var(--muted); box-shadow: none; white-space: nowrap; }
     .tab.active { color: var(--primary); border-bottom: 2px solid var(--primary); }
+    .extra-tab { margin-left: auto; align-self: center; min-width: 112px; padding: 7px 10px; }
     .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
     .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; box-shadow: 0 4px 14px -12px rgba(0,0,0,.18); }
     .metric { grid-column: span 3; }
@@ -284,19 +447,73 @@ INDEX_HTML = r'''
     th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--soft); vertical-align: top; }
     th { color: var(--muted); font-weight: 600; font-size: 12px; }
     td { overflow-wrap: anywhere; }
+    .jobs-card { overflow-x: auto; }
+    .jobs-table { min-width: 900px; }
+    .jobs-table th:nth-child(1) { width: 48px; }
+    .jobs-table th:nth-child(2) { width: 150px; }
+    .jobs-table th:nth-child(3) { width: 31%; }
+    .jobs-table th:nth-child(4) { width: 78px; }
+    .jobs-table th:nth-child(5) { width: 108px; }
+    .jobs-table th:nth-child(6) { width: 96px; }
+    .jobs-table th:nth-child(7) { width: 52px; }
+    .jobs-table th:nth-child(8) { width: 78px; }
+    .jobs-table th:nth-child(9) { width: 64px; }
+    .job-subject strong { display: block; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
+    .job-subject-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; margin-top: 5px; color: var(--muted); font-size: 12px; }
+    .job-source-link { font-size: 12px; }
+    .job-flow { line-height: 1.35; }
+    .job-flow .mono, .job-stage .mono { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+    .job-error { margin-top: 8px; border: 1px solid var(--soft); border-radius: 7px; background: #fbfaf7; }
+    .job-error summary { cursor: pointer; padding: 6px 8px; color: var(--bad); font-size: 12px; }
+    .job-error-body { max-height: 150px; overflow: auto; padding: 0 8px 8px; color: var(--muted); font-size: 11px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .job-recovery { margin-top: 8px; border: 1px solid rgba(184,110,0,.22); border-radius: 7px; background: rgba(184,110,0,.04); }
+    .job-recovery summary { cursor: pointer; padding: 6px 8px; color: var(--warn); font-size: 12px; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 8px; font-size: 12px; background: var(--soft); color: var(--muted); }
     .pill.done { color: var(--ok); background: rgba(20,122,84,.08); }
     .pill.failed { color: var(--bad); background: rgba(180,35,24,.08); }
     .pill.running, .pill.queued { color: var(--warn); background: rgba(184,110,0,.1); }
     .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .filters { display: flex; align-items: end; gap: 12px; padding: 12px 0 16px; border-top: 1px solid var(--line); }
+    .filter-field { display: grid; gap: 5px; min-width: 150px; }
+    .filter-field.user { min-width: 240px; }
+    .filter-field label { color: var(--muted); font-size: 12px; }
     .muted { color: var(--muted); }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
     .hidden { display: none; }
     .empty { padding: 26px; color: var(--muted); text-align: center; }
+    .status-card { border-left: 4px solid var(--ok); }
+    .status-card.degraded, .status-card.maintenance, .status-card.outage { border-left-color: var(--warn); }
+    .status-grid { display: grid; grid-template-columns: 160px 1fr 220px; gap: 10px; align-items: start; }
+    .status-grid textarea, .status-grid input, .status-grid select { width: 100%; min-height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; background: #fff; }
+    .status-grid textarea { min-height: 72px; resize: vertical; }
+    .status-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .status-title strong { font-size: 16px; }
+    .status-readonly { display: grid; grid-template-columns: 150px 1fr 220px; gap: 16px; color: var(--muted); }
+    .status-readonly strong { color: var(--text); }
+    dialog { width: min(390px, calc(100vw - 28px)); border: 1px solid var(--line); border-radius: 10px; padding: 0; color: var(--text); background: var(--panel); box-shadow: 0 24px 70px rgba(0,0,0,.22); }
+    dialog::backdrop { background: rgba(24,27,34,.32); }
+    .login-form { display: grid; gap: 14px; padding: 20px; }
+    .login-form h2 { margin: 0; font-size: 20px; }
+    .login-form input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; font: inherit; }
+    .login-actions { display: flex; justify-content: flex-end; gap: 9px; }
+    .login-error { min-height: 20px; color: var(--bad); font-size: 13px; }
     a { color: var(--primary); text-decoration: none; }
     a:hover { text-decoration: underline; }
     @media (max-width: 860px) { .metric { grid-column: span 6; } header { align-items: flex-start; flex-direction: column; } }
-    @media (max-width: 620px) { .metric { grid-column: span 12; } .wrap { padding: 20px 14px 36px; } table { font-size: 13px; } }
+    @media (max-width: 620px) {
+      .wrap { padding: 20px 14px 36px; overflow: hidden; }
+      header, .actions { width: 100%; }
+      .filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+      .filter-field, .filter-field.user { min-width: 0; }
+      .filter-field select { width: 100%; }
+      .grid { grid-template-columns: minmax(0, 1fr); }
+      .card, .metric, .wide { grid-column: 1; min-width: 0; }
+      .status-title { align-items: flex-start; flex-direction: column; }
+      .status-grid { grid-template-columns: minmax(0, 1fr); }
+      .status-readonly { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+      .tabs { width: 100%; }
+      table { font-size: 13px; }
+    }
   </style>
 </head>
 <body>
@@ -304,63 +521,204 @@ INDEX_HTML = r'''
     <header>
       <div>
         <h1>MaxRead 控制台</h1>
-        <div class="sub">查看使用记录、反馈、队列和 AI review 问题。仅监听 5090 ZeroTier 内网地址。</div>
+        <div class="sub">查看使用记录、反馈、队列和 AI review 问题。数据从 5090 实时读取。</div>
       </div>
       <div class="actions">
-        <a class="architecture-link" href="/architecture"><svg viewBox="0 0 24 24"><path d="M4 6h6v6H4zM14 3h6v6h-6zM14 15h6v6h-6zM10 9l4-3M10 11l4 6"/></svg>Pipeline 架构</a>
+        <a class="architecture-link" href="architecture"><svg viewBox="0 0 24 24"><path d="M4 6h6v6H4zM14 3h6v6h-6zM14 15h6v6h-6zM10 9l4-3M10 11l4 6"/></svg>Pipeline 架构</a>
+        <button id="admin-auth-button" onclick="toggleAdminSession()">管理员登录</button>
         <button class="primary" onclick="refreshAll()">刷新</button>
       </div>
     </header>
 
+    <div class="filters">
+      <div class="filter-field"><label for="filter-days">时间范围</label><select id="filter-days"><option value="1">最近 1 天</option><option value="3" selected>最近 3 天</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option><option value="0">全部记录</option></select></div>
+      <div class="filter-field user"><label for="filter-user">用户</label><select id="filter-user"><option value="">全部用户</option></select></div>
+    </div>
+
     <nav class="tabs">
       <button class="tab active" data-tab="overview">概览</button>
-      <button class="tab" data-tab="usage">使用记录</button>
-      <button class="tab" data-tab="feedback">反馈</button>
-      <button class="tab" data-tab="jobs">任务队列</button>
-      <button class="tab" data-tab="review">AI Review</button>
+      <button class="tab" data-tab="usage">使用</button>
+      <button class="tab" data-tab="jobs">任务</button>
+      <button class="tab" data-tab="logs">日志</button>
+      <select class="extra-tab" id="extra-tab" aria-label="更多视图">
+        <option value="">更多视图</option>
+        <option value="feedback">反馈</option>
+        <option value="review">AI Review</option>
+      </select>
     </nav>
 
     <section id="overview" class="panel"></section>
     <section id="usage" class="panel hidden"></section>
     <section id="feedback" class="panel hidden"></section>
     <section id="jobs" class="panel hidden"></section>
+    <section id="logs" class="panel hidden"></section>
     <section id="review" class="panel hidden"></section>
   </div>
+  <dialog id="admin-login-dialog">
+    <form class="login-form" onsubmit="loginAdmin(event)">
+      <h2>管理员登录</h2>
+      <input id="admin-password" type="password" inputmode="numeric" autocomplete="current-password" placeholder="管理员密码" required />
+      <div id="admin-login-error" class="login-error"></div>
+      <div class="login-actions"><button type="button" onclick="closeAdminDialog()">取消</button><button class="primary" type="submit">登录</button></div>
+    </form>
+  </dialog>
 <script>
-const state = { tab: 'overview' };
+const state = { tab: 'overview', days: '3', senderId: '', adminAuthenticated: false };
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const api = (url, opts={}) => fetch(url, {headers: {'content-type': 'application/json'}, ...opts}).then(r => r.json());
+const basePath = window.location.pathname.startsWith('/maxread') ? '/maxread' : '';
+const api = async (url, opts={}) => {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(`${basePath}${url}`, {headers: {'content-type': 'application/json'}, credentials: 'same-origin', signal: controller.signal, ...opts});
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) { const error = new Error(payload.error || `HTTP ${response.status}`); error.status = response.status; throw error; }
+    return payload;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
 const pill = (v) => `<span class="pill ${esc(v)}">${esc(v || 'unknown')}</span>`;
 const link = (url) => url ? `<a href="${esc(url)}" target="_blank">打开</a>` : '<span class="muted">-</span>';
+const filteredUrl = (path, extra={}) => { const q = new URLSearchParams({days: state.days, ...extra}); if (state.senderId) q.set('sender_id', state.senderId); return `${path}?${q}`; };
+
+$('filter-days').addEventListener('change', async (event) => { state.days = event.target.value; await loadUsers(); refreshAll(); });
+$('filter-user').addEventListener('change', (event) => { state.senderId = event.target.value; refreshAll(); });
+
+async function loadUsers() {
+  const selected = state.senderId;
+  try {
+    const rows = await api(`/api/users?days=${encodeURIComponent(state.days)}`);
+    $('filter-user').innerHTML = '<option value="">全部用户</option>' + rows.map(r => `<option value="${esc(r.sender_id)}">${esc(r.sender_name || r.sender_id)} · ${esc(r.event_count)}</option>`).join('');
+    if (rows.some(r => r.sender_id === selected)) { $('filter-user').value = selected; } else { state.senderId = ''; }
+  } catch (error) {
+    $('filter-user').innerHTML = '<option value="">用户列表暂不可用</option>';
+    console.warn('user filter unavailable', error);
+  }
+}
+
+async function loadAdminStatus() {
+  try {
+    const result = await api('/api/admin/status');
+    state.adminAuthenticated = Boolean(result.authenticated);
+  } catch (_error) {
+    state.adminAuthenticated = false;
+  }
+  updateAdminButton();
+}
+function updateAdminButton() { $('admin-auth-button').textContent = state.adminAuthenticated ? '退出管理员' : '管理员登录'; }
+function toggleAdminSession() {
+  if (state.adminAuthenticated) { logoutAdmin(); return; }
+  $('admin-login-error').textContent = '';
+  $('admin-password').value = '';
+  $('admin-login-dialog').showModal();
+  window.setTimeout(() => $('admin-password').focus(), 0);
+}
+function closeAdminDialog() { $('admin-login-dialog').close(); }
+async function loginAdmin(event) {
+  event.preventDefault();
+  $('admin-login-error').textContent = '';
+  try {
+    const result = await api('/api/admin/login', {method:'POST', body:JSON.stringify({password:$('admin-password').value})});
+    state.adminAuthenticated = Boolean(result.authenticated);
+    closeAdminDialog();
+    updateAdminButton();
+    refreshAll();
+  } catch (error) {
+    $('admin-login-error').textContent = error.message || '登录失败';
+  }
+}
+async function logoutAdmin() {
+  await api('/api/admin/logout', {method:'POST', body:'{}'}).catch(() => null);
+  state.adminAuthenticated = false;
+  updateAdminButton();
+  refreshAll();
+}
+function adminExpired(error) {
+  if (error && error.status === 401) {
+    state.adminAuthenticated = false;
+    updateAdminButton();
+    alert('管理员会话已失效，请重新登录。');
+    refreshAll();
+    return true;
+  }
+  return false;
+}
 
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   btn.classList.add('active');
+  $('extra-tab').value = '';
   document.querySelectorAll('.panel').forEach(x => x.classList.add('hidden'));
   state.tab = btn.dataset.tab;
   $(state.tab).classList.remove('hidden');
   refreshAll();
 }));
+$('extra-tab').addEventListener('change', (event) => {
+  const tab = event.target.value;
+  if (!tab) return;
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x => x.classList.add('hidden'));
+  state.tab = tab;
+  $(state.tab).classList.remove('hidden');
+  refreshAll();
+});
 
 async function refreshAll() {
-  if (state.tab === 'overview') return renderOverview();
-  if (state.tab === 'usage') return renderUsage();
-  if (state.tab === 'feedback') return renderFeedback();
-  if (state.tab === 'jobs') return renderJobs();
-  if (state.tab === 'review') return renderReview();
+  const panel = $(state.tab);
+  if (!panel) return;
+  panel.innerHTML = '<div class="card empty">正在加载...</div>';
+  try {
+    if (state.tab === 'overview') return await renderOverview();
+    if (state.tab === 'usage') return await renderUsage();
+    if (state.tab === 'feedback') return await renderFeedback();
+    if (state.tab === 'jobs') return await renderJobs();
+    if (state.tab === 'logs') return await renderLogs();
+    if (state.tab === 'review') return await renderReview();
+  } catch (error) {
+    console.error('admin data load failed', error);
+    panel.innerHTML = `<div class="card empty"><strong>数据加载失败</strong><br><span class="muted">请点击“刷新”重试。</span></div>`;
+  }
 }
 
 async function renderOverview() {
-  const s = await api('/api/summary');
+  const [s, service] = await Promise.all([api('/api/summary'), api('/api/service-status')]);
   $('overview').innerHTML = `<div class="grid">
+    ${serviceCard(service)}
     ${metric('完成文档', s.docs_done || 0)}
     ${metric('活跃用户', s.active_users || 0)}
     ${metric('新反馈', (s.feedback && s.feedback.new) || 0)}
     ${metric('AI Review 问题', s.review_issues || 0)}
     <div class="card wide"><div class="toolbar"><strong>队列状态</strong><span class="muted">queued / running / failed / done</span></div>${kv(s.jobs || {})}</div>
-    <div class="card wide"><div class="toolbar"><strong>使用状态</strong><span class="muted">usage_events.status</span></div>${kv(s.usage || {})}</div>
   </div>`;
+}
+function serviceCard(s) {
+  const active = s.mode !== 'operational';
+  const label = {operational:'正常', degraded:'降级', maintenance:'维护中', outage:'故障'}[s.mode] || s.mode;
+  const readonly = `<div class="status-readonly"><div>模式<br><strong>${esc(label)}</strong></div><div>原因<br><strong>${esc(s.reason || '无')}</strong></div><div>预计恢复<br><strong>${esc(s.expected_recovery_at || '未设置')}</strong></div></div>`;
+  const editor = `<div class="status-grid">
+      <select id="service-mode">
+        ${['operational','degraded','maintenance','outage'].map(x => `<option value="${x}" ${x===s.mode?'selected':''}>${({operational:'正常',degraded:'降级',maintenance:'维护中',outage:'故障'})[x]}</option>`).join('')}
+      </select>
+      <textarea id="service-reason" placeholder="故障或维护原因">${esc(s.reason || '')}</textarea>
+      <div><input id="service-eta" value="${esc(s.expected_recovery_at || '')}" placeholder="预计恢复时间"><button class="primary" style="margin-top:8px;width:100%" onclick="saveServiceStatus()">保存服务状态</button></div>
+    </div>`;
+  return `<div class="card wide status-card ${esc(s.mode)}">
+    <div class="status-title"><strong>服务状态：${esc(label)}</strong><span class="muted">${state.adminAuthenticated ? '管理员模式 · ' : '只读 · '}${s.updated_at ? `最后更新 ${esc(s.updated_at)}` : ''}</span></div>
+    ${state.adminAuthenticated ? editor : readonly}
+    ${active ? `<div class="muted" style="margin-top:10px">新请求会正常入队，但不启动 worker；系统会回复原因和预计恢复时间，成功交付后再通知。</div>` : ''}
+  </div>`;
+}
+async function saveServiceStatus() {
+  const mode = $('service-mode').value;
+  const reason = $('service-reason').value;
+  const expected_recovery_at = $('service-eta').value;
+  try {
+    const result = await api('/api/service-status', {method:'POST', body: JSON.stringify({mode, reason, expected_recovery_at, updated_by:'admin'})});
+    if (!result.ok) { alert(result.error || '保存失败'); return; }
+    renderOverview();
+  } catch (error) { if (!adminExpired(error)) alert(error.message || '保存失败'); }
 }
 function metric(label, value) { return `<div class="card metric"><div class="label">${label}</div><div class="value">${value}</div></div>`; }
 function kv(obj) { const keys = Object.keys(obj); if (!keys.length) return '<div class="empty">暂无数据</div>'; return keys.map(k => `<div style="display:flex;justify-content:space-between;border-bottom:1px dashed var(--soft);padding:8px 0"><span>${esc(k)}</span><b>${esc(obj[k])}</b></div>`).join(''); }
@@ -368,7 +726,7 @@ function kv(obj) { const keys = Object.keys(obj); if (!keys.length) return '<div
 async function renderUsage() {
   $('usage').innerHTML = '<div class="card empty">正在加载使用记录...</div>';
   try {
-    const rows = await api('/api/usage?limit=120');
+    const rows = await api(filteredUrl('/api/usage', {limit: 160}));
     $('usage').innerHTML = table(['时间','用户','来源','状态','标题','文档'], rows.map(r => [r.created_at, userCell(r), `${r.source_kind}<br><span class="mono">${esc(r.source_id || r.source_url)}</span>`, pill(r.status), esc(r.title || r.error || ''), link(r.doc_url)]));
   } catch (error) {
     $('usage').innerHTML = '<div class="card empty">使用记录加载失败，请稍后刷新。</div>';
@@ -376,7 +734,7 @@ async function renderUsage() {
 }
 
 async function renderFeedback() {
-  const rows = await api('/api/feedback?limit=160');
+  const rows = await api(filteredUrl('/api/feedback', {limit: 160}));
   $('feedback').innerHTML = table(['时间','用户','识别','状态','内容','操作'], rows.map(r => [r.created_at, userCell(r), feedbackOrigin(r), pill(r.status), esc(r.content), feedbackActions(r)]));
 }
 function feedbackOrigin(r) {
@@ -385,31 +743,70 @@ function feedbackOrigin(r) {
   return '<span class="muted">历史记录</span>';
 }
 function feedbackActions(r) {
+  if (!state.adminAuthenticated) return pill(r.status);
   return `<select onchange="setFeedback(${r.id}, this.value)">
     ${['new','triaged','planned','done','ignored'].map(s => `<option value="${s}" ${s===r.status?'selected':''}>${s}</option>`).join('')}
   </select>`;
 }
-async function setFeedback(id, status) { await api(`/api/feedback/${id}/status`, {method:'POST', body: JSON.stringify({status})}); renderFeedback(); renderOverview(); }
+async function setFeedback(id, status) { try { await api(`/api/feedback/${id}/status`, {method:'POST', body: JSON.stringify({status})}); renderFeedback(); renderOverview(); } catch (error) { if (!adminExpired(error)) alert(error.message || '更新失败'); } }
 
 async function renderJobs() {
-  const rows = await api('/api/jobs?limit=120');
-  $('jobs').innerHTML = table(['ID','来源','状态','工作流状态','阶段','尝试','标题 / 错误','文档','操作'], rows.map(r => [r.id, `${r.source_kind}<br><span class="mono">${esc(r.source_id)}</span>`, pill(r.status), `<span class="mono">${esc(r.workflow_state || '')}</span>`, esc(r.stage || ''), r.attempts, esc(r.title || r.error || ''), link(r.doc_url), jobActions(r)]));
+  const rows = await api(filteredUrl('/api/jobs', {limit: 160}));
+  $('jobs').innerHTML = table(['ID','用户','论文 / 来源','状态','工作流','阶段','尝试','文档','操作'], rows.map(r => [small(r.id), userCell(r), jobSubject(r), jobPill(r.status), jobFlow(r), jobStage(r), small(r.attempts), link(r.doc_url), jobActions(r)]), 'jobs');
 }
-function jobActions(r) { return r.status === 'failed' ? `<button onclick="retryJob(${r.id})">重试</button>` : '<span class="muted">-</span>'; }
-async function retryJob(id) { await api(`/api/jobs/${id}/retry`, {method:'POST', body:'{}'}); renderJobs(); renderOverview(); }
+const jobStatusLabels = {queued: '排队中', running: '处理中', done: '完成', failed: '失败'};
+const workflowLabels = {queued: '等待调度', claimed: '已认领', preparing: '材料准备', generating: '生成中', reviewing: '内容审阅', quality_checking: '格式质检', quality_repairing: '格式修复', publishing: '写入飞书', post_publish_checking: '发布后检查', visual_checking: '视觉检查', visual_repairing: '视觉修复', completed: '已完成', failed: '执行失败', quality_failed: '质量未通过'};
+const stageLabels = {queued: '排队', claimed: '已认领', downloading: '下载原文', reading: '生成中', reviewing: '审阅中', writing: '写入飞书', publishing: '发布', done: '完成', failed: '失败', cancelled: '已取消'};
+function jobPill(v) { return `<span class="pill ${esc(v)}">${esc(jobStatusLabels[v] || v || '未知')}</span>`; }
+function jobTitle(r) {
+  return r.resolved_title || r.title || (r.source_kind === 'paper' ? `arXiv ${r.source_id}` : r.source_id || '未命名任务');
+}
+function jobSubject(r) {
+  const kind = r.source_kind === 'paper' ? '论文' : (r.source_kind === 'article' ? '文章' : (r.source_kind || '任务'));
+  const titleKnown = Boolean(r.resolved_title || r.title);
+  const pending = titleKnown ? '' : '<span>标题尚未取得</span>';
+  const source = r.source_url ? `<a class="job-source-link" href="${esc(r.source_url)}" target="_blank" rel="noopener">原文</a>` : '';
+  const failure = r.status === 'failed' && r.error ? `<details class="job-error"><summary>查看错误详情</summary><div class="job-error-body">${esc(r.error)}</div></details>` : '';
+  const recoveryText = r.status !== 'failed' ? (r.recovery_reason || r.error || '') : '';
+  const recovery = recoveryText ? `<details class="job-recovery"><summary>查看恢复记录</summary><div class="job-error-body">${esc(recoveryText)}</div></details>` : '';
+  return `<div class="job-subject"><strong>${esc(jobTitle(r))}</strong><div class="job-subject-meta"><span>${esc(kind)}</span><span class="mono">${esc(r.source_id || '')}</span>${pending}${source}</div>${failure}${recovery}</div>`;
+}
+function jobFlow(r) {
+  const label = workflowLabels[r.workflow_state] || r.workflow_state || '-';
+  return `<div class="job-flow">${esc(label)}<span class="mono">${esc(r.workflow_state || '')}</span></div>`;
+}
+function jobStage(r) {
+  const label = stageLabels[r.stage] || r.stage || '-';
+  return `<div class="job-stage">${esc(label)}<span class="mono">${esc(r.stage || '')}</span></div>`;
+}
+function jobActions(r) {
+  if (!state.adminAuthenticated) return '<span class="muted">-</span>';
+  if (r.status === 'failed') return `<button onclick="retryJob(${r.id})">重试</button>`;
+  if (r.status === 'running') return '<button disabled title="worker 心跳正常；任务失败或租约失效后方可重试">运行中</button>';
+  if (r.status === 'queued') return '<button disabled title="任务已在队列中，无需重复提交">排队中</button>';
+  return '<span class="muted">-</span>';
+}
+async function retryJob(id) { try { await api(`/api/jobs/${id}/retry`, {method:'POST', body:'{}'}); renderJobs(); renderOverview(); } catch (error) { if (!adminExpired(error)) alert(error.message || '重试失败'); } }
+
+async function renderLogs() {
+  const rows = await api(filteredUrl('/api/job-events', {limit: 240}));
+  $('logs').innerHTML = table(['时间','用户','任务','事件','详情'], rows.map(r => [esc(r.created_at), userCell(r), `${small(r.job_id)}<br><span class="mono muted">${esc(r.source_id || 'system')}</span>`, pill(r.event_type), `<span class="mono">${esc(r.detail)}</span>`]));
+}
 
 async function renderReview() {
-  const rows = await api('/api/review-issues?limit=160');
+  const rows = await api(filteredUrl('/api/review-issues', {limit: 160}));
   $('review').innerHTML = table(['时间','来源','类别','严重度','详情'], rows.map(r => [r.created_at, `${r.source_kind}<br><span class="mono">${esc(r.source_id)}</span>`, esc(r.category), pill(r.severity), esc(r.detail)]));
 }
 
-function table(headers, rows) {
+function table(headers, rows, className='') {
   if (!rows.length) return '<div class="card empty">暂无数据</div>';
-  return `<div class="card wide"><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  const cardClass = className ? ` ${className}-card` : '';
+  const tableClass = className ? ` class="${esc(className)}-table"` : '';
+  return `<div class="card wide${cardClass}"><table${tableClass}><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
 function userCell(r) { const name = r.sender_name || '未解析用户'; const id = r.sender_id || ''; return `<strong>${esc(name)}</strong><br><span class="mono muted">${esc(id)}</span>`; }
 function small(v) { return `<span class="mono">${esc(v)}</span>`; }
-refreshAll();
+Promise.all([loadUsers(), loadAdminStatus()]).finally(refreshAll);
 </script>
 </body>
 </html>

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zip-lab-mail-collector"
+version = "0.1.0"
+description = "Read-only local mailbox collector for recruiting emails"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+mail-collector = "mail_collector.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

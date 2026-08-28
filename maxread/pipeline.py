@@ -4,24 +4,25 @@ import traceback
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from .arxiv import ArxivClient
 from .db import Store
 from .feishu import FeishuClient, doc_token_from_url
 from .models import ArxivMetadata, FeishuEvent, PaperBundle, PaperRef
 from .openai_client import OpenAIClient
-from .prompts import FINAL_SYSTEM_PROMPT, build_final_user_prompt
+from .prompts import FINAL_SYSTEM_PROMPT, SECTION_GENERATION_TASKS, build_final_user_prompt, build_paper_evidence_prefix, build_section_user_prompt, select_key_source_tables
 from .publishing import publish_marker_image
 from .quality import PrePublishQualityError, blocking_quality_warnings, paper_markdown_completeness_errors, verify_published_docx
 from .quality_repair import QualityRepairResult, repair_until_quality_passes
 from .repository import find_repository_url
-from .render import ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning
-from .review import review_markdown_with_report
+from .render import _figure_section_target, compose_related_figure_groups, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning
+from .review import MethodValidationResult, ReviewIssue, audit_method_consistency_with_report, review_markdown_with_report, validate_method_consistency
 from .visual_qa import VisualQAController
 from .workflow import PublishedCheckpoint, WorkflowEvent
 
@@ -62,6 +63,8 @@ class MaxReadPipeline:
         review_reasoning_effort: str = "",
         visual_qa: Optional[VisualQAController] = None,
         generation_repair_rounds: int = 2,
+        sectional_generation_enabled: bool = False,
+        sectional_generation_workers: int = 5,
         quality_repair_rounds: int = 2,
         on_workflow_event=None,
     ):
@@ -73,6 +76,8 @@ class MaxReadPipeline:
         self.review_reasoning_effort = review_reasoning_effort
         self.visual_qa = visual_qa
         self.generation_repair_rounds = max(0, int(generation_repair_rounds))
+        self.sectional_generation_enabled = bool(sectional_generation_enabled)
+        self.sectional_generation_workers = max(1, int(sectional_generation_workers))
         self.quality_repair_rounds = max(0, int(quality_repair_rounds))
         self.on_workflow_event = on_workflow_event
 
@@ -84,6 +89,8 @@ class MaxReadPipeline:
         force: bool = False,
         resume_published_url: str = "",
         resume_published_checkpoint: str = "",
+        force_rebuild: bool = False,
+        editorial_guidance: str = "",
     ) -> ProcessResult:
         record = self.store.get_paper(ref.paper_id)
         if not force and record and record.status == "done" and record.doc_url:
@@ -97,8 +104,8 @@ class MaxReadPipeline:
         try:
             if event and send_progress:
                 self._reply(event, f"[了解] 收到了：{ref.paper_id}", "start", ref.paper_id)
-            published_url = str(resume_published_url or "").strip()
-            if not published_url and record and record.status == "quality_failed":
+            published_url = "" if force_rebuild else str(resume_published_url or "").strip()
+            if not force_rebuild and not published_url and record and record.status == "quality_failed":
                 published_url = record.doc_url
             checkpoint = PublishedCheckpoint.from_json(resume_published_checkpoint, fallback_url=published_url)
             if checkpoint:
@@ -159,25 +166,58 @@ class MaxReadPipeline:
                 _require_renderable_source_figures(bundle, figures)
                 figure_inserts = figure_placeholders(figures)
                 figure_visuals, figure_visual_warnings = _describe_figures_for_prompt(self.llm, figure_inserts)
+                figure_inserts, figure_visuals = compose_related_figure_groups(figure_inserts, figure_visuals)
                 macro_kwargs = _paper_macro_kwargs(bundle)
                 markers = [marker for marker, _path, _caption in figure_inserts]
+                selected_tables = select_key_source_tables(bundle.source_tables)
                 repository_url = find_repository_url(bundle)
                 generation_run = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                generation_prompt = build_final_user_prompt(bundle, figure_inserts, figure_visuals)
-                markdown = _generate_complete_paper_markdown(
-                    self.llm,
-                    generation_prompt,
-                    markers,
-                    attempts=self.generation_repair_rounds + 1,
-                    paper_id=bundle.metadata.paper_id,
-                    title=bundle.metadata.title,
-                    prior_feedback=retry_context.feedback,
-                    previous_markdown=retry_context.previous_markdown,
-                    attempt_writer=lambda attempt, raw, errors: _write_generation_attempt(
-                        bundle, generation_run, attempt, raw, errors
-                    ),
-                    on_workflow_event=self._workflow,
-                )
+                if self.sectional_generation_enabled and not retry_context.previous_markdown:
+                    evidence_prefix = build_paper_evidence_prefix(
+                        bundle,
+                        figure_inserts,
+                        figure_visuals,
+                        editorial_guidance=editorial_guidance,
+                    )
+                    marker_assignments, table_assignments = _sectional_material_assignments(
+                        figure_inserts,
+                        figure_visuals,
+                        selected_tables,
+                    )
+                    markdown = _generate_sectional_paper_markdown(
+                        self.llm,
+                        evidence_prefix,
+                        paper_id=bundle.metadata.paper_id,
+                        markers_by_section=marker_assignments,
+                        tables_by_section=table_assignments,
+                        attempts=self.generation_repair_rounds + 1,
+                        workers=self.sectional_generation_workers,
+                        artifact_writer=lambda section, attempt, raw, errors: _write_section_generation_attempt(
+                            bundle, generation_run, section, attempt, raw, errors
+                        ),
+                        on_workflow_event=self._workflow,
+                    )
+                else:
+                    generation_prompt = build_final_user_prompt(
+                        bundle,
+                        figure_inserts,
+                        figure_visuals,
+                        editorial_guidance=editorial_guidance,
+                    )
+                    markdown = _generate_complete_paper_markdown(
+                        self.llm,
+                        generation_prompt,
+                        markers,
+                        attempts=self.generation_repair_rounds + 1,
+                        paper_id=bundle.metadata.paper_id,
+                        title=bundle.metadata.title,
+                        prior_feedback=retry_context.feedback,
+                        previous_markdown=retry_context.previous_markdown,
+                        attempt_writer=lambda attempt, raw, errors: _write_generation_attempt(
+                            bundle, generation_run, attempt, raw, errors
+                        ),
+                        on_workflow_event=self._workflow,
+                    )
                 self._workflow(WorkflowEvent.DRAFT_READY, ref.paper_id)
                 _write_paper_artifact(bundle, "01-generated.md", markdown)
                 markdown = _sanitize_repository_markdown(markdown, repository_url)
@@ -188,16 +228,162 @@ class MaxReadPipeline:
                 review_warnings = list(figure_visual_warnings)
                 if event and send_progress:
                     self._reply(event, f"[审阅中] 正在审阅/修订：{ref.paper_id}", "reviewing", ref.paper_id)
+                audit_source_context = _paper_method_source_context(bundle)
                 try:
-                    review = review_markdown_with_report(self.llm, markdown, markers, kind="paper", reasoning_effort=self.review_reasoning_effort)
-                    _write_paper_artifact(bundle, "03-review-response.txt", review.raw)
-                    markdown = review.markdown
-                    _write_paper_artifact(bundle, "04-reviewed.md", markdown)
-                    self.store.add_review_issues("paper", ref.paper_id, review.issues)
-                    for issue in review.issues:
-                        review_warnings.append(f"review:{issue.category}:{issue.severity}:{issue.detail}")
+                    editorial_validation = _deterministic_editorial_validation(markdown, markers)
+                    validation = validate_method_consistency(
+                        self.llm,
+                        _paper_method_markdown(markdown),
+                        audit_source_context,
+                        editorial_guidance,
+                        self.review_reasoning_effort,
+                    )
+                    _write_paper_artifact(
+                        bundle,
+                        "03-editorial-validation.json",
+                        json.dumps(
+                            {
+                                "passed": editorial_validation.passed,
+                                "findings": [issue.__dict__ for issue in editorial_validation.issues],
+                                "raw": editorial_validation.raw,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                    )
+                    _write_paper_artifact(
+                        bundle,
+                        "04c-method-validation.json",
+                        json.dumps(
+                            {
+                                "passed": validation.passed,
+                                "findings": [issue.__dict__ for issue in validation.issues],
+                                "raw": validation.raw,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                    )
+                    editorial_changed = False
+                    if not editorial_validation.passed:
+                        finding_text = "\n".join(
+                            f"- [{issue.category}:{issue.severity}] {issue.detail}"
+                            for issue in editorial_validation.issues
+                        ) or "- 交付可读性验收未通过，但未返回具体 finding"
+                        review = review_markdown_with_report(
+                            self.llm,
+                            markdown,
+                            markers,
+                            kind="paper",
+                            reasoning_effort=self.review_reasoning_effort,
+                            source_context=audit_source_context,
+                            editorial_guidance=(
+                                str(editorial_guidance or "").strip()
+                                + "\n\n交付可读性 findings，必须逐条做最小修复：\n"
+                                + finding_text
+                            ).strip(),
+                        )
+                        _write_paper_artifact(bundle, "03-review-response.txt", review.raw)
+                        editorial_changed = review.markdown.strip() != markdown.strip()
+                        markdown = review.markdown
+                        _write_paper_artifact(bundle, "04-reviewed.md", markdown)
+                        self.store.add_review_issues("paper", ref.paper_id, review.issues)
+                        for issue in review.issues:
+                            review_warnings.append(f"review:{issue.category}:{issue.severity}:{issue.detail}")
+                        editorial_validation = validate_editorial_quality(
+                            self.llm,
+                            markdown,
+                            markers,
+                            reasoning_effort=self.review_reasoning_effort,
+                        )
+                        _write_paper_artifact(
+                            bundle,
+                            "04a-editorial-revalidation.json",
+                            json.dumps(
+                                {
+                                    "passed": editorial_validation.passed,
+                                    "findings": [issue.__dict__ for issue in editorial_validation.issues],
+                                    "raw": editorial_validation.raw,
+                                },
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                        )
+                    if not editorial_validation.passed:
+                        blocking = "; ".join(
+                            f"editorial:{issue.category}:{issue.severity}:{issue.detail}"
+                            for issue in editorial_validation.issues
+                            if issue.severity in {"medium", "high"}
+                        ) or "editorial:other:high:delivery readability validation failed"
+                        self._workflow(WorkflowEvent.REVIEW_COMPLETED, ref.paper_id)
+                        self._workflow(WorkflowEvent.QUALITY_REJECTED, blocking)
+                        raise PrePublishQualityError(blocking)
+                    if editorial_changed:
+                        validation = validate_method_consistency(
+                            self.llm,
+                            _paper_method_markdown(markdown),
+                            source_context=audit_source_context,
+                            editorial_guidance=editorial_guidance,
+                            reasoning_effort=self.review_reasoning_effort,
+                        )
+                    if not validation.passed:
+                        finding_text = "\n".join(
+                            f"- [{issue.category}:{issue.severity}] {issue.detail}"
+                            for issue in validation.issues
+                        ) or "- 方法一致性验收未通过，但未返回具体 finding"
+                        method_repair = audit_method_consistency_with_report(
+                            self.llm,
+                            markdown,
+                            markers,
+                            source_context=audit_source_context,
+                            editorial_guidance=(
+                                str(editorial_guidance or "").strip()
+                                + "\n\n上一轮独立验收 findings，必须逐条修复：\n"
+                                + finding_text
+                            ).strip(),
+                            reasoning_effort=self.review_reasoning_effort,
+                        )
+                        _write_paper_artifact(bundle, "04d-method-repair-response.txt", method_repair.raw)
+                        markdown = method_repair.markdown
+                        _write_paper_artifact(bundle, "04e-method-repaired.md", markdown)
+                        validation = validate_method_consistency(
+                            self.llm,
+                            _paper_method_markdown(markdown),
+                            source_context=audit_source_context,
+                            editorial_guidance=editorial_guidance,
+                            reasoning_effort=self.review_reasoning_effort,
+                        )
+                        _write_paper_artifact(
+                            bundle,
+                            "04f-method-revalidation.json",
+                            json.dumps(
+                                {
+                                    "passed": validation.passed,
+                                    "findings": [issue.__dict__ for issue in validation.issues],
+                                    "raw": validation.raw,
+                                },
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                        )
+                    if not validation.passed:
+                        blocking = "; ".join(
+                            f"method-audit:{issue.category}:{issue.severity}:{issue.detail}"
+                            for issue in validation.issues
+                            if issue.severity in {"medium", "high"}
+                        ) or "method-audit:other:high:method consistency validation failed"
+                        # Method validation runs while the durable workflow is
+                        # still in reviewing. Enter the quality gate before
+                        # rejecting; jumping directly to QUALITY_REJECTED is
+                        # an invalid transition and would be mistaken for an
+                        # optional audit failure by the catch block below.
+                        self._workflow(WorkflowEvent.REVIEW_COMPLETED, ref.paper_id)
+                        self._workflow(WorkflowEvent.QUALITY_REJECTED, blocking)
+                        raise PrePublishQualityError(blocking)
                 except Exception as review_exc:
-                    review_warnings.append(f"Review pass failed: {review_exc}")
+                    if isinstance(review_exc, PrePublishQualityError):
+                        raise
+                    review_warnings.append(f"Parallel delivery validation failed: {review_exc}")
                 self._workflow(WorkflowEvent.REVIEW_COMPLETED, ref.paper_id)
                 def normalize_for_quality(candidate: str) -> str:
                     candidate = _sanitize_repository_markdown(candidate, repository_url)
@@ -483,8 +669,9 @@ def _paper_macro_kwargs(bundle: PaperBundle) -> dict:
 
 
 def _require_renderable_source_figures(bundle: PaperBundle, figures) -> None:
-    if bundle.source_figures and not figures:
-        formats = sorted({Path(figure.asset).suffix.lower() or "(none)" for figure in bundle.source_figures})
+    body_figures = [figure for figure in bundle.source_figures if not getattr(figure, "is_appendix", False)]
+    if body_figures and not figures:
+        formats = sorted({Path(figure.asset).suffix.lower() or "(none)" for figure in body_figures})
         detail = ",".join(formats) or "unknown"
         raise PrePublishQualityError(f"quality:figure:source:high:no-renderable-source-figure:formats={detail}")
 
@@ -616,6 +803,324 @@ def _write_generation_attempt(bundle: PaperBundle, run_id: str, attempt: int, ma
         f"01-{run_id}-attempt-{attempt}.json",
         json.dumps({"attempt": attempt, "errors": list(errors)}, ensure_ascii=False, indent=2),
     )
+
+
+def _write_section_generation_attempt(
+    bundle: PaperBundle,
+    run_id: str,
+    section: str,
+    attempt: int,
+    markdown: str,
+    errors,
+) -> None:
+    safe_section = re.sub(r"[^a-z0-9_-]+", "-", str(section).lower()).strip("-") or "section"
+    _write_paper_artifact(bundle, f"01-{run_id}-{safe_section}-attempt-{attempt}.md", markdown)
+    _write_paper_artifact(
+        bundle,
+        f"01-{run_id}-{safe_section}-attempt-{attempt}.json",
+        json.dumps(
+            {"section": section, "attempt": attempt, "errors": list(errors)},
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+
+
+def _sectional_material_assignments(figure_inserts, figure_visuals, source_tables):
+    markers: Dict[str, List[str]] = {key: [] for key in SECTION_GENERATION_TASKS}
+    tables: Dict[str, List[int]] = {key: [] for key in SECTION_GENERATION_TASKS}
+    for marker, path, caption in figure_inserts:
+        target = _figure_section_target(path, caption, figure_visuals.get(marker, ""))
+        section = {"experiments": "experiments", "analysis": "ablation", "method": "method"}.get(target, "method")
+        markers[section].append(marker)
+    for index, table in enumerate(source_tables, start=1):
+        text = str(table or "").lower()
+        if any(word in text for word in ("ablation", "sensitivity", "ratio", "stride", "hyperparameter", "w/o", "without")):
+            section = "ablation"
+        elif any(word in text for word in ("notation", "algorithm", "complexity", "module", "component", "architecture")):
+            section = "method"
+        else:
+            section = "experiments"
+        tables[section].append(index)
+    return markers, tables
+
+
+def _generate_sectional_paper_markdown(
+    llm,
+    evidence_prefix: str,
+    paper_id: str,
+    markers_by_section: Dict[str, List[str]],
+    tables_by_section: Dict[str, List[int]],
+    attempts: int = 3,
+    workers: int = 4,
+    artifact_writer=None,
+    on_workflow_event=None,
+) -> str:
+    section_order = list(SECTION_GENERATION_TASKS)
+    attempt_serials = {section: 0 for section in section_order}
+
+    def generate(section: str, merge_feedback: Optional[List[str]] = None, previous_output: str = "") -> str:
+        base_prompt = build_section_user_prompt(
+            evidence_prefix,
+            section,
+            paper_id,
+            markers=markers_by_section.get(section, []),
+            table_ids=tables_by_section.get(section, []),
+        )
+        if merge_feedback:
+            base_prompt += (
+                "\n\n合并级返修要求（优先处理）：\n"
+                + "\n".join(f"- {item}" for item in merge_feedback)
+                + "\n- 下面是本章上一版，只能作为返修输入，不得原样重复其中与其他章节冲突的表格：\n"
+                + "```markdown\n"
+                + previous_output.strip()
+                + "\n```"
+            )
+        prompt = base_prompt
+        last_errors: List[str] = []
+        for attempt in range(1, max(1, int(attempts)) + 1):
+            raw = llm.responses_text(
+                FINAL_SYSTEM_PROMPT,
+                prompt,
+                reasoning_effort=None if section == "method" else "medium",
+            )
+            markdown = _extract_section_output(_unwrap_outer_markdown_fence(raw), section)
+            errors = _section_output_errors(
+                markdown,
+                section,
+                markers_by_section.get(section, []),
+                tables_by_section.get(section, []),
+            )
+            if artifact_writer:
+                attempt_serials[section] += 1
+                artifact_writer(section, attempt_serials[section], raw, errors)
+            if not errors:
+                return markdown
+            last_errors = errors
+            prompt = (
+                base_prompt
+                + "\n\n上一轮本章输出未通过，精确错误如下：\n"
+                + "\n".join(f"- {error}" for error in errors)
+                + "\n\n上一轮输出：\n```markdown\n"
+                + markdown.strip()
+                + "\n```\n\n请只重写本章完整 Markdown，并在输出前逐项检查上述错误。"
+            )
+        raise IncompleteGenerationError([f"section-{section}:{error}" for error in last_errors], attempts=max(1, int(attempts)))
+
+    # Every section is independent and starts with the same evidence bytes.
+    # Launch all five together; provider-side prefix caching can still reuse
+    # the shared prefix without adding a serial warm-up to the critical path.
+    outputs: Dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=min(max(1, int(workers)), len(section_order))) as executor:
+        futures = {executor.submit(generate, section): section for section in section_order}
+        for future in as_completed(futures):
+            section = futures[future]
+            outputs[section] = future.result()
+
+    # A section can independently pass while still repeating a table invented
+    # by another section. Repair only the conflicting section instead of
+    # discarding all successful calls or rerunning the whole paper.
+    for _round in range(max(0, int(attempts) - 1)):
+        duplicate_sections = _duplicate_markdown_table_sections(outputs, section_order)
+        if not duplicate_sections:
+            break
+        for section in section_order:
+            if section not in duplicate_sections:
+                continue
+            previous = outputs[section]
+            outputs[section] = generate(
+                section,
+                merge_feedback=[
+                    "本章存在与其他章节完全相同的 Markdown 表格。",
+                    "保留本章指定的 source 表；其他重复内容改成文字回指，不得再次制表。",
+                ],
+                previous_output=previous,
+            )
+
+    if on_workflow_event:
+        on_workflow_event(WorkflowEvent.GENERATION_CHECK_STARTED, "sectional-generation")
+    markdown = "\n\n".join(outputs[key].strip() for key in section_order).strip() + "\n"
+    all_markers = [marker for values in markers_by_section.values() for marker in values]
+    all_tables = [table_id for values in tables_by_section.values() for table_id in values]
+    errors = paper_markdown_completeness_errors(markdown, all_markers)
+    errors.extend(_global_sectional_uniqueness_errors(markdown, all_markers, all_tables))
+    if errors:
+        raise IncompleteGenerationError(errors, attempts=max(1, int(attempts)))
+    markdown = re.sub(r"(?m)^\s*\[MaxReadTable:\d+\]\s*$\n?", "", markdown)
+    return re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
+
+
+def _extract_section_output(markdown: str, section: str) -> str:
+    text = str(markdown or "").strip()
+    expected = {
+        "front": {1, 2},
+        "method": {3},
+        "experiments": {4},
+        "ablation": {5},
+        "closing": {6, 7},
+    }[section]
+    if section == "front":
+        # Providers occasionally prepend a short explanation and concatenate
+        # the requested heading onto the same line. Use the final H1 candidate
+        # so an explanatory mention of the contract cannot become the document.
+        starts = list(re.finditer(r"(?<!#)#(?!#)\s+", text))
+    else:
+        first = min(expected)
+        # The actual section is normally the final occurrence: preambles often
+        # quote the expected heading before emitting it, sometimes without a
+        # newline after the quote or an ellipsis.
+        starts = list(re.finditer(rf"(?<!#)##(?!#)\s+{first}(?:\.|\s)", text))
+    if not starts:
+        return text
+    start = starts[-1]
+    sliced = text[start.start():]
+    for match in re.finditer(r"(?m)^##\s+([1-7])(?:\.|\s)", sliced):
+        number = int(match.group(1))
+        if match.start() > 0 and number not in expected:
+            sliced = sliced[:match.start()]
+            break
+    return sliced.strip() + "\n"
+
+
+def _section_output_errors(markdown: str, section: str, markers: List[str], table_ids: List[int]) -> List[str]:
+    text = str(markdown or "")
+    expected = {
+        "front": {1, 2},
+        "method": {3},
+        "experiments": {4},
+        "ablation": {5},
+        "closing": {6, 7},
+    }[section]
+    found = [int(value) for value in re.findall(r"(?m)^##\s+([1-7])(?:\.|\s)", text)]
+    errors: List[str] = []
+    if set(found) != expected or len(found) != len(expected):
+        errors.append(f"headings expected={sorted(expected)} found={found}")
+    if re.search(r"(?m)^#{2,6}\s+(?:\d+(?:\.\d+)*\.)?#(?:\s|\d)", text):
+        errors.append("malformed nested heading")
+    if section == "front":
+        if len(re.findall(r"(?m)^#\s+", text)) != 1:
+            errors.append("front requires exactly one H1")
+        if "TL;DR" not in text:
+            errors.append("front missing TL;DR")
+    narrative_length = _section_narrative_length(text)
+    minimum = {"front": 600, "method": 1200, "experiments": 450, "ablation": 450, "closing": 300}[section]
+    if section in {"experiments", "ablation"} and (markers or table_ids):
+        minimum = 250
+    if narrative_length < minimum:
+        errors.append(f"section narrative too short:{narrative_length}<{minimum}")
+    maximum = {"front": 4800, "method": 9000, "experiments": 6000, "ablation": 7000, "closing": 3000}.get(section)
+    if maximum is not None and narrative_length > maximum:
+        errors.append(f"section narrative too long:{narrative_length}>{maximum}; keep tables, compress prose")
+    allowed_markers = set(markers)
+    found_markers = re.findall(r"\[MaxReadFigure:[^\]]+\]", text)
+    for marker in markers:
+        if found_markers.count(marker) != 1:
+            errors.append(f"figure marker count {marker}={found_markers.count(marker)} expected=1")
+    for marker in found_markers:
+        if marker not in allowed_markers:
+            errors.append(f"unassigned figure marker:{marker}")
+    allowed_tables = {f"[MaxReadTable:{table_id}]" for table_id in table_ids}
+    found_tables = re.findall(r"\[MaxReadTable:\d+\]", text)
+    for marker in allowed_tables:
+        if found_tables.count(marker) != 1:
+            errors.append(f"table marker count {marker}={found_tables.count(marker)} expected=1")
+    for marker in found_tables:
+        if marker not in allowed_tables:
+            errors.append(f"unassigned table marker:{marker}")
+    return errors
+
+
+def _section_narrative_length(markdown: str) -> int:
+    """Measure explanatory prose without charging source tables or markers."""
+    kept: List[str] = []
+    in_table = False
+    for line in str(markdown or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            in_table = True
+            continue
+        if in_table and not stripped:
+            in_table = False
+            continue
+        if in_table:
+            continue
+        if re.fullmatch(r"\[MaxRead(?:Figure:[^\]]+|Table:\d+)\]", stripped):
+            continue
+        kept.append(stripped)
+    return len("".join(kept))
+
+
+def _global_sectional_uniqueness_errors(markdown: str, markers: List[str], table_ids: List[int]) -> List[str]:
+    errors: List[str] = []
+    for marker in markers:
+        count = markdown.count(marker)
+        if count != 1:
+            errors.append(f"global figure marker count {marker}={count}")
+    for table_id in table_ids:
+        marker = f"[MaxReadTable:{table_id}]"
+        count = markdown.count(marker)
+        if count != 1:
+            errors.append(f"global table marker count {marker}={count}")
+    hashes: Dict[str, int] = {}
+    lines = markdown.splitlines()
+    index = 0
+    while index < len(lines):
+        if not lines[index].lstrip().startswith("|"):
+            index += 1
+            continue
+        block = []
+        while index < len(lines) and lines[index].lstrip().startswith("|"):
+            block.append(re.sub(r"\s+", "", lines[index]).lower())
+            index += 1
+        if len(block) >= 2:
+            digest = sha256("\n".join(block).encode("utf-8")).hexdigest()
+            hashes[digest] = hashes.get(digest, 0) + 1
+    if any(count > 1 for count in hashes.values()):
+        errors.append("duplicate markdown table content across sections")
+    return errors
+
+
+def _duplicate_markdown_table_sections(outputs: Dict[str, str], section_order: List[str]) -> set[str]:
+    """Return only sections that should be regenerated for duplicate tables.
+
+    A table immediately preceded by a MaxReadTable marker owns source evidence,
+    so it wins over an unmarked summary copy. Otherwise the later section is
+    repaired, preserving deterministic document order.
+    """
+    seen: Dict[str, tuple[str, bool]] = {}
+    offenders: set[str] = set()
+    for section in section_order:
+        lines = str(outputs.get(section, "") or "").splitlines()
+        index = 0
+        while index < len(lines):
+            if not lines[index].lstrip().startswith("|"):
+                index += 1
+                continue
+            block = []
+            while index < len(lines) and lines[index].lstrip().startswith("|"):
+                block.append(re.sub(r"\s+", "", lines[index]).lower())
+                index += 1
+            if len(block) < 2:
+                continue
+            previous_index = index - len(block) - 1
+            while previous_index >= 0 and not lines[previous_index].strip():
+                previous_index -= 1
+            protected = bool(
+                previous_index >= 0
+                and re.fullmatch(r"\[MaxReadTable:\d+\]", lines[previous_index].strip())
+            )
+            digest = sha256("\n".join(block).encode("utf-8")).hexdigest()
+            prior = seen.get(digest)
+            if prior is None:
+                seen[digest] = (section, protected)
+                continue
+            prior_section, prior_protected = prior
+            if protected and not prior_protected:
+                offenders.add(prior_section)
+                seen[digest] = (section, True)
+            else:
+                offenders.add(section)
+    return offenders
 
 
 def _write_quality_repair_artifacts(bundle: PaperBundle, result: QualityRepairResult) -> None:
@@ -801,6 +1306,9 @@ def _generation_repair_prompt(
         + "- 输出前逐项自检本轮错误和历史失败账本；保留上一稿已经正确的章节、公式、表格和图片位置。\n"
         + "- 第一行必须是 `# ` 开头的 H1；不得有前置解释、JSON、YAML 或包住全文的代码围栏。\n"
         + "- 必须保留第 1 至第 7 章和已有的 MaxReadFigure 标记。不要复述本修复指令或分隔线。\n"
+        + "- 方法节不能被压缩成摘要：保留任务设定、模块输入/操作/输出、模块间承接、公式解释，以及论文提供的训练/推理流程。\n"
+        + "- 修复方法事实时只补理解核心结论所需的前提；不要新增符号账本、作用域矩阵或机械的同组/跨组穷举。\n"
+        + "- 实验与消融只保留上一稿已经选择的关键表和结论；不得补回未选择的 source/附录表。\n"
         + "\n----- BEGIN PREVIOUS OUTPUT -----\n"
         + previous_markdown.strip()
         + "\n----- END PREVIOUS OUTPUT -----\n"
@@ -836,8 +1344,84 @@ def _markdown_generation_contract(paper_id: str) -> str:
         "\n\n输出协议（硬约束）：\n"
         f"- 第一个非空行必须是 Markdown H1，形如 `{heading_hint}`。\n"
         "- 直接输出最终 Markdown；不要输出前置说明、JSON、YAML 或代码围栏。\n"
-        "- 不要用 ```markdown``` 包住全文；正文中的 marker 必须逐字保留。"
+        "- 不要用 ```markdown``` 包住全文；正文中的 marker 必须逐字保留。\n"
+        "- 方法节必须保留上下文和因果链：先写任务设定，再按真实方法子节展开模块输入/操作/输出，公式前后解释其作用，最后交代训练/推理或端到端流转（以 source 中实际存在的内容为准）。\n"
+        "- 方法以讲清任务设定、核心动作、数据流和输出为准；符号紧贴公式解释，不生成符号账本、作用域矩阵或机械边界证明。\n"
+        "- 分组/reset 等前提只有在它决定核心结论时才用一两句说明。\n"
+        "- 实验与消融只使用证据包中被选择的关键表；不要补回其他 source/附录表，也不要逐行复述表格。\n"
+        "- 如果上一轮因为格式错误重试，修复格式时不得顺手删掉方法子节、公式解释、模块承接句或端到端例子。"
     )
+
+
+def _paper_review_source_context(bundle: PaperBundle, max_chars: int = 190000) -> str:
+    """Give the semantic reviewer enough primary evidence to audit methods."""
+    source = str(bundle.source_text or "")
+    if len(source) > 90000:
+        source = source[:70000] + "\n\n[... source middle omitted ...]\n\n" + source[-20000:]
+    tables = "\n\n".join(select_key_source_tables(bundle.source_tables))
+    sections = [
+        f"Title: {bundle.metadata.title}",
+        f"Abstract: {bundle.metadata.summary}",
+        "TeX/source excerpt:\n" + source,
+        "Figure captions:\n" + "\n".join(bundle.source_captions or []),
+        "Tables:\n" + tables,
+    ]
+    text = "\n\n".join(item for item in sections if item.strip())
+    return text[: max(1000, int(max_chars))]
+
+
+def _paper_method_markdown(markdown: str) -> str:
+    match = re.search(
+        r"(?ms)^##\s+3(?:[.、]|\s).*?(?=^##\s+4(?:[.、]|\s)|\Z)",
+        str(markdown or ""),
+    )
+    return match.group(0).strip() if match else str(markdown or "").strip()
+
+
+def _paper_method_source_context(bundle: PaperBundle, max_chars: int = 45000) -> str:
+    source = str(bundle.source_text or "")
+    start = re.search(
+        r"\\(?:section|chapter)\*?\s*\{[^}]*?(?:method|approach|architecture|model|framework)",
+        source,
+        flags=re.I,
+    )
+    if start:
+        tail = source[start.start():]
+        end = re.search(
+            r"\\(?:section|chapter)\*?\s*\{[^}]*?(?:experiment|evaluation|result)",
+            tail,
+            flags=re.I,
+        )
+        excerpt = tail[: end.start()] if end and end.start() > 0 else tail
+    else:
+        excerpt = source
+    excerpt = excerpt[: max(4000, int(max_chars))]
+    captions = [
+        figure.caption for figure in bundle.source_figures
+        if figure.caption and not getattr(figure, "is_appendix", False)
+    ][:20]
+    return (
+        f"Title: {bundle.metadata.title}\n"
+        f"Abstract: {bundle.metadata.summary}\n\n"
+        "Method source excerpt:\n"
+        + (excerpt or "[无 method source evidence]")
+        + "\n\nBody figure captions:\n"
+        + ("\n".join(captions) or "[无]")
+    )
+
+
+def _deterministic_editorial_validation(markdown: str, markers: Iterable[str]) -> MethodValidationResult:
+    marker_list = list(markers)
+    errors = list(paper_markdown_completeness_errors(markdown, marker_list))
+    errors.extend(_global_sectional_uniqueness_errors(markdown, marker_list, []))
+    h1_count = len(re.findall(r"(?m)^#\s+", str(markdown or "")))
+    if h1_count != 1:
+        errors.append(f"h1-count:{h1_count}")
+    if re.search(r"(?m)^#{2,6}\s+(?:\d+(?:\.\d+)*\.)?#(?:\s|\d)", str(markdown or "")):
+        errors.append("malformed nested heading")
+    errors = list(dict.fromkeys(error for error in errors if str(error).strip()))
+    issues = [ReviewIssue("layout", "high", error) for error in errors]
+    return MethodValidationResult(passed=not issues, issues=issues, raw="deterministic")
 
 
 def _unwrap_outer_markdown_fence(markdown: str) -> str:
@@ -951,21 +1535,51 @@ def _describe_figures_for_prompt(llm, figure_inserts):
         return {}, []
     descriptions = {}
     warnings = []
-    for marker, path, caption in figure_inserts[:8]:
+    pending = []
+    for index, (marker, path, caption) in enumerate(figure_inserts):
         image_path = Path(path)
         if not image_path.exists():
-            warnings.append(f"figure-vision-missing:{image_path.name}")
+            warnings.append((index, f"figure-vision-missing:{image_path.name}"))
             continue
+        pending.append((index, marker, image_path, caption))
+
+    def describe(item):
+        index, marker, image_path, caption = item
         try:
             prompt = (
                 f"marker: {marker}\n"
                 f"caption: {caption or '[无 caption]'}\n"
                 "请读图并说明这张图实际展示什么；如果 caption 与图像不一致，优先指出图像内容。"
             )
-            text = llm.responses_image_text(FIGURE_VISION_SYSTEM_PROMPT, prompt, image_path)
+            try:
+                text = llm.responses_image_text(
+                    FIGURE_VISION_SYSTEM_PROMPT,
+                    prompt,
+                    image_path,
+                    reasoning_effort="low",
+                )
+            except TypeError as exc:
+                if "reasoning_effort" not in str(exc):
+                    raise
+                text = llm.responses_image_text(FIGURE_VISION_SYSTEM_PROMPT, prompt, image_path)
             text = " ".join(str(text or "").split())[:240]
-            if text:
-                descriptions[marker] = text
+            return index, marker, text, ""
         except Exception as exc:
-            warnings.append(f"figure-vision-failed:{image_path.name}:{_short_error(exc, 180)}")
-    return descriptions, warnings
+            return index, marker, "", f"figure-vision-failed:{image_path.name}:{_short_error(exc, 180)}"
+
+    try:
+        workers = max(1, int(os.environ.get("MAXREAD_FIGURE_VISION_WORKERS", "4")))
+    except ValueError:
+        workers = 4
+    results = []
+    if len(pending) <= 1 or workers <= 1:
+        results = [describe(item) for item in pending]
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, len(pending))) as executor:
+            results = [future.result() for future in [executor.submit(describe, item) for item in pending]]
+    for index, marker, description, warning in sorted(results, key=lambda item: item[0]):
+        if description:
+            descriptions[marker] = description
+        if warning:
+            warnings.append((index, warning))
+    return descriptions, [warning for _index, warning in sorted(warnings, key=lambda item: item[0])]

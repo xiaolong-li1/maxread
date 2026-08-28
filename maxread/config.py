@@ -41,7 +41,11 @@ class Settings:
     openai_reasoning_effort: str
     openai_review_reasoning_effort: str
     generation_repair_rounds: int
+    sectional_generation_enabled: bool
+    sectional_generation_workers: int
     quality_repair_rounds: int
+    auto_retry_attempts: int
+    recovery_attempts: int
     require_source: bool
     batch_workers: int
     batch_llm_concurrency: int
@@ -65,6 +69,7 @@ class Settings:
     duty_hour: int
     duty_minute: int
     duty_poll_seconds: int
+    admin_password_hash: str
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Settings":
@@ -92,13 +97,17 @@ class Settings:
             feishu_as=os.environ.get("MAXREAD_FEISHU_AS", "bot"),
             lark_cli=os.environ.get("MAXREAD_LARK_CLI", "lark-cli"),
             arxiv_timeout=int(os.environ.get("MAXREAD_ARXIV_TIMEOUT", "45")),
-            arxiv_parallel_streams=int(os.environ.get("MAXREAD_ARXIV_PARALLEL_STREAMS", "4")),
+            arxiv_parallel_streams=int(os.environ.get("MAXREAD_ARXIV_PARALLEL_STREAMS", "1")),
             arxiv_parallel_min_bytes=int(os.environ.get("MAXREAD_ARXIV_PARALLEL_MIN_BYTES", "1048576")),
             openai_timeout=int(os.environ.get("MAXREAD_OPENAI_TIMEOUT", "180")),
             openai_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REASONING_EFFORT", "high"),
             openai_review_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REVIEW_REASONING_EFFORT", "low"),
             generation_repair_rounds=max(0, int(os.environ.get("MAXREAD_GENERATION_REPAIR_ROUNDS", "2"))),
+            sectional_generation_enabled=os.environ.get("MAXREAD_SECTIONAL_GENERATION_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+            sectional_generation_workers=max(1, int(os.environ.get("MAXREAD_SECTIONAL_GENERATION_WORKERS", "5"))),
             quality_repair_rounds=max(0, int(os.environ.get("MAXREAD_QUALITY_REPAIR_ROUNDS", "2"))),
+            auto_retry_attempts=max(0, int(os.environ.get("MAXREAD_AUTO_RETRY_ATTEMPTS", "1"))),
+            recovery_attempts=max(0, int(os.environ.get("MAXREAD_RECOVERY_ATTEMPTS", "3"))),
             require_source=os.environ.get("MAXREAD_REQUIRE_SOURCE", "true").lower() in {"1", "true", "yes", "on"},
             batch_workers=int(os.environ.get("MAXREAD_BATCH_WORKERS", "3")),
             batch_llm_concurrency=int(os.environ.get("MAXREAD_LLM_CONCURRENCY", "2")),
@@ -109,15 +118,9 @@ class Settings:
             queue_stale_minutes=int(os.environ.get("MAXREAD_QUEUE_STALE_MINUTES", "30")),
             queue_heartbeat_seconds=int(os.environ.get("MAXREAD_QUEUE_HEARTBEAT_SECONDS", "15")),
             visual_qa_enabled=os.environ.get("MAXREAD_VISUAL_QA_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
-            visual_qa_host=os.environ.get("MAXREAD_VISUAL_QA_HOST", "ziplab-5090"),
-            visual_qa_runner=os.environ.get(
-                "MAXREAD_VISUAL_QA_RUNNER",
-                "/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh",
-            ),
-            visual_qa_remote_root=os.environ.get(
-                "MAXREAD_VISUAL_QA_REMOTE_ROOT",
-                "/home/lixiaolong/.local/share/maxread-browser",
-            ),
+            visual_qa_host=os.environ.get("MAXREAD_VISUAL_QA_HOST", "").strip(),
+            visual_qa_runner=os.environ.get("MAXREAD_VISUAL_QA_RUNNER", "").strip(),
+            visual_qa_remote_root=os.environ.get("MAXREAD_VISUAL_QA_REMOTE_ROOT", "").strip(),
             visual_qa_timeout=int(os.environ.get("MAXREAD_VISUAL_QA_TIMEOUT", "90")),
             visual_qa_inspect_retries=max(0, int(os.environ.get("MAXREAD_VISUAL_QA_INSPECT_RETRIES", "2"))),
             visual_qa_max_sections=int(os.environ.get("MAXREAD_VISUAL_QA_MAX_SECTIONS", "12")),
@@ -128,4 +131,5 @@ class Settings:
             duty_hour=int(os.environ.get("MAXREAD_DUTY_HOUR", "7")),
             duty_minute=int(os.environ.get("MAXREAD_DUTY_MINUTE", "0")),
             duty_poll_seconds=int(os.environ.get("MAXREAD_DUTY_POLL_SECONDS", "30")),
+            admin_password_hash=os.environ.get("MAXREAD_ADMIN_PASSWORD_SHA256", "").strip().lower(),
         )

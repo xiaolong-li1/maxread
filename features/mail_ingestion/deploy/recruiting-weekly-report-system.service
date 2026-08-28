@@ -1,0 +1,15 @@
+[Unit]
+Description=ZIP Lab weekly recruiting report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/maxread
+Environment=HOME=/root
+EnvironmentFile=-/opt/maxread/features/mail_ingestion/data/accounts/zip-lab.env
+ExecStart=/opt/maxread/features/mail_ingestion/bin/recruiting-pipeline --root /opt/maxread --env-file features/mail_ingestion/data/accounts/zip-lab.env weekly-report --send --chat-id ${RECRUITING_NOTIFY_CHAT_ID}
+NoNewPrivileges=true
+PrivateTmp=true

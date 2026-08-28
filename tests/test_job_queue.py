@@ -1,8 +1,18 @@
+from concurrent.futures import ThreadPoolExecutor
 from threading import BoundedSemaphore
 
 from maxread.db import Store
 
-from maxread.job_queue import _LimitedLLM, _notify_watchers, _notify_watchers_progress, _queue_eta_text
+from maxread.job_queue import (
+    _LimitedLLM,
+    _is_auto_retryable_error,
+    _notify_watchers,
+    _notify_watchers_progress,
+    _notify_watchers_started,
+    _published_doc_url,
+    _queue_eta_text,
+    QueueManager,
+)
 
 
 class _DummyLLM:
@@ -46,6 +56,30 @@ def test_limited_llm_proxies_image_text_under_semaphore():
     assert inner.image_calls == [("vision", "describe", "a.png")]
 
 
+def test_limited_llm_announces_once_under_parallel_section_calls():
+    events = []
+    llm = _LimitedLLM(
+        _DummyLLM(),
+        BoundedSemaphore(5),
+        on_call=lambda: events.append("reading"),
+    )
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(lambda _: llm.responses_text("generate", "section"), range(5)))
+
+    assert results == ["ok"] * 5
+    assert events == ["reading"]
+
+
+def test_limited_llm_progress_failure_does_not_discard_model_output():
+    def broken_progress():
+        raise RuntimeError("sqlite progress connection used from another thread")
+
+    llm = _LimitedLLM(_DummyLLM(), BoundedSemaphore(1), on_call=broken_progress)
+
+    assert llm.responses_text("generate", "section") == "ok"
+
+
 class _ReactionFeishu:
     def __init__(self):
         self.reactions = []
@@ -80,6 +114,34 @@ def test_notify_watchers_progress_uses_reactions_not_text(tmp_path):
     store.close()
 
 
+def test_recovered_job_suppresses_progress_reactions_until_terminal(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om_1", "oc", "group", "ou", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om_1", "oc", "group", "ou", usage_id)
+    store.claim_next_queue_job(worker_id="host-a:12345:worker")
+    assert store.recover_dead_worker_queue_jobs("host-a", lambda pid: False) == 1
+    row = store.claim_next_queue_job(worker_id="worker-b")
+    assert row["suppress_progress_notifications"] == 1
+
+    feishu = _ReactionFeishu()
+    _notify_watchers_started(store, feishu, queued["job_id"], "2604.12946", suppress_progress_notifications=True)
+    _notify_watchers_progress(
+        store,
+        feishu,
+        queued["job_id"],
+        "[在做了] 正在读论文：2604.12946",
+        "reading",
+        "job-reading",
+        suppress_progress_notifications=True,
+    )
+
+    assert feishu.reactions == []
+    assert any(event["event_type"] == "progress_notifications_suppressed" for event in store.list_job_events(queued["job_id"]))
+    assert store.complete_queue_job(queued["job_id"], "https://doc", worker_id="worker-b") is True
+    assert store.list_queue_jobs()[0]["suppress_progress_notifications"] == 0
+    store.close()
+
+
 def test_failed_notification_explains_topic_retry(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     usage_id = store.add_usage_event("evt", "om_1", "oc", "group", "ou", "paper", "2604.12946", "url", status="queued")
@@ -90,4 +152,120 @@ def test_failed_notification_explains_topic_retry(tmp_path):
 
     assert len(feishu.replies) == 1
     assert "本话题回复「重试」" in feishu.replies[0][1]
+    store.close()
+
+
+def test_visual_failure_notification_keeps_published_doc_for_manual_review(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om_1", "oc", "group", "ou", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om_1", "oc", "group", "ou", usage_id)
+    feishu = _ReactionFeishu()
+    published_url = "https://feishu/doc"
+    error = "文档已生成，但发布后质检失败，暂不交付：visual-qa:high:invalid-formula"
+
+    assert _published_doc_url(type("Result", (), {"doc_url": published_url, "error": error})()) == published_url
+    _notify_watchers(
+        store,
+        feishu,
+        queued["job_id"],
+        "2604.12946",
+        "",
+        "Title",
+        error,
+        published_doc_url=published_url,
+    )
+
+    assert len(feishu.replies) == 1
+    text = feishu.replies[0][1]
+    assert "视觉审查重试到上限后仍未通过" in text
+    assert published_url in text
+    usage = store.conn.execute("select status, doc_url from usage_events where id = ?", (usage_id,)).fetchone()
+    assert tuple(usage) == ("failed", published_url)
+    assert any(event["event_type"] == "notify_failed_with_doc" for event in store.list_job_events(queued["job_id"]))
+    store.close()
+
+
+def test_recovered_failure_is_silent_but_success_reports_interruption(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om_1", "oc", "group", "ou", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om_1", "oc", "group", "ou", usage_id)
+    feishu = _ReactionFeishu()
+
+    _notify_watchers(
+        store,
+        feishu,
+        queued["job_id"],
+        "2604.12946",
+        "",
+        "Title",
+        "browser timeout",
+        notify_failure=False,
+    )
+    assert feishu.replies == []
+    assert store.conn.execute(
+        "select notified from job_watchers where job_id = ?", (queued["job_id"],)
+    ).fetchone()[0] == 1
+
+    store.conn.execute("update job_watchers set notified = 0 where job_id = ?", (queued["job_id"],))
+    store.conn.commit()
+    _notify_watchers(
+        store,
+        feishu,
+        queued["job_id"],
+        "2604.12946",
+        "https://doc",
+        "Title",
+        "",
+        recovery_reason="5090 的 NFS client 卡死，无法正常完成文件读写，造成服务异常",
+    )
+    assert len(feishu.replies) == 1
+    assert "NFS client 卡死" in feishu.replies[0][1]
+    store.close()
+
+
+def test_silent_retry_suppresses_success_notification_but_records_done(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om_1", "oc", "group", "ou", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om_1", "oc", "group", "ou", usage_id)
+    feishu = _ReactionFeishu()
+
+    _notify_watchers(
+        store,
+        feishu,
+        queued["job_id"],
+        "2604.12946",
+        "https://doc",
+        "Title",
+        "",
+        notify_success=False,
+    )
+
+    assert feishu.replies == []
+    usage = store.conn.execute("select status, doc_url from usage_events where id = ?", (usage_id,)).fetchone()
+    assert tuple(usage) == ("done", "https://doc")
+    assert any(event["event_type"] == "notify_done_suppressed" for event in store.list_job_events(queued["job_id"]))
+    store.close()
+
+
+def test_transient_failure_is_requeued_once_without_becoming_user_visible_failure(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om_1", "oc", "group", "ou", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om_1", "oc", "group", "ou", usage_id)
+    store.conn.execute("update queue_jobs set suppress_progress_notifications = 1 where id = ?", (queued["job_id"],))
+    store.conn.commit()
+    job = store.claim_next_queue_job(worker_id="worker-a")
+    manager = object.__new__(QueueManager)
+    manager.settings = type("Settings", (), {"auto_retry_attempts": 1})()
+
+    assert _is_auto_retryable_error("visual-qa:remote-error:browser timeout") is True
+    assert _is_auto_retryable_error("source_missing: TeX source unavailable") is False
+    assert _is_auto_retryable_error("quality:formula:xml:high:unsupported-paper-macro") is False
+    assert _is_auto_retryable_error("生成格式不完整，未发布文档") is True
+    assert manager._auto_retry(store, job, "feishu connection timeout while create_docx", "worker-a") is False
+    assert manager._auto_retry(store, job, "visual-qa:remote-error:browser timeout", "worker-a") is True
+    row = store.list_queue_jobs()[0]
+    assert row["status"] == "queued"
+    assert row["workflow_state"] == "queued"
+    assert row["suppress_progress_notifications"] == 1
+    assert any(event["event_type"] == "auto_retry" for event in store.list_job_events(queued["job_id"]))
     store.close()

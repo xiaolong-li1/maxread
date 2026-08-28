@@ -1,6 +1,6 @@
 # 读不动了 / MaxRead
 
-Local MVP: send an arXiv ID/link, HuggingFace Papers link, or supported web article URL to the Feishu bot, and MaxRead creates a public-readable Feishu docx summary.
+Send an arXiv ID/link, HuggingFace Papers link, `papers.cool/arxiv/<id>` mirror link, or supported web article URL to the Feishu bot, and MaxRead creates a public-readable Feishu docx summary.
 
 
 ## Deploy / Migrate to Another Machine
@@ -72,6 +72,13 @@ If Feishu auth is missing, run the normal `lark-cli auth login` flow once on the
 
 ## Setup
 
+For a complete production inventory, secret-handling policy, database schema, and
+Aliyun migration runbook, see
+[`docs/operations-and-migration.md`](docs/operations-and-migration.md) and
+[`docs/database-schema.md`](docs/database-schema.md). The repository never
+contains the real model key, Feishu app secret, lark-cli auth state, database,
+paper cache, or SSH key.
+
 1. Make sure `lark-cli doctor` is `ok: true`.
 2. Copy `.env.example` to `.env` and set `OPENAI_API_KEY` for real summaries.
 3. The Feishu bot must have docx write scopes, including `docs:document.media:upload` for inline paper figures. Without that scope, text and formulas can be written but image insertion will fail.
@@ -92,7 +99,7 @@ python3 -m maxread.cli process 'https://nrehiew.github.io/blog/sft_rl_opd/'
 Use `--no-openai` to test the Feishu document flow with fallback content.
 If arXiv returns HTTP 429, wait a few minutes before retrying. MaxRead stores failed attempts in SQLite but only treats `done` papers as cache hits.
 
-Large arXiv PDF/source downloads use conservative Range parallelism by default: `MAXREAD_ARXIV_PARALLEL_STREAMS=4` for files at least `MAXREAD_ARXIV_PARALLEL_MIN_BYTES=1048576`. On a stable proxy this can be raised to `8`; avoid `16` unless the proxy is known to tolerate many parallel Range requests.
+Large arXiv source downloads use two bounded Range streams by default. This avoids long single-connection stalls while keeping request concurrency conservative; do not increase it without measuring the target network and respecting arXiv rate limits.
 
 By default `MAXREAD_REQUIRE_SOURCE=true`, so MaxRead will not generate a full document unless TeX source is available. This keeps formula/image/table alignment reliable.
 
@@ -119,19 +126,24 @@ Before publishing, MaxRead sanitizes LaTeX/Markdown formatting, checks required 
 
 Paper generation is also a bounded state-machine loop: each output enters `generation_checking`, deterministic cleanup runs first, and a failed check enters `generation_repairing` with the previous output and exact errors included in the next model prompt. `MAXREAD_GENERATION_REPAIR_ROUNDS` controls model repair rounds (default `2`, three total generation opportunities). Exhausting the budget enters the retryable `generation_incomplete` terminal state without publishing.
 
+The durable state machine keeps those internal states for audit, but the architecture page projects them into ten business nodes: preparation, generation gate, editorial review, compile-quality gate, publishing, delivery gate, one recoverable-failure terminal, and completion. Check/repair/recheck is drawn as a self-loop on the relevant gate instead of three duplicate business nodes. A failed model, network, or browser attempt is automatically replayed once by default (`MAXREAD_AUTO_RETRY_ATTEMPTS=1`); deterministic source/quality failures still wait for an explicit retry, and partial Feishu writes are never blindly replayed without a publish checkpoint.
+
 Retries are durable across queue jobs. MaxRead reloads the latest failed draft plus the generation, pre-publish quality, and visual QA ledgers from `pipeline_artifacts`; the repair prompt treats those diagnostics as a no-regression checklist. In a Feishu topic, a user can reply `重试` to the failure message (or `重试 2608.10416`) without reposting the original link or mentioning the bot again. Queue acknowledgements estimate start and completion time from the median duration of recent successful jobs of the same source kind instead of a fixed per-batch constant.
 
-An optional browser worker can inspect the published Feishu document for invalid formulas, leaked formatting commands, image overflow, excessive image whitespace, and blank sections. Enable it only when the coordinator can SSH to the worker host:
+An optional delivery worker can inspect the final Feishu rendering for invalid formulas, leaked formatting commands, abnormal blank pages, and other visible failures. The preferred production path exports the Docx through Feishu's server-side PDF renderer and inspects every selected PDF page with Poppler; Playwright remains a fallback. Enable it only after the bot has `drive:export:readonly` and `docs:document:export` and a smoke test passes:
 
 ```bash
 MAXREAD_VISUAL_QA_ENABLED=true
-MAXREAD_VISUAL_QA_HOST=ziplab-5090
-MAXREAD_VISUAL_QA_RUNNER=/home/lixiaolong/.local/share/maxread-browser/run_visual_qa.sh
+MAXREAD_VISUAL_QA_HOST=localhost
+MAXREAD_VISUAL_QA_RUNNER=/opt/maxread/deploy/visual_qa/run_visual_qa.sh
+MAXREAD_VISUAL_QA_REMOTE_ROOT=/opt/maxread-browser
+MAXREAD_VISUAL_QA_EXPORT_PDF=true
+MAXREAD_VISUAL_QA_RUNNER_TIMEOUT=120
 MAXREAD_VISUAL_QA_INSPECT_RETRIES=2
 MAXREAD_VISUAL_QA_REPAIR_ROUNDS=2
 ```
 
-The browser worker is isolated; the coordinator changes only explicitly identified Feishu blocks. Browser-runner infrastructure failures are retried twice by default (three attempts total), later attempts use twice the base timeout, and these retries never count as document repairs. After a successful screenshot inspection, MaxRead performs at most two inspect -> targeted repair -> inspect cycles, then the final screenshot is the acceptance result. Structural formula/format fixes and image-size fixes can happen in the same cycle; a no-change cycle stops immediately. Each infrastructure attempt, visual round, screenshot path, finding, and model response is saved as `09-visual-qa.json`. If MaxRead itself runs on `ziplab-5090`, keep this option disabled unless that machine has a working SSH alias back to itself.
+The delivery worker is isolated; the coordinator changes only explicitly identified Feishu blocks. Formula/image/table counts are telemetry, not acceptance thresholds: delivery is blocked only by concrete visible failures in the exported rendering. After a successful inspection, MaxRead performs at most two inspect -> targeted repair -> inspect cycles. Each attempt and finding is saved as `09-visual-qa.json`; successful runs delete exported PDFs and page PNGs, while failures retain evidence for diagnosis.
 
 Set `MAXREAD_OPENAI_API_MODE=chat` for OpenAI-compatible gateways whose
 `/chat/completions` implementation follows instructions more reliably than
@@ -144,10 +156,32 @@ screenshots, keep visual repair on a separate compatible model with
 
 - Supported: arXiv ID, `arxiv.org/abs`, `arxiv.org/pdf`.
 - Supported: `huggingface.co/papers/<arxiv-id>`; this maps to the arXiv paper pipeline.
+- Supported: `papers.cool/arxiv/<arxiv-id>`; this is canonicalized to `arxiv.org/abs/<id>` and never treated as a generic webpage.
 - Supported: ordinary HTML web articles; MaxRead extracts title, text, images, captions, tables, code, and formulas into an article-style Feishu doc.
 - Supported fallback: manually imported arXiv source packages.
 - Not yet supported: uploaded PDF files, arbitrary PDF URLs, WeChat links, Zhihu integration.
-- Repeated paper IDs return the cached Feishu doc URL.
+- Repeated paper IDs return the cached Feishu doc URL only while the source
+  record remains `done`. Records marked `legacy` are rebuilt on the next request.
+
+## Cache Lifecycle
+
+After a document reaches the accepted `completed` terminal state, MaxRead keeps
+the SQLite result, Feishu document URL, and compact `pipeline_artifacts`, then
+removes rebuildable PDF, TeX source, extracted source trees, and rendered images.
+The daily `maxread-cache-cleanup.timer` catches leftovers from interrupted
+workers. Operators can preview or run cleanup manually:
+
+```bash
+python3 -m maxread.cli cache-cleanup --older-than-hours 1 --dry-run
+python3 -m maxread.cli cache-cleanup --older-than-hours 1
+```
+
+Invalidate an older output generation without deleting its Feishu document or
+history by marking completed records before a local date as `legacy`:
+
+```bash
+python3 -m maxread.cli invalidate-cache --before 2026-08-28 --timezone Asia/Shanghai
+```
 
 ## Tests
 
@@ -179,6 +213,10 @@ Private-chat messages without supported links are stored as feedback in local SQ
 python3 -m maxread.cli feedback --limit 50
 python3 -m maxread.cli feedback --limit 50 --resolve-users
 ```
+
+## Recruiting Mail Ingestion
+
+`features/mail_ingestion` is an independent, read-only IMAP collector and recruiting pipeline. It keeps mailbox credentials, raw messages, attachments, OAuth state, and SQLite data outside Git, while syncing candidate summaries and material documents to Feishu. See [`features/mail_ingestion/README.md`](features/mail_ingestion/README.md) for account setup, dry-run, backfill, weekly reporting, and systemd deployment.
 
 ## Global Queue
 
@@ -221,4 +259,4 @@ python3 -m maxread.cli duty send --dry-run
 python3 -m maxread.cli duty history
 ```
 
-Set `MAXREAD_DUTY_CHAT_ID=oc_...` in `.env`. The deployment installer starts `maxread-duty-reminder` as an independent user service. It records each date's result in SQLite, so restarts do not duplicate a successful reminder; a failed reminder remains retryable on the next poll.
+Set `MAXREAD_DUTY_CHAT_ID=oc_...` in `.env` only when this deployment owns the duty module. The deployment installer writes the independent unit but does not start it. Enable it explicitly only on the designated duty machine. It records each date's result in SQLite, so restarts do not duplicate a successful reminder; a failed reminder remains retryable on the next poll.

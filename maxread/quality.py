@@ -382,6 +382,7 @@ def _inspect_latex_body(stage: str, body: str) -> List[QualityIssue]:
         (r"\\(?:matrix|vector|tr)\s*\{", "unsupported-position-macro"),
         (r"\\(?:le\s+ft|ri\s+ght|in\s+fty|ap\s+prox)\b|\^\\to\s+p\b", "split-latex-command"),
         (r"\\(?:qquad|quad)[A-Za-z]", "joined-spacing-command"),
+        (r"(?<!\\)\\(?:\[|\])", "internal-display-delimiter"),
         (r"\\(?:overline|underline|hat|widehat|tilde|widetilde|bar|vec|dot|ddot|check|breve|acute|grave)(?:\s+[A-Za-z]|[A-Z])", "fused-accent-command"),
         (r"<\s*/?\s*(?:br|p|div)\b[^<>]*>", "html-tag-in-formula"),
         (r"<\s*/?\s*latex\b[^<>]*>", "nested-latex-tag"),
@@ -414,7 +415,7 @@ def _latex_command_count(text: str, command: str) -> int:
 
 
 def _raw_display_math(text: str) -> bool:
-    return bool(re.search(r"(?<!\\)\$\$|\\\[|\\\]", text or ""))
+    return bool(re.search(r"(?<!\\)\$\$|(?<!\\)\\\[|(?<!\\)\\\]", text or ""))
 
 
 def _balanced_latex_braces(text: str) -> bool:

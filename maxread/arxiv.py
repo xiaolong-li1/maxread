@@ -3,9 +3,11 @@ from __future__ import annotations
 import gzip
 import html
 import io
+import os
 import re
 import tarfile
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +18,7 @@ import shutil
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
+from .text_safety import sanitize_unicode_text
 
 
 ARXIV_URL_RE = re.compile(
@@ -24,7 +27,14 @@ ARXIV_URL_RE = re.compile(
 )
 ARXIV_ID_RE = re.compile(r"(?<![\w./-])(?P<id>\d{4}\.\d{4,5})(?:v\d+)?(?![\w.-])", re.IGNORECASE)
 FIGURE_CAPTION_RE = re.compile(r"\\(?:caption\*?(?:\[[^\]]*\])?|captionof\{figure\}(?:\[[^\]]*\])?)\{")
-GRAPHICS_COMMAND_RE = re.compile(r"\\(?:includegraphics|begin\{overpic\})(?:\[[^\]]*\])?\{([^}]+)\}")
+GRAPHICS_COMMAND_RE = re.compile(
+    r"\\(?:includegraphics|begin\{overpic\})\s*(?:\[[^\]]*\]\s*)?\{([^}]+)\}",
+    flags=re.S,
+)
+
+_ARXIV_REQUEST_INTERVAL_SECONDS = 3.0
+_ARXIV_PACE_LOCK = threading.Lock()
+_ARXIV_LAST_REQUEST_AT = 0.0
 
 
 def extract_arxiv_refs(text: str) -> List[PaperRef]:
@@ -60,17 +70,32 @@ class ArxivClient:
         self.parallel_streams = max(1, int(parallel_streams or 1))
         self.parallel_min_bytes = max(0, int(parallel_min_bytes or 0))
         self._last_request_at = 0.0
+        self.arxiv_relay_url = os.environ.get("MAXREAD_ARXIV_RELAY_URL", "").strip().rstrip("/")
 
     def fetch(self, paper_id: str) -> PaperBundle:
         paper_dir = self.workdir / "papers" / paper_id
         paper_dir.mkdir(parents=True, exist_ok=True)
-        metadata = self.fetch_metadata(paper_id)
+        metadata_warnings: List[str] = []
+        try:
+            metadata = self.fetch_metadata(paper_id)
+        except Exception as exc:
+            # Metadata is useful for naming, but it must not prevent the
+            # independent source/PDF paths from running when arXiv resets one
+            # request. The source is the actual completeness prerequisite.
+            metadata = self._fallback_metadata(paper_id)
+            metadata_warnings.append(f"arXiv metadata fetch failed; continued with source/PDF fallback: {exc}")
         # arXiv is happier when a single client does not chain metadata/pdf/source
         # requests back-to-back. This also matches the intended usage: a few
         # papers per hour, not a bulk mirror.
         source_path, source_dir, source_text, source_tree, source_assets, source_captions, source_figures, source_tables, source_macros, source_latex_macros, source_latex_arg_macros, source_warnings = self.fetch_source_text(paper_id, paper_dir)
-        time.sleep(1.5)
-        pdf_path, pdf_text, pdf_warnings = self.fetch_pdf_text(paper_id, paper_dir)
+        if source_text.strip():
+            existing_pdf = paper_dir / f"{paper_id}.pdf"
+            pdf_path = existing_pdf if existing_pdf.exists() and existing_pdf.stat().st_size > 0 else None
+            pdf_text = ""
+            pdf_warnings = ["PDF text extraction skipped because TeX source is available"]
+        else:
+            time.sleep(1.5)
+            pdf_path, pdf_text, pdf_warnings = self.fetch_pdf_text(paper_id, paper_dir)
         return PaperBundle(
             metadata=metadata,
             pdf_path=pdf_path,
@@ -86,7 +111,21 @@ class ArxivClient:
             source_macros=source_macros,
             source_latex_macros=source_latex_macros,
             source_latex_arg_macros=source_latex_arg_macros,
-            parse_warnings=source_warnings + pdf_warnings,
+            parse_warnings=metadata_warnings + source_warnings + pdf_warnings,
+        )
+
+    @staticmethod
+    def _fallback_metadata(paper_id: str) -> ArxivMetadata:
+        return ArxivMetadata(
+            paper_id=paper_id,
+            title=f"arXiv {paper_id}",
+            authors=[],
+            summary="arXiv metadata temporarily unavailable; use the fetched source/PDF as the evidence package.",
+            published="",
+            updated="",
+            categories=[],
+            pdf_url=f"https://arxiv.org/pdf/{paper_id}.pdf",
+            abs_url=f"https://arxiv.org/abs/{paper_id}",
         )
 
     def import_source(self, paper_id: str, input_path: Path) -> Path:
@@ -104,18 +143,20 @@ class ArxivClient:
         return source_path
 
     def fetch_metadata(self, paper_id: str) -> ArxivMetadata:
-        try:
-            return self.fetch_metadata_from_abs_page(paper_id)
-        except Exception as abs_exc:
-            abs_warning = str(abs_exc)
+        api_warning = ""
         query = urllib.parse.urlencode({"id_list": paper_id})
         url = f"https://export.arxiv.org/api/query?{query}"
         try:
             data = self._get(url)
         except RuntimeError as exc:
-            if "HTTP 429" in str(exc):
-                raise RuntimeError(f"arXiv metadata unavailable; abs page failed: {abs_warning}; API failed: {exc}") from exc
-            raise
+            api_warning = str(exc)
+        except Exception as exc:
+            api_warning = str(exc)
+        if api_warning:
+            try:
+                return self.fetch_metadata_from_abs_page(paper_id, warning=f"API fallback: {api_warning}")
+            except Exception as abs_exc:
+                raise RuntimeError(f"arXiv metadata unavailable; API failed: {api_warning}; abs failed: {abs_exc}") from abs_exc
         root = ET.fromstring(data)
         ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
         entry = root.find("atom:entry", ns)
@@ -209,18 +250,33 @@ class ArxivClient:
                 warnings.append(extractor_issue or "PDF text unavailable")
                 if fallback_issue:
                     warnings.append(fallback_issue)
+        text, invalid_unicode_count = sanitize_unicode_text(text)
+        if invalid_unicode_count:
+            warnings.append(f"PDF text contained {invalid_unicode_count} isolated Unicode surrogate(s); replaced with U+FFFD")
         return pdf_path, _clip(text, 120_000), warnings
 
 
     def fetch_source_text(self, paper_id: str, paper_dir: Path) -> Tuple[Optional[Path], Optional[Path], str, str, List[str], List[str], List[PaperFigure], List[str], Dict[str, str], Dict[str, str], Dict[str, str], List[str]]:
         source_path = paper_dir / f"{paper_id}.source"
         if not source_path.exists() or source_path.stat().st_size == 0:
-            try:
-                self._download_to_path(f"https://arxiv.org/e-print/{paper_id}", source_path)
-            except urllib.error.HTTPError as exc:
-                return None, None, "", "", [], [], [], [], {}, {}, {}, [f"TeX source unavailable: HTTP {exc.code}"]
-            except Exception as exc:
-                return None, None, "", "", [], [], [], [], {}, {}, {}, [f"TeX source download failed: {exc}"]
+            errors = []
+            downloaded = False
+            source_urls = (
+                f"https://export.arxiv.org/e-print/{paper_id}",
+                f"https://export.arxiv.org/src/{paper_id}",
+                f"https://arxiv.org/e-print/{paper_id}",
+                f"https://arxiv.org/src/{paper_id}",
+            )
+            for source_url in source_urls:
+                try:
+                    self._download_to_path(source_url, source_path)
+                    downloaded = True
+                    break
+                except Exception as exc:
+                    errors.append(f"{source_url}: {exc}")
+            if not downloaded:
+                detail = "；".join(errors[-4:])
+                return None, None, "", "", [], [], [], [], {}, {}, {}, [f"TeX source download failed: {detail}"]
         try:
             source_dir = _extract_source_to_dir(source_path, paper_dir / "source")
             texts = list(_source_texts_from_dir(source_dir))
@@ -255,7 +311,7 @@ class ArxivClient:
         if range_header:
             req.add_header("Range", range_header)
         last_exc: Exception | None = None
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as response:
                     self._last_request_at = time.monotonic()
@@ -271,8 +327,27 @@ class ArxivClient:
                 if exc.code == 429:
                     raise RuntimeError("arXiv rate limited this client (HTTP 429); wait a few minutes and retry") from exc
                 raise
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                last_exc = exc
+                if attempt + 1 >= 3:
+                    if self.arxiv_relay_url:
+                        try:
+                            return self._get_via_relay(url)
+                        except Exception as relay_exc:
+                            last_exc = relay_exc
+                    raise
+                time.sleep(min(2 ** (attempt + 1), 8))
         assert last_exc is not None
         raise last_exc
+
+    def _get_via_relay(self, url: str) -> bytes:
+        relay_url = f"{self.arxiv_relay_url}/fetch?{urllib.parse.urlencode({'url': url})}"
+        request = urllib.request.Request(
+            relay_url,
+            headers={"User-Agent": "MaxRead/0.1", "Accept": "*/*"},
+        )
+        with urllib.request.urlopen(request, timeout=max(self.timeout, 300)) as response:
+            return response.read()
 
     def _download_to_path(self, url: str, output_path: Path) -> None:
         data = self._get_parallel(url)
@@ -307,6 +382,11 @@ class ArxivClient:
             if exc.code != 416:
                 raise
             total_size = 0
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            # Range probing is an optimization. A reset probe should fall
+            # back to the ordinary retried download instead of aborting source
+            # acquisition before the archive is attempted.
+            return self._get_once(url)
         if total_size <= 0 or total_size < self.parallel_min_bytes:
             return self._get_once(url)
         chunks = _split_ranges(total_size, streams)
@@ -330,9 +410,14 @@ class ArxivClient:
         return b"".join(data for _index, data in sorted(parts))
 
     def _pace_requests(self) -> None:
-        elapsed = time.monotonic() - self._last_request_at
-        if elapsed < 3.0:
-            time.sleep(3.0 - elapsed)
+        global _ARXIV_LAST_REQUEST_AT
+        # This lock is process-wide, so multiple queue workers cannot turn a
+        # per-client delay into a burst against arXiv's public endpoints.
+        with _ARXIV_PACE_LOCK:
+            elapsed = time.monotonic() - _ARXIV_LAST_REQUEST_AT
+            if elapsed < _ARXIV_REQUEST_INTERVAL_SECONDS:
+                time.sleep(_ARXIV_REQUEST_INTERVAL_SECONDS - elapsed)
+            _ARXIV_LAST_REQUEST_AT = time.monotonic()
 
 
 def _extract_pdf_text_with_python(pdf_path: Path) -> Tuple[str, str]:
@@ -489,7 +574,7 @@ def _extract_captions(tex_text: str, max_items: int = 80) -> List[str]:
     return captions
 
 
-def _extract_tables(tex_text: str, max_items: int = 8) -> List[str]:
+def _extract_tables(tex_text: str, max_items: int = 24) -> List[str]:
     tex_text = _strip_latex_comments(tex_text)
     tables: List[str] = []
     pattern = re.compile(r"\\begin\{table\*?\}.*?\\end\{table\*?\}", re.S)
@@ -510,22 +595,38 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
     for tex_path in sorted(source_dir.rglob("*.tex"), key=_source_file_rank):
         rel_tex = str(tex_path.relative_to(source_dir))
         text = _expand_simple_macros(_strip_latex_comments(_decode_text(tex_path.read_bytes())), macros)
+        appendix_match = re.search(
+            r"\\appendix\b|\\section\*?\s*\{\s*(?:appendix|supplementary\s+material)",
+            text,
+            flags=re.I,
+        )
+        appendix_at = appendix_match.start() if appendix_match else -1
+        search_cursor = 0
         for block in _figure_blocks(text):
+            block_at = text.find(block, search_cursor)
+            if block_at < 0:
+                block_at = text.find(block)
+            if block_at >= 0:
+                search_cursor = block_at + len(block)
+            is_appendix = appendix_at >= 0 and block_at >= appendix_at
             if _is_subfigure_block(block):
                 caption = _last_caption(block)
                 label = _last_label(block) or _first_label(block)
+                panel_captions = _subfigure_panel_captions(block)
                 segment_figures = 0
                 for asset_index, (asset, row, col) in enumerate(_includegraphics_assets_with_layout(block, tex_path.parent, source_dir)):
                     figures.append(
                         PaperFigure(
                             asset=asset,
                             caption=caption,
+                            panel_caption=panel_captions[asset_index] if asset_index < len(panel_captions) else "",
                             tex_file=rel_tex,
                             label=label,
                             figure_index=figure_index,
                             asset_index=asset_index,
                             row=row,
                             col=col,
+                            is_appendix=is_appendix,
                         )
                     )
                     segment_figures += 1
@@ -547,6 +648,7 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
                             asset_index=asset_index,
                             row=row,
                             col=col,
+                            is_appendix=is_appendix,
                         )
                     )
                     segment_figures += 1
@@ -559,6 +661,28 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
 
 def _is_subfigure_block(block: str) -> bool:
     return "\\begin{subfigure" in block and len(GRAPHICS_COMMAND_RE.findall(block)) > 1
+
+
+def _subfigure_panel_captions(block: str) -> List[str]:
+    """Return one subcaption per graphics command, in source order.
+
+    A composed figure's parent caption explains the whole grid, while each
+    ``subfigure`` caption carries the panel identity.  The latter is drawn by
+    LaTeX rather than embedded in the image asset, so dropping it makes a
+    reconstructed figure semantically incomplete.
+    """
+    panels: List[Tuple[int, int, str]] = []
+    pattern = re.compile(r"\\begin\{subfigure\*?\}.*?\\end\{subfigure\*?\}", re.S)
+    for match in pattern.finditer(block):
+        panels.append((match.start(), match.end(), _last_caption(match.group(0))))
+    captions: List[str] = []
+    for graphic in GRAPHICS_COMMAND_RE.finditer(block):
+        caption = next(
+            (value for start, end, value in panels if start <= graphic.start() < end),
+            "",
+        )
+        captions.append(caption)
+    return captions
 
 def _extract_simple_macros(tex_text: str) -> dict[str, str]:
     stripped = _strip_latex_comments(tex_text)

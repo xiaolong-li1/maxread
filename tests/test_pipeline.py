@@ -1,9 +1,10 @@
 import json
+import re
 from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _generate_complete_paper_markdown, _load_retry_context, _require_renderable_source_figures, _sanitize_repository_markdown, _write_paper_artifact
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 from maxread.workflow import WorkflowEvent, WorkflowState
@@ -108,6 +109,11 @@ class FakeLLM:
     def responses_text(self, system, user, **kwargs):
         body = "# Fake Paper\n\n**TL;DR**：A fake abstract.\n\n"
         body += "\n\n".join(f"## {number}. Section {number}\n\n" + ("完整正文。" * 70) for number in range(1, 8))
+        if "方法一致性验收员" in system:
+            return json.dumps({"passed": True, "findings": []}, ensure_ascii=False)
+        if "方法推导一致性审计员" in system:
+            match = re.search(r"待审计 Markdown：\n```markdown\n(.*?)\n```", user, flags=re.S)
+            return json.dumps({"markdown": match.group(1) if match else body, "issues": []}, ensure_ascii=False)
         return body
 
 
@@ -121,6 +127,8 @@ class FakeVisionLLM(FakeLLM):
 class BadQualityLLM(FakeLLM):
     def responses_text(self, system, user, **kwargs):
         body = super().responses_text(system, user, **kwargs)
+        if "方法一致性验收员" in system or "方法推导一致性审计员" in system:
+            return body
         return body + r"\n\n公式：<latex>\newcommand{\RR}{\mathbb{R}} x\in\RR</latex>"
 
 
@@ -131,6 +139,8 @@ class RepairingQualityLLM(BadQualityLLM):
     def responses_text(self, system, user, **kwargs):
         if "本轮确定性质检错误" in user:
             self.repair_calls += 1
+            if "待修复块" in user:
+                return json.dumps({"markdown": "公式已修复。", "issues": []}, ensure_ascii=False)
             return json.dumps(
                 {"markdown": FakeLLM().responses_text(system, user, **kwargs), "issues": []},
                 ensure_ascii=False,
@@ -188,6 +198,25 @@ class AlwaysInvalidGenerationLLM:
     def responses_text(self, system, user, **kwargs):
         self.calls += 1
         return "The user wants me to draft a document.\n" + ("incomplete " * 220)
+
+
+class MethodValidationFailLLM(FakeLLM):
+    def responses_text(self, system, user, **kwargs):
+        if "方法一致性验收员" in system:
+            return json.dumps(
+                {
+                    "passed": False,
+                    "findings": [
+                        {
+                            "category": "math",
+                            "severity": "high",
+                            "detail": "定义与派生式不一致。",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        return super().responses_text(system, user, **kwargs)
 
 
 class FakeArxivNoSource(FakeArxiv):
@@ -520,6 +549,36 @@ def test_pipeline_repairs_blocking_quality_errors_before_publishing(tmp_path):
     store.close()
 
 
+def test_pipeline_blocks_document_creation_when_method_revalidation_fails(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    feishu = FakeFeishu()
+    workflow_state = WorkflowState.QUEUED
+
+    def transition_event(event, _detail=""):
+        nonlocal workflow_state
+        from maxread.workflow import transition
+        workflow_state = transition(workflow_state, event).to_state
+
+    # process_ref begins after queue claim in production.
+    workflow_state = WorkflowState.CLAIMED
+    pipeline = MaxReadPipeline(
+        store,
+        FakeArxiv(),
+        feishu,
+        MethodValidationFailLLM(),
+        require_source=True,
+        on_workflow_event=transition_event,
+    )
+
+    result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
+
+    assert result.doc_url == ""
+    assert "method-audit:math:high" in result.error
+    assert feishu.published == []
+    assert workflow_state == WorkflowState.QUALITY_FAILED
+    store.close()
+
+
 def test_write_paper_artifact_uses_paper_directory(tmp_path):
     bundle = FakeArxiv().fetch("2604.12946")
     paper_dir = tmp_path / "paper"
@@ -555,6 +614,40 @@ def test_describe_figures_for_prompt_uses_image_reader(tmp_path):
     assert descriptions[marker] == "图中显示两个相连模块和一条从输入到输出的箭头。"
 
 
+def test_describe_figures_for_prompt_runs_independent_images_concurrently(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    class ConcurrentVisionLLM:
+        def __init__(self):
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def responses_image_text(self, _system, _user, image_path):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.03)
+            with self.lock:
+                self.active -= 1
+            return f"读图 {Path(image_path).stem}"
+
+    inserts = []
+    for index in range(4):
+        image = tmp_path / f"figure-{index}.png"
+        image.write_bytes(b"image")
+        inserts.append((f"[MaxReadFigure:{index}:f]", image, f"Caption {index}"))
+    monkeypatch.setenv("MAXREAD_FIGURE_VISION_WORKERS", "4")
+    llm = ConcurrentVisionLLM()
+
+    descriptions, warnings = _describe_figures_for_prompt(llm, inserts)
+
+    assert warnings == []
+    assert len(descriptions) == 4
+    assert llm.max_active >= 2
+
+
 def test_require_renderable_source_figures_blocks_silent_missing_images():
     bundle = FakeArxiv().fetch("2604.12946")
     bundle.source_figures = [PaperFigure(asset="figures/overview.pdf", caption="Method overview")]
@@ -568,6 +661,197 @@ def test_require_renderable_source_figures_blocks_silent_missing_images():
         raise AssertionError("missing rendered figures should block publication")
 
     _require_renderable_source_figures(bundle, [(Path("overview.png"), "Method overview")])
+
+    bundle.source_figures = [PaperFigure(asset="figures/appendix.pdf", caption="Extra examples", is_appendix=True)]
+    _require_renderable_source_figures(bundle, [])
+
+
+def test_paper_review_source_context_includes_primary_method_evidence():
+    bundle = FakeArxiv().fetch("2604.12946")
+    bundle.source_text = r"\section{Method} m_i=(s_i+\tau_i,s_i+h_i,s_i+w_i)"
+    bundle.source_captions = ["Position design comparison."]
+
+    context = _paper_review_source_context(bundle)
+
+    assert "TeX/source excerpt" in context
+    assert r"s_i+\tau_i" in context
+    assert "Position design comparison" in context
+
+
+def test_method_validation_context_keeps_only_method_section_and_compact_source():
+    bundle = FakeArxiv().fetch("2604.12946")
+    bundle.source_text = (
+        r"\section{Introduction} intro "
+        r"\section{Method} method evidence x=y "
+        r"\section{Experiments} experiment evidence"
+    )
+    markdown = "# T\n\n## 2. O\n\nobs\n\n## 3. 方法框架\n\nmethod\n\n## 4. 实验结果\n\nresult"
+
+    assert _paper_method_markdown(markdown).startswith("## 3.")
+    context = _paper_method_source_context(bundle)
+    assert "method evidence" in context
+    assert "experiment evidence" not in context
+
+
+def test_deterministic_editorial_validation_rejects_duplicate_marker():
+    marker = "[MaxReadFigure:1:a]"
+    markdown = "# T\n\n**TL;DR**：x\n\n" + "\n\n".join(
+        f"## {number}. S\n\n正文。" for number in range(1, 8)
+    ) + f"\n\n{marker}\n\n{marker}"
+
+    result = _deterministic_editorial_validation(markdown, [marker])
+
+    assert result.passed is False
+    assert any("global figure marker count" in issue.detail for issue in result.issues)
+
+
+def test_sectional_generation_runs_all_sections_concurrently_and_merges_unique_materials():
+    class SectionLLM:
+        def __init__(self):
+            self.prompts = []
+
+        def responses_text(self, _system, user, **_kwargs):
+            self.prompts.append(user)
+            markers = re.findall(r"\[MaxReadFigure:[^\]]+\]", user.split("分章生成任务：", 1)[-1])
+            tables = re.findall(r"\[MaxReadTable:\d+\]", user.split("分章生成任务：", 1)[-1])
+            material = "\n".join(
+                markers
+                + [f"{marker}\n|配置|值|\n|---|---|\n|table-{marker.split(':', 1)[1].rstrip(']')}|1|" for marker in tables]
+            )
+            if "文档开头与第 1-2 章" in user:
+                return "# [2604.12946] 标题\n\n**English**\n\n**TL;DR**：摘要。\n\n|维度|一句话|\n|---|---|\n|问题|问题|\n\n## 1. 这篇论文要解决什么问题\n\n" + ("背景。" * 180) + "\n\n## 2. 核心观察 / 关键直觉\n\n" + ("观察。" * 180)
+            if "第 3 章方法框架" in user:
+                return "## 3. 方法框架\n\n" + ("方法输入、计算、输出与边界。" * 150) + "\n" + material
+            if "第 4 章实验结果" in user:
+                return "## 4. 实验结果\n\n" + ("实验设置与结果。" * 120) + "\n" + material
+            if "第 5 章消融" in user:
+                return "## 5. 消融与补充分析\n\n" + ("控制变量与消融结果。" * 120) + "\n" + material
+            return "## 6. 局限性与开放问题\n\n" + ("局限。" * 100) + "\n\n## 7. 整体评价\n\n" + ("评价。" * 100)
+
+    llm = SectionLLM()
+    markers = {"front": [], "method": ["[MaxReadFigure:1:m]"], "experiments": ["[MaxReadFigure:2:e]"], "ablation": ["[MaxReadFigure:3:a]"], "closing": []}
+    tables = {"front": [], "method": [1], "experiments": [2], "ablation": [3], "closing": []}
+
+    markdown = _generate_sectional_paper_markdown(llm, "COMMON PREFIX", "2604.12946", markers, tables, attempts=1, workers=5)
+
+    assert len(llm.prompts) == 5
+    assert any("文档开头与第 1-2 章" in prompt for prompt in llm.prompts)
+    assert all(prompt.startswith("COMMON PREFIX") for prompt in llm.prompts)
+    assert [int(value) for value in re.findall(r"(?m)^##\s+([1-7])", markdown)] == list(range(1, 8))
+    for marker in [item for values in markers.values() for item in values]:
+        assert markdown.count(marker) == 1
+    assert "MaxReadTable" not in markdown
+
+
+def test_sectional_global_check_rejects_duplicate_table_content():
+    markdown = """# T
+
+## 1. A
+
+[MaxReadTable:1]
+|A|B|
+|---|---|
+|x|1|
+
+## 2. B
+
+[MaxReadTable:2]
+|A|B|
+|---|---|
+|x|1|
+"""
+
+    errors = _global_sectional_uniqueness_errors(markdown, [], [1, 2])
+
+    assert "duplicate markdown table content across sections" in errors
+
+
+def test_sectional_duplicate_table_ownership_repairs_unmarked_copy():
+    table = "|A|B|\n|---|---|\n|x|1|"
+    outputs = {
+        "front": f"# T\n\n{table}",
+        "method": "## 3. M",
+        "experiments": f"## 4. E\n\n[MaxReadTable:1]\n{table}",
+        "ablation": "## 5. A",
+        "closing": "## 6. L\n\n## 7. V",
+    }
+
+    offenders = _duplicate_markdown_table_sections(outputs, list(outputs))
+
+    assert offenders == {"front"}
+
+
+def test_sectional_generation_repairs_only_section_with_duplicate_table():
+    class DuplicateRepairLLM:
+        def __init__(self):
+            self.front_calls = 0
+
+        def responses_text(self, _system, user, **_kwargs):
+            table = "|配置|值|\n|---|---|\n|same|1|"
+            if "文档开头与第 1-2 章" in user:
+                self.front_calls += 1
+                duplicate = "" if "合并级返修要求" in user else f"\n\n{table}"
+                return "# [2604.12946] 标题\n\n**TL;DR**：摘要。\n\n|维度|一句话|\n|---|---|\n|问题|问题|\n\n## 1. 这篇论文要解决什么问题\n\n" + ("背景。" * 180) + "\n\n## 2. 核心观察 / 关键直觉\n\n" + ("观察。" * 180) + duplicate
+            if "第 3 章方法框架" in user:
+                return "## 3. 方法框架\n\n" + ("方法输入、计算、输出与边界。" * 150)
+            if "第 4 章实验结果" in user:
+                return "## 4. 实验结果\n\n" + ("实验设置与结果。" * 120) + "\n\n[MaxReadTable:1]\n" + table
+            if "第 5 章消融" in user:
+                return "## 5. 消融与补充分析\n\n" + ("控制变量与消融结果。" * 120)
+            return "## 6. 局限性与开放问题\n\n" + ("局限。" * 100) + "\n\n## 7. 整体评价\n\n" + ("评价。" * 100)
+
+    llm = DuplicateRepairLLM()
+    empty = {key: [] for key in ("front", "method", "experiments", "ablation", "closing")}
+    tables = {**empty, "experiments": [1]}
+
+    markdown = _generate_sectional_paper_markdown(llm, "COMMON PREFIX", "2604.12946", empty, tables, attempts=2, workers=4)
+
+    assert llm.front_calls == 2
+    assert markdown.count("|same|1|") == 1
+
+
+def test_section_output_strips_inline_provider_preamble_and_uses_real_heading():
+    raw = (
+        'I will emit "## 4. 实验结果" only. Previous error...'
+        "## 4. 实验结果\n\n### 4.1 设置\n\n正文。"
+    )
+
+    output = _extract_section_output(raw, "experiments")
+
+    assert output.startswith("## 4. 实验结果")
+    assert "I will emit" not in output
+    assert output.count("## 4. 实验结果") == 1
+
+
+def test_section_output_rejects_malformed_nested_heading():
+    markdown = "## 3. 方法框架\n\n### 3.# 3. 方法框架\n\n" + ("方法流程。" * 300)
+
+    errors = _section_output_errors(markdown, "method", [], [])
+
+    assert "malformed nested heading" in errors
+
+
+def test_section_length_budget_applies_to_all_prose_but_not_tables():
+    oversized_closing = "## 6. 局限性与开放问题\n\n" + ("冗长说明。" * 700) + "\n\n## 7. 整体评价\n\n结论。"
+    large_method = "## 3. 方法框架\n\n" + ("必要推导。" * 1800)
+    compact_with_large_table = "## 4. 实验结果\n\n" + ("关键结论。" * 100) + "\n\n|配置|结果|\n|---|---|\n" + ("|A|1|\n" * 2000)
+
+    closing_errors = _section_output_errors(oversized_closing, "closing", [], [])
+    method_errors = _section_output_errors(large_method, "method", [], [])
+    experiment_errors = _section_output_errors(compact_with_large_table, "experiments", [], [])
+
+    assert any("narrative too long" in error for error in closing_errors)
+    assert any("narrative too long" in error for error in method_errors)
+    assert not any("narrative too long" in error for error in experiment_errors)
+
+
+def test_experiment_with_visual_evidence_can_use_compact_narrative():
+    marker = "[MaxReadFigure:1:result]"
+    markdown = "## 4. 实验结果\n\n" + ("关键结果。" * 55) + f"\n\n{marker}\n\n**图：主结果对比。**"
+
+    errors = _section_output_errors(markdown, "experiments", [marker], [])
+
+    assert not any("narrative too short" in error for error in errors)
 
 
 def test_sanitize_repository_markdown_removes_unverified_repository():

@@ -1,7 +1,25 @@
+from unittest.mock import patch
+
 from types import SimpleNamespace
 
-from maxread.cli import _extract_event_supported_inputs, _is_feedback_text, _is_retry_command, _record_feedback, _should_accept_event
+from maxread.cli import _extract_event_supported_inputs, _handle_retry_event, _is_feedback_text, _is_retry_command, _record_feedback, _reply_retry_missing, _retry_related_message_ids, _retry_requires_rebuild, _should_accept_event, main
 from maxread.db import Store
+
+
+def test_extract_command_normalizes_papers_cool_arxiv_url(capsys):
+    assert main(["extract", "https://papers.cool/arxiv/2608.25479"]) == 0
+
+    assert capsys.readouterr().out.strip() == '["2608.25479"]'
+
+
+def test_admin_starts_before_store_or_workdir_initialization(tmp_path):
+    settings = SimpleNamespace(workdir=tmp_path)
+    with patch("maxread.cli.Settings.load", return_value=settings), patch("maxread.cli.run_admin_server") as admin, patch(
+        "maxread.cli.Store", side_effect=AssertionError("admin must not construct the store")
+    ):
+        assert main(["admin", "--host", "127.0.0.1", "--port", "8877"]) == 0
+
+    admin.assert_called_once_with(settings, host="127.0.0.1", port=8877)
 
 
 def test_private_event_is_accepted_without_mention():
@@ -48,6 +66,133 @@ def test_topic_retry_without_mention_uses_thread_context():
     refs, web_refs = _extract_event_supported_inputs(_ContextFeishu(), event)
     assert [ref.paper_id for ref in refs] == ["2604.12946"]
     assert web_refs == []
+
+
+def test_private_retry_uses_related_context_without_explicit_thread_metadata():
+    event = SimpleNamespace(chat_type="p2p", mentioned_bot=False, content="重试", raw={})
+    refs, web_refs = _extract_event_supported_inputs(_ContextFeishu(), event)
+
+    assert [ref.paper_id for ref in refs] == ["2604.12946"]
+    assert web_refs == []
+
+
+def test_retry_event_requeues_latest_failed_attempt_without_parsing_failure_url(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    original_usage = store.add_usage_event("evt-root", "om-root", "oc", "group", "ou", "paper", "2410.06205", "url", status="queued")
+    original = store.enqueue_job("paper", "2410.06205", "url", "evt-root", "om-root", "oc", "group", "ou", original_usage)
+    store.fail_queue_job(original["job_id"], "visual runner redirected to https://login.feishu.cn/accounts/trap")
+    retry_usage = store.add_usage_event("evt-retry-1", "om-retry-1", "oc", "group", "ou", "paper", "2410.06205", "url", status="queued")
+    latest = store.enqueue_job("paper", "2410.06205", "url", "evt-retry-1", "om-retry-1", "oc", "group", "ou", retry_usage)
+    store.fail_queue_job(latest["job_id"], "format failed")
+
+    class Feishu:
+        text = ""
+        def reply_text(self, _message_id, text, **_kwargs):
+            self.text = text
+
+    event = SimpleNamespace(
+        event_id="evt-retry-2",
+        message_id="om-retry-2",
+        chat_id="oc",
+        chat_type="group",
+        sender_id="ou",
+        content="重试",
+        raw={"event": {"message": {"root_id": "om-root", "thread_id": "omt-topic"}}},
+    )
+    settings = SimpleNamespace(queue_workers=2)
+    feishu = Feishu()
+
+    assert _handle_retry_event(settings, store, feishu, event) is True
+    rows = store.list_queue_jobs()
+    assert next(row for row in rows if row["id"] == latest["job_id"])["status"] == "queued"
+    assert next(row for row in rows if row["id"] == original["job_id"])["status"] == "failed"
+    assert "收到 1 篇" in feishu.text
+    assert "login.feishu.cn" not in feishu.text
+    store.close()
+
+
+def test_retry_mode_resumes_visual_infrastructure_failure_but_rebuilds_formula_failure():
+    checkpoint = '{"doc_url":"https://tenant.feishu.cn/docx/doc"}'
+    assert _retry_requires_rebuild(
+        {
+            "error": "visual-qa:remote-error: visual runner failed after 3 attempts: https://login.feishu.cn/accounts/trap",
+            "checkpoint_json": checkpoint,
+            "doc_url": "https://tenant.feishu.cn/docx/doc",
+        }
+    ) is False
+    assert _retry_requires_rebuild(
+        {
+            "error": "quality:formula:xml:high:html-tag-in-formula",
+            "checkpoint_json": checkpoint,
+            "doc_url": "https://tenant.feishu.cn/docx/doc",
+        }
+    ) is True
+
+
+def test_retry_event_resolves_root_id_from_thread_api_when_event_has_only_thread_id(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage = store.add_usage_event("evt-root", "om-root", "oc", "group", "ou", "paper", "2410.06205", "url", status="queued")
+    queued = store.enqueue_job("paper", "2410.06205", "url", "evt-root", "om-root", "oc", "group", "ou", usage)
+    store.fail_queue_job(queued["job_id"], "visual-qa:remote-error:browser timeout")
+    bad_url = "https://login.feishu.cn/accounts/trap?app_id=2"
+    bad_usage = store.add_usage_event("evt-old-retry", "om-old-retry", "oc", "group", "ou", "article", bad_url, bad_url, status="queued")
+    bad = store.enqueue_job("article", bad_url, bad_url, "evt-old-retry", "om-old-retry", "oc", "group", "ou", bad_usage)
+    store.fail_queue_job(bad["job_id"], "old parser artifact")
+
+    class Feishu:
+        text = ""
+        def fetch_related_message_ids(self, _event):
+            return ["om-root", "om-old-retry"]
+        def reply_text(self, _message_id, text, **_kwargs):
+            self.text = text
+
+    event = SimpleNamespace(
+        event_id="evt-retry",
+        message_id="om-retry",
+        chat_id="oc",
+        chat_type="group",
+        sender_id="ou",
+        content="重试",
+        raw={"event": {"message": {"thread_id": "omt-topic"}}},
+    )
+    feishu = Feishu()
+
+    assert _handle_retry_event(SimpleNamespace(queue_workers=2), store, feishu, event) is True
+    rows = store.list_queue_jobs()
+    assert next(row for row in rows if row["id"] == queued["job_id"])["status"] == "queued"
+    assert next(row for row in rows if row["id"] == bad["job_id"])["status"] == "failed"
+    assert "2410.06205" in feishu.text
+    assert "login.feishu.cn" not in feishu.text
+    store.close()
+
+
+def test_retry_related_message_ids_prefers_root_over_parent():
+    payload = {
+        "event": {
+            "message": {
+                "parent_id": "om_bot_failure",
+                "root_id": "om_original_request",
+            }
+        }
+    }
+
+    assert _retry_related_message_ids(payload) == ("om_original_request",)
+
+
+def test_retry_missing_message_has_no_stale_paper_id():
+    class Feishu:
+        def __init__(self):
+            self.text = ""
+
+        def reply_text(self, _message_id, text, **_kwargs):
+            self.text = text
+
+    event = SimpleNamespace(event_id="evt", message_id="om")
+    feishu = Feishu()
+    _reply_retry_missing(feishu, event)
+
+    assert "2608.10416" not in feishu.text
+    assert "论文 ID" in feishu.text
 
 
 def test_group_mention_without_topic_link_returns_empty_refs():

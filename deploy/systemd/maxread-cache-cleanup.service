@@ -1,0 +1,14 @@
+[Unit]
+Description=Prune rebuildable MaxRead source and render caches
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__INSTALL_DIR__
+Environment=HOME=__SERVICE_HOME__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m maxread.cli cache-cleanup --older-than-hours 1
+NoNewPrivileges=true
+PrivateTmp=true

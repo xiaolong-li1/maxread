@@ -6,6 +6,7 @@ from maxread.quality import (
     validate_fetched_docx_content,
     verify_published_docx,
 )
+from maxread.render import markdown_to_docx_xml, polish_markdown
 
 
 def test_blocking_quality_warnings_selects_high_severity_only():
@@ -126,6 +127,18 @@ def test_quality_formula_agent_flags_joined_spacing_commands():
     warnings = quality_warnings(r"<latex>a=1,\qquadb=2</latex>")
 
     assert "quality:formula:markdown:high:joined-spacing-command" in warnings
+
+
+def test_quality_formula_agent_flags_internal_display_delimiter():
+    warnings = quality_warnings(r"<latex>\begin{cases}a \[4pt] b\end{cases}</latex>")
+
+    assert "quality:formula:markdown:high:internal-display-delimiter" in warnings
+
+
+def test_quality_formula_agent_allows_cases_row_break_spacing():
+    warnings = quality_warnings(r"<latex>\begin{cases}a\\[4pt]b\end{cases}</latex>")
+
+    assert "quality:formula:markdown:medium:raw-dollar-display-math" not in warnings
 
 
 def test_quality_agents_flag_raw_formatting_and_fused_formula_commands():
@@ -257,3 +270,19 @@ def test_verify_published_docx_fetch_failure_is_soft_warning():
 
     warnings = verify_published_docx(Feishu(), "doc", expected_title="T", attempts=1)
     assert warnings[0].startswith("post-publish:fetch-failed:")
+
+
+def test_historical_formula_failure_corpus_compiles_without_blockers():
+    corpus = [
+        "调用 <latex>apply_p_rope</latex> 完成旋转。",
+        r"<latex>\mathcal{V}=\Big\{x\;\middle|\;x>0\Big\}</latex>",
+        "| 约束 | 值 |\n| --- | --- |\n| 集合 | <latex>|\\mathcal{T}_D|=|\\mathcal{T}_A|</latex> |",
+        "| M |\n| --- |\n| 1.28^{+0.11}_{-0.10} |",
+        r"<latex>a=1,\qquadb=2</latex>",
+        r"<latex>\bm{q}+\bmX</latex>",
+    ]
+
+    for source in corpus:
+        markdown = polish_markdown(source)
+        xml = markdown_to_docx_xml(markdown)
+        assert blocking_quality_warnings(pre_publish_quality_warnings(markdown, xml)) == [], source

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily MaxRead rebuildable-cache cleanup
+
+[Timer]
+OnCalendar=*-*-* 03:40:00 Asia/Shanghai
+Persistent=true
+Unit=maxread-cache-cleanup.service
+
+[Install]
+WantedBy=timers.target

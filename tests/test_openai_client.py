@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from maxread.openai_client import OpenAIClient
 from maxread import openai_client
@@ -71,3 +72,64 @@ def test_responses_text_uses_separate_instructions_and_input():
     assert captured["path"] == "/responses"
     assert captured["payload"]["instructions"] == "system"
     assert captured["payload"]["input"] == "user"
+
+
+def test_responses_text_sanitizes_surrogates_before_json_transport():
+    client = OpenAIClient("key", "model")
+    captured = {}
+
+    def fake_stream(_path, payload):
+        captured.update(payload)
+        return "ok"
+
+    client._post_stream_text = fake_stream
+
+    assert client.responses_text("sys\ud835", "prompt\ud8350") == "ok"
+    assert captured["instructions"] == "sys\uFFFD"
+    assert captured["input"] == "prompt\uFFFD0"
+    assert json.dumps(captured, ensure_ascii=False).encode("utf-8")
+
+
+def test_responses_image_text_can_override_reasoning_effort(tmp_path):
+    image = tmp_path / "figure.png"
+    image.write_bytes(b"image")
+    client = OpenAIClient("key", "model", reasoning_effort="high")
+    captured = {}
+    client._post = lambda path, payload: captured.update(path=path, payload=payload) or {"output_text": "ok"}
+
+    assert client.responses_image_text("system", "user", image, reasoning_effort="low") == "ok"
+    assert captured["payload"]["reasoning"] == {"effort": "low"}
+
+
+def test_stream_retries_transient_url_error(monkeypatch):
+    client = OpenAIClient("key", "model")
+    calls = []
+
+    def flaky(_path, _payload):
+        calls.append(1)
+        if len(calls) < 3:
+            raise openai_client.urllib.error.URLError("EOF occurred in violation of protocol")
+        return "ok"
+
+    client._post_stream_text_once = flaky
+    monkeypatch.setattr(openai_client.time, "sleep", lambda _seconds: None)
+
+    assert client._post_stream_text("/responses", {}) == "ok"
+    assert len(calls) == 3
+
+
+def test_stream_retries_transient_http_502(monkeypatch):
+    client = OpenAIClient("key", "model")
+    calls = []
+
+    def flaky(path, _payload):
+        calls.append(1)
+        if len(calls) == 1:
+            raise openai_client.OpenAIRequestError(path, 502, "Bad Gateway")
+        return "ok"
+
+    client._post_stream_text_once = flaky
+    monkeypatch.setattr(openai_client.time, "sleep", lambda _seconds: None)
+
+    assert client._post_stream_text("/responses", {}) == "ok"
+    assert len(calls) == 2

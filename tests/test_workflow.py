@@ -114,3 +114,26 @@ def test_workflow_spec_is_complete_and_json_serializable():
     assert {item["id"] for item in spec["states"]} == {state.value for state in WorkflowState}
     assert any(item["event"] == "generation_repair_required" for item in spec["transitions"])
     assert json.loads(json.dumps(spec))["states"] == spec["states"]
+
+
+def test_compact_graph_collapses_internal_check_and_repair_states():
+    compact = workflow_spec()["compact_graph"]
+    state_ids = {item["id"] for item in compact["states"]}
+    labels = {item["id"]: item["label"] for item in compact["states"]}
+    assert len(state_ids) == 10
+    assert "generation_checking" not in state_ids
+    assert "quality_repairing" not in state_ids
+    assert "visual_repairing" not in state_ids
+    assert sum(len(item["durable_states"]) for item in compact["states"]) == len(WorkflowState)
+    assert labels["generating"] == "生成初稿"
+    assert labels["quality_gate"] == "公式格式检查"
+    assert labels["delivery_gate"] == "检查真实页面"
+    assert labels["retryable_failure"] == "失败待重试"
+    assert any(
+        edge["from"] == "quality_gate" and edge["to"] == "quality_gate"
+        for edge in compact["transitions"]
+    )
+    assert any(
+        edge["from"] == "retryable_failure" and edge["to"] == "queued"
+        for edge in compact["transitions"]
+    )

@@ -12,6 +12,7 @@ from typing import List, Optional, Tuple
 
 from .arxiv import ArxivClient
 from .article_pipeline import ArticlePipeline
+from .cache_cleanup import cleanup_source_cache
 from .config import Settings
 from .db import Store
 from .feishu import FeishuClient, progress_emoji_type
@@ -47,8 +48,12 @@ class QueueManager:
             return
         store = Store(self.settings.db_path)
         try:
-            recovered_dead = store.recover_dead_worker_queue_jobs(socket.gethostname(), _pid_is_alive)
-            recovered_stale = store.recover_stale_queue_jobs(self.settings.queue_stale_minutes)
+            recovered_dead = store.recover_dead_worker_queue_jobs(
+                socket.gethostname(), _pid_is_alive, self.settings.recovery_attempts
+            )
+            recovered_stale = store.recover_stale_queue_jobs(
+                self.settings.queue_stale_minutes, self.settings.recovery_attempts
+            )
             if recovered_dead:
                 store.add_job_event(0, "recover_dead_worker", str(recovered_dead))
             if recovered_stale:
@@ -65,6 +70,11 @@ class QueueManager:
             store = Store(self.settings.db_path)
             try:
                 self._recover_stale_if_due(store)
+                service_status = store.get_service_status()
+                if service_status["mode"] != "operational":
+                    store.close()
+                    time.sleep(2)
+                    continue
                 worker_id = f"{self.manager_id}:{threading.current_thread().name}"
                 job = store.claim_next_queue_job(worker_id=worker_id)
             except Exception:
@@ -85,8 +95,12 @@ class QueueManager:
         if now - self._last_recover_at < 60:
             return
         self._last_recover_at = now
-        recovered_dead = store.recover_dead_worker_queue_jobs(socket.gethostname(), _pid_is_alive)
-        recovered_stale = store.recover_stale_queue_jobs(self.settings.queue_stale_minutes)
+        recovered_dead = store.recover_dead_worker_queue_jobs(
+            socket.gethostname(), _pid_is_alive, self.settings.recovery_attempts
+        )
+        recovered_stale = store.recover_stale_queue_jobs(
+            self.settings.queue_stale_minutes, self.settings.recovery_attempts
+        )
         if recovered_dead:
             store.add_job_event(0, "recover_dead_worker", str(recovered_dead))
         if recovered_stale:
@@ -97,12 +111,21 @@ class QueueManager:
         source_id = job["source_id"]
         source_url = job["source_url"]
         job_id = int(job["id"])
+        suppress_progress_notifications = bool(job.get("suppress_progress_notifications"))
+        recovery_reason = str(job.get("recovery_reason") or "").strip()
         raw_feishu = FeishuClient(self.settings.lark_cli, self.settings.feishu_as)
 
         def progress(text: str, event_type: str, prefix: str) -> None:
-            if not store.update_queue_job_stage(job_id, event_type, worker_id=worker_id):
-                return
-            _notify_watchers_progress(store, raw_feishu, job_id, text, event_type, prefix)
+            _record_queue_progress(
+                self.settings.db_path,
+                raw_feishu,
+                job_id,
+                worker_id,
+                text,
+                event_type,
+                prefix,
+                suppress_progress_notifications=suppress_progress_notifications,
+            )
 
         feishu = _LimitedFeishu(
             raw_feishu,
@@ -127,7 +150,13 @@ class QueueManager:
         store.add_job_event(job_id, "start", source_id)
         store.update_queue_job_stage(job_id, "downloading", worker_id=worker_id)
         heartbeat_stop, heartbeat_thread = self._start_job_heartbeat(job_id, worker_id)
-        _notify_watchers_started(store, raw_feishu, job_id, source_id)
+        _notify_watchers_started(
+            store,
+            raw_feishu,
+            job_id,
+            source_id,
+            suppress_progress_notifications=suppress_progress_notifications,
+        )
         try:
             if source_kind == "paper":
                 pipeline = MaxReadPipeline(
@@ -144,6 +173,8 @@ class QueueManager:
                     review_reasoning_effort=self.settings.openai_review_reasoning_effort,
                     visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
                     generation_repair_rounds=self.settings.generation_repair_rounds,
+                    sectional_generation_enabled=self.settings.sectional_generation_enabled,
+                    sectional_generation_workers=self.settings.sectional_generation_workers,
                     quality_repair_rounds=self.settings.quality_repair_rounds,
                     on_workflow_event=lambda event, detail="": store.transition_queue_job(
                         job_id, event, detail, expected_worker_id=worker_id
@@ -158,6 +189,7 @@ class QueueManager:
                     force=False,
                     resume_published_url=str(job.get("doc_url") or ""),
                     resume_published_checkpoint=str(job.get("checkpoint_json") or ""),
+                    force_rebuild=bool(job.get("rebuild_pipeline")),
                 )
                 record = store.get_paper(source_id)
                 title = record.title if record else ""
@@ -180,26 +212,112 @@ class QueueManager:
                     send_progress=False,
                     resume_published_url=str(job.get("doc_url") or ""),
                     resume_published_checkpoint=str(job.get("checkpoint_json") or ""),
+                    force_rebuild=bool(job.get("rebuild_pipeline")),
                 )
                 record = store.get_document(result.article_id)
                 title = record.title if record else ""
             if result.error:
-                if store.fail_queue_job(int(job["id"]), result.error, worker_id=worker_id):
-                    _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, result.error)
+                published_doc_url = _published_doc_url(result)
+                if not self._auto_retry(store, job, result.error, worker_id):
+                    if store.fail_queue_job(
+                        int(job["id"]),
+                        result.error,
+                        worker_id=worker_id,
+                        doc_url=published_doc_url,
+                    ):
+                        _notify_watchers(
+                            store,
+                            feishu,
+                            int(job["id"]),
+                            source_id,
+                            "",
+                            title,
+                            result.error,
+                            published_doc_url=published_doc_url,
+                            notify_failure=not suppress_progress_notifications,
+                        )
             elif result.doc_url:
                 if store.complete_queue_job(int(job["id"]), result.doc_url, title=title, worker_id=worker_id):
-                    _notify_watchers(store, feishu, int(job["id"]), source_id, result.doc_url, title, "")
+                    _notify_watchers(
+                        store,
+                        feishu,
+                        int(job["id"]),
+                        source_id,
+                        result.doc_url,
+                        title,
+                        "",
+                        recovery_reason=recovery_reason,
+                        notify_success=not suppress_progress_notifications,
+                    )
+                    try:
+                        cleanup = cleanup_source_cache(self.settings.workdir, source_kind, source_id)
+                        store.add_job_event(
+                            job_id,
+                            "cache_cleanup",
+                            f"files={cleanup.files_removed}; bytes={cleanup.bytes_removed}",
+                        )
+                    except Exception as cleanup_error:
+                        store.add_job_event(job_id, "cache_cleanup_failed", str(cleanup_error)[:500])
             else:
                 error = result.error or "unknown processing error"
                 if store.fail_queue_job(int(job["id"]), error, worker_id=worker_id):
-                    _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, error)
+                    _notify_watchers(
+                        store,
+                        feishu,
+                        int(job["id"]),
+                        source_id,
+                        "",
+                        title,
+                        error,
+                        notify_failure=not suppress_progress_notifications,
+                    )
         except Exception as exc:
             error = str(exc)
-            if store.fail_queue_job(int(job["id"]), error, worker_id=worker_id):
-                _notify_watchers(store, feishu, int(job["id"]), source_id, "", title, error)
+            if not self._auto_retry(store, job, error, worker_id):
+                if store.fail_queue_job(int(job["id"]), error, worker_id=worker_id):
+                    _notify_watchers(
+                        store,
+                        feishu,
+                        int(job["id"]),
+                        source_id,
+                        "",
+                        title,
+                        error,
+                        notify_failure=not suppress_progress_notifications,
+                    )
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=2)
+
+    def _auto_retry(self, store: Store, job, error: str, worker_id: str) -> bool:
+        """Requeue one safe transient failure without notifying a false failure.
+
+        The pipeline already bounds content repairs. This queue-level budget is
+        only for a failed attempt caused by unstable model/network/browser
+        infrastructure; the durable checkpoint and failure ledger make the
+        replay idempotent. Source absence and cancellation stay manual.
+        """
+        budget = max(0, int(getattr(self.settings, "auto_retry_attempts", 0)))
+        attempts = max(1, int(job.get("attempts") or 1))
+        if attempts > budget or not _is_auto_retryable_error(error):
+            return False
+        # A failed write may have already created a partial document. Only
+        # replay it automatically after a durable publish checkpoint exists;
+        # otherwise leave it visible for an operator to inspect.
+        if not str(job.get("checkpoint_json") or "").strip() and any(
+            marker in str(error or "").lower()
+            for marker in ("feishu", "create_docx", "overwrite_docx", "insert_image", "publish_docx")
+        ):
+            return False
+        if not store.fail_queue_job(job["id"], error, worker_id=worker_id):
+            return False
+        return store.retry_queue_job(
+            job["id"],
+            reason=f"automatic retry after attempt {attempts}: {str(error)[:700]}",
+            event_type="auto_retry",
+            suppress_progress_notifications=bool(job.get("suppress_progress_notifications")),
+            rebuild_pipeline=bool(job.get("rebuild_pipeline")),
+        )
 
     def _start_job_heartbeat(self, job_id: int, worker_id: str):
         stop = threading.Event()
@@ -232,27 +350,117 @@ class _LimitedLLM:
         self.on_review = on_review
         self._announced = False
         self._announced_review = False
+        self._announcement_lock = threading.Lock()
 
     def responses_text(self, system: str, user: str, **kwargs) -> str:
-        if self.on_review and _is_review_prompt(system) and not self._announced_review:
-            self._announced_review = True
-            self.on_review()
-        elif self.on_call and not self._announced:
-            self._announced = True
-            self.on_call()
+        callback = None
+        with self._announcement_lock:
+            if self.on_review and _is_review_prompt(system) and not self._announced_review:
+                self._announced_review = True
+                callback = self.on_review
+            elif self.on_call and not self._announced:
+                self._announced = True
+                callback = self.on_call
+        _run_progress_callback(callback)
         with self.sem:
             return self.inner.responses_text(system, user, **kwargs)
 
     def responses_image_text(self, system: str, user: str, image_path) -> str:
-        if self.on_call and not self._announced:
-            self._announced = True
-            self.on_call()
+        callback = None
+        with self._announcement_lock:
+            if self.on_call and not self._announced:
+                self._announced = True
+                callback = self.on_call
+        _run_progress_callback(callback)
         with self.sem:
             return self.inner.responses_image_text(system, user, image_path)
 
 
+def _run_progress_callback(callback) -> None:
+    """Run best-effort telemetry without making it part of model correctness."""
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception:
+        # A reaction or progress-row failure must never discard model output.
+        return
+
+
+def _record_queue_progress(
+    db_path,
+    feishu,
+    job_id: int,
+    worker_id: str,
+    text: str,
+    event_type: str,
+    prefix: str,
+    suppress_progress_notifications: bool = False,
+) -> None:
+    """Persist progress with a connection owned by the calling thread."""
+    progress_store = Store(db_path, initialize=False)
+    try:
+        if not progress_store.update_queue_job_stage(job_id, event_type, worker_id=worker_id):
+            return
+        _notify_watchers_progress(
+            progress_store,
+            feishu,
+            job_id,
+            text,
+            event_type,
+            prefix,
+            suppress_progress_notifications=suppress_progress_notifications,
+        )
+    finally:
+        progress_store.close()
+
+
 def _is_review_prompt(system: str) -> bool:
     return "发布前质量检查员" in str(system) or "待检查 Markdown" in str(system)
+
+
+def _is_auto_retryable_error(error: str) -> bool:
+    """Return whether replay is safer than asking the user to intervene."""
+    value = str(error or "").strip().lower()
+    if not value:
+        return False
+    transient_markers = (
+        "timeout",
+        "timed out",
+        "rate limit",
+        "429",
+        "502",
+        "503",
+        "504",
+        "connection",
+        "network",
+        "gateway",
+        "model-call",
+        "model call",
+        "model-fetch",
+        "model fetch",
+        "remote-error",
+        "browser",
+        "ssh",
+        "invalid-json",
+        "invalid json",
+        "no model output",
+        "生成格式不完整",
+        "generation_incomplete",
+    )
+    permanent_markers = (
+        "cancelled",
+        "canceled",
+        "source_missing",
+        "source missing",
+        "源码缺失",
+        "require_source",
+        "source-asset-render",
+        "unsupported source asset",
+    )
+    if any(marker in value for marker in permanent_markers):
+        return False
+    return any(marker in value for marker in transient_markers)
 
 
 class _LimitedFeishu:
@@ -288,9 +496,23 @@ def enqueue_event_items(
     items.extend(QueueItem("article", ref.url, ref.url, ref.url) for ref in web_refs)
     if not items:
         return
-    _react(feishu, event.message_id, "start")
+    service_status = store.get_service_status()
+    service_available = service_status["mode"] == "operational"
+    if service_available:
+        _react(feishu, event.message_id, "start")
     action = "已重新加入全局队列" if retry_requested else "已加入全局队列"
     lines = [f"收到 {len(items)} 篇，{action}。"]
+    if not service_available:
+        mode_labels = {
+            "degraded": "服务降级",
+            "maintenance": "维护中",
+            "outage": "服务故障",
+        }
+        lines.append(f"当前状态：{mode_labels.get(service_status['mode'], service_status['mode'])}。")
+        lines.append(f"原因：{service_status['reason']}")
+        if service_status["expected_recovery_at"]:
+            lines.append(f"预计恢复：{service_status['expected_recovery_at']}。")
+        lines.append("请求已收集，服务恢复后会静默处理；成功生成后再通知你。")
     for item in items:
         cached = _cached_doc(store, item)
         if cached:
@@ -299,7 +521,18 @@ def enqueue_event_items(
             lines.append(f"- {item.label}：已有缓存 {cached[0]}")
             continue
         usage_id = store.add_usage_event(event.event_id, event.message_id, event.chat_id, event.chat_type, event.sender_id, item.kind, item.source_id, item.source_url, status="queued")
-        queued = store.enqueue_job(item.kind, item.source_id, item.source_url, event.event_id, event.message_id, event.chat_id, event.chat_type, event.sender_id, usage_id)
+        queued = store.enqueue_job(
+            item.kind,
+            item.source_id,
+            item.source_url,
+            event.event_id,
+            event.message_id,
+            event.chat_id,
+            event.chat_type,
+            event.sender_id,
+            usage_id,
+            suppress_progress_notifications=not service_available,
+        )
         pos = store.queue_position(int(queued["job_id"]))
         if queued["created"]:
             duration = store.recent_job_duration_seconds(item.kind)
@@ -366,9 +599,21 @@ def _cached_doc(store: Store, item: QueueItem) -> Optional[Tuple[str, str]]:
 
 
 
-def _notify_watchers_progress(store: Store, feishu: FeishuClient, job_id: int, text: str, event_type: str, prefix: str) -> None:
+def _notify_watchers_progress(
+    store: Store,
+    feishu: FeishuClient,
+    job_id: int,
+    text: str,
+    event_type: str,
+    prefix: str,
+    *,
+    suppress_progress_notifications: bool = False,
+) -> None:
     watchers = store.get_job_watchers(job_id)
     store.add_job_event(job_id, event_type, text)
+    if suppress_progress_notifications:
+        store.add_job_event(job_id, "progress_notifications_suppressed", event_type)
+        return
     for watcher in watchers:
         try:
             _react(feishu, watcher["message_id"], event_type)
@@ -377,19 +622,51 @@ def _notify_watchers_progress(store: Store, feishu: FeishuClient, job_id: int, t
             store.add_job_event(job_id, f"react_{event_type}_failed", str(exc)[:500])
 
 
-def _notify_watchers_started(store: Store, feishu: FeishuClient, job_id: int, source_id: str) -> None:
+def _notify_watchers_started(
+    store: Store,
+    feishu: FeishuClient,
+    job_id: int,
+    source_id: str,
+    *,
+    suppress_progress_notifications: bool = False,
+) -> None:
     watchers = store.get_job_watchers(job_id)
     for watcher in watchers:
         usage_id = int(watcher.get("usage_event_id") or 0)
         if usage_id:
             store.update_usage_event(usage_id, "running")
+        if suppress_progress_notifications:
+            store.add_job_event(job_id, "progress_notifications_suppressed", "downloading")
+            continue
         try:
             _react(feishu, watcher["message_id"], "downloading")
             store.add_job_event(job_id, "react_running", str(watcher.get("usage_event_id", "")))
         except Exception as exc:
             store.add_job_event(job_id, "react_running_failed", str(exc)[:500])
 
-def _notify_watchers(store: Store, feishu: FeishuClient, job_id: int, source_id: str, doc_url: str, title: str, error: str) -> None:
+def _published_doc_url(result) -> str:
+    """Expose only published documents that failed the final visual gate."""
+    error = str(getattr(result, "error", "") or "")
+    doc_url = str(getattr(result, "doc_url", "") or "").strip()
+    if doc_url and "发布后质检失败" in error and "visual-qa:" in error:
+        return doc_url
+    return ""
+
+
+def _notify_watchers(
+    store: Store,
+    feishu: FeishuClient,
+    job_id: int,
+    source_id: str,
+    doc_url: str,
+    title: str,
+    error: str,
+    *,
+    recovery_reason: str = "",
+    published_doc_url: str = "",
+    notify_failure: bool = True,
+    notify_success: bool = True,
+) -> None:
     watchers = store.get_job_watchers(job_id)
     for watcher in watchers:
         usage_id = int(watcher.get("usage_event_id") or 0)
@@ -397,20 +674,50 @@ def _notify_watchers(store: Store, feishu: FeishuClient, job_id: int, source_id:
             if usage_id:
                 store.update_usage_event(usage_id, "done", doc_url=doc_url, title=title)
             text = f"哥，读完了：{doc_url}"
+            if recovery_reason:
+                text += f"\n说明：{recovery_reason}；任务已自动恢复并完成。"
             prefix = f"job-done:{job_id}:{watcher['id']}"
+            if not notify_success:
+                store.mark_watcher_notified(int(watcher["id"]))
+                store.add_job_event(job_id, "notify_done_suppressed", str(watcher.get("usage_event_id", "")))
+                continue
         else:
             if usage_id:
-                store.update_usage_event(usage_id, "failed", title=title, error=error)
+                store.update_usage_event(
+                    usage_id,
+                    "failed",
+                    doc_url=published_doc_url,
+                    title=title,
+                    error=error,
+                )
             reason = str(error).replace("\n", " ")[:500]
-            text = (
-                f"这篇我没读成：{source_id}\n原因：{reason}\n"
-                "需要再试时，直接在本话题回复「重试」；也可以回复「重试 + 论文 ID」。"
-            )
+            if published_doc_url:
+                text = (
+                    f"这篇已生成，但视觉审查重试到上限后仍未通过：{source_id}\n"
+                    f"原因：{reason}\n"
+                    f"文档（请人工复核）：{published_doc_url}\n"
+                    "需要再试时，直接在本话题回复「重试」；也可以回复「重试 + 论文 ID」。"
+                )
+            else:
+                text = (
+                    f"这篇我没读成：{source_id}\n原因：{reason}\n"
+                    "需要再试时，直接在本话题回复「重试」；也可以回复「重试 + 论文 ID」。"
+                )
             prefix = f"job-fail:{job_id}:{watcher['id']}"
+            if not notify_failure:
+                store.mark_watcher_notified(int(watcher["id"]))
+                store.add_job_event(job_id, "notify_failed_suppressed", str(watcher.get("usage_event_id", "")))
+                continue
         try:
             _reply(feishu, watcher["message_id"], text, prefix)
             store.mark_watcher_notified(int(watcher["id"]))
-            store.add_job_event(job_id, "notify_done" if doc_url else "notify_failed", str(watcher.get("usage_event_id", "")))
+            if doc_url:
+                event_type = "notify_done"
+            elif published_doc_url:
+                event_type = "notify_failed_with_doc"
+            else:
+                event_type = "notify_failed"
+            store.add_job_event(job_id, event_type, str(watcher.get("usage_event_id", "")))
         except Exception as exc:
             store.add_job_event(job_id, "notify_error", str(exc)[:500])
 

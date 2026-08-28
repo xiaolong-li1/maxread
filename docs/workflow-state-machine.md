@@ -12,6 +12,39 @@ The old `queue_jobs.status` column remains as a compatibility projection:
 - `done`: `completed`
 - `failed`: any retryable or terminal failure state
 
+## Compact operator view
+
+The durable lifecycle below intentionally keeps check and repair states separate
+for recovery and audit. The operator-facing architecture page uses a compact
+projection so the same business phase is not shown as several redundant nodes:
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued
+    queued --> preparing: claim
+    preparing --> generating: source_ready
+    preparing --> delivery_gate: resume_published
+    generating --> generating: repair and recheck
+    generating --> reviewing: draft_ready
+    reviewing --> quality_gate: review_completed
+    quality_gate --> quality_gate: repair and recheck
+    quality_gate --> publishing: quality_passed
+    publishing --> delivery_gate: publish_succeeded
+    delivery_gate --> delivery_gate: repair and recheck
+    delivery_gate --> completed: complete
+    preparing --> retryable_failure: source missing
+    generating --> retryable_failure: generation budget exhausted
+    quality_gate --> retryable_failure: quality rejected
+    delivery_gate --> retryable_failure: delivery rejected
+    retryable_failure --> queued: automatic or explicit retry
+    queued --> cancelled: cancel
+```
+
+`workflow_state` remains the source of truth; the compact view is generated from
+the mapping in `maxread/workflow.py` and includes the durable states represented
+by each node. This keeps the diagram readable without losing the exact failure
+reason in the database or `job_events`.
+
 ## Main lifecycle
 
 ```mermaid
@@ -64,6 +97,13 @@ stateDiagram-v2
 `recover` is only for a worker that disappeared or stopped heartbeating. It
 does not mark the paper as successful; the job starts again from `queued`.
 
+At the queue boundary, only transient model/network/browser failures and
+generation-with-no-valid-output are automatically replayed, and only within
+`MAXREAD_AUTO_RETRY_ATTEMPTS`. Source and deterministic quality failures remain
+visible for an explicit retry. A write failure without a durable publish
+checkpoint is never blindly replayed because it may have left a partial Feishu
+document.
+
 Each running worker also owns a queue lease identified by `worker_id`. Heartbeat,
 stage updates, workflow transitions, completion, and failure writes from the
 queue worker validate that lease. A stale worker therefore cannot overwrite a
@@ -107,7 +147,7 @@ same dedupe key as inactive and create duplicate active jobs.
 The first three steps are now implemented: side effects remain in the existing
 handlers, milestone events are persisted, quality/visual repair rounds are
 represented as bounded state transitions, and published-document recovery is
-idempotent. The remaining steps are:
+idempotent. The remaining worthwhile improvements are:
 
-1. Move terminal notification policy into a single queue finalizer.
-2. Add more resumable checkpoints for expensive phases, so a retry can skip a verified source fetch or document render.
+1. Add more resumable checkpoints for expensive phases, so a retry can skip a verified source fetch or document render.
+2. Add a notification retry worker for watcher messages without changing the job terminal state.

@@ -6,6 +6,8 @@ __pycache__/
 var/
 tmp/
 artifacts/
+features/mail_ingestion/data/
+features/mail_ingestion/.env
 
 # Local deployment/runtime artifacts
 *.env

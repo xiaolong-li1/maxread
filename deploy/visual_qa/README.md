@@ -1,7 +1,7 @@
 # MaxRead visual QA worker
 
-This worker runs on `ziplab-5090` as an on-demand SSH subprocess. It does not
-start or depend on the stale remote MaxRead services.
+This worker can run locally or on a separately provisioned browser host as an
+on-demand subprocess. It does not start or depend on the MaxRead listener.
 
 ## Contract
 
@@ -12,13 +12,20 @@ start or depend on the stale remote MaxRead services.
 - Mutation: none. The local MaxRead process owns authenticated Feishu writes.
 - Retention: the latest 60 run directories are kept.
 
+With `MAXREAD_VISUAL_QA_EXPORT_PDF=true`, the runner uses Feishu's server-side
+Docx-to-PDF export and renders the PDF pages with Poppler. It blocks only on
+concrete visible failures such as invalid-formula labels, raw formatting text,
+or abnormal blank pages. Persisted image/formula/table counts are telemetry,
+not acceptance thresholds. Successful pipeline runs remove the exported PDF
+and page images; failed runs retain them for diagnosis.
+
 The local coordinator applies at most two deterministic block patches per
 document. Supported patches are malformed formula/raw-format blocks and image
 width overflow. Every visual patch is followed by another browser pass. Browser
 or SSH failure is fail-open so the document service remains available; a
 confirmed high-severity visual finding blocks delivery.
 
-## Remote layout
+## Browser-host layout
 
 ```text
 ~/.local/share/maxread-browser/
@@ -29,6 +36,11 @@ confirmed high-severity visual finding blocks delivery.
   run_visual_qa.sh
   runs/
 ```
+
+For a same-machine install, set `MAXREAD_VISUAL_QA_ROOT` to this resource
+directory, `MAXREAD_VISUAL_QA_PYTHON` to the MaxRead virtualenv, and
+`PLAYWRIGHT_BROWSERS_PATH` to the Playwright browser cache. Keep visual QA
+disabled until a public Feishu URL passes a manual smoke test.
 
 Manual smoke test:
 

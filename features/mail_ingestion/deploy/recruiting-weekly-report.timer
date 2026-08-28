@@ -1,0 +1,10 @@
+[Unit]
+Description=Send ZIP Lab recruiting report every Monday morning
+
+[Timer]
+OnCalendar=Mon *-*-* 07:00:00 Asia/Shanghai
+Persistent=true
+Unit=recruiting-weekly-report.service
+
+[Install]
+WantedBy=timers.target

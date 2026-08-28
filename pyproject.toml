@@ -9,6 +9,11 @@ dependencies = [
     "pypdf>=5",
 ]
 
+[project.optional-dependencies]
+browser = [
+    "playwright>=1.49",
+]
+
 [project.scripts]
 maxread = "maxread.cli:main"
 

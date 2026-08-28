@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Protocol
 
-from .render import display_caption
+from .render import constrain_rendered_image, display_caption
 
 
 class ImageDocClient(Protocol):
@@ -120,7 +120,7 @@ def prepare_feishu_image(image_path: Path | str) -> Path:
     try:
         source_mtime = path.stat().st_mtime
         if safe_path.exists() and safe_path.stat().st_mtime >= source_mtime:
-            return safe_path
+            return constrain_rendered_image(safe_path, max_bytes=10 * 1024 * 1024, max_side=2200)
         safe_dir.mkdir(parents=True, exist_ok=True)
         with Image.open(path) as image:
             image = image.convert("RGBA")
@@ -133,7 +133,7 @@ def prepare_feishu_image(image_path: Path | str) -> Path:
                 scale = 2200 / max_side
                 rgb = rgb.resize((max(1, round(rgb.width * scale)), max(1, round(rgb.height * scale))), Image.LANCZOS)
             rgb.save(safe_path, format="PNG", optimize=True)
-        return safe_path
+        return constrain_rendered_image(safe_path, max_bytes=10 * 1024 * 1024, max_side=2200)
     except Exception:
         return path
 

@@ -60,6 +60,7 @@ class ArticlePipeline:
         send_progress: bool = True,
         resume_published_url: str = "",
         resume_published_checkpoint: str = "",
+        force_rebuild: bool = False,
     ) -> ArticleProcessResult:
         article_id = sha256(ref.url.encode("utf-8")).hexdigest()[:16]
         record = self.store.get_document(article_id)
@@ -71,8 +72,8 @@ class ArticlePipeline:
             if event and send_progress:
                 self._reply(event, "[了解] 收到了：网页文章", "start", article_id)
                 self._reply(event, f"[下载中] 正在抓取网页：{_host(ref.url)}", "downloading", article_id)
-            published_url = str(resume_published_url or "").strip()
-            if not published_url and record and record.status == "quality_failed":
+            published_url = "" if force_rebuild else str(resume_published_url or "").strip()
+            if not force_rebuild and not published_url and record and record.status == "quality_failed":
                 published_url = record.doc_url
             checkpoint = PublishedCheckpoint.from_json(resume_published_checkpoint, fallback_url=published_url)
             if checkpoint:

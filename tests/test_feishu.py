@@ -2,7 +2,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from maxread.feishu import FeishuClient, _related_message_ids, _related_thread_ids, _retry_attempts, _safe_relative_path, doc_token_from_url, normalize_doc_url, parse_event, progress_emoji_type
+from maxread.feishu import FeishuClient, _message_ids_from_payload, _related_message_ids, _related_thread_ids, _retry_attempts, _safe_relative_path, doc_token_from_url, normalize_doc_url, parse_event, progress_emoji_type
 
 
 class CapturingFeishu(FeishuClient):
@@ -261,6 +261,20 @@ def test_related_message_ids_find_parent_and_skip_current():
     payload = {"message_id": "om_current", "event": {"message": {"parent_id": "om_parent", "thread_id": "omt_thread"}}}
     assert _related_message_ids(payload, exclude={"om_current"}) == ["om_parent"]
     assert _related_thread_ids(payload) == ["om_parent", "omt_thread"]
+
+
+def test_message_ids_from_thread_payload_excludes_current_and_dedupes():
+    payload = {
+        "data": {
+            "items": [
+                {"message_id": "om_root"},
+                {"message_id": "om_current"},
+                {"message_id": "om_root"},
+            ]
+        }
+    }
+
+    assert _message_ids_from_payload(payload, exclude={"om_current"}) == ["om_root"]
 
 
 def test_fetch_related_message_text_reads_parent_message():

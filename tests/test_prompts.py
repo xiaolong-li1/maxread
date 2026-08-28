@@ -4,8 +4,8 @@ from pathlib import Path
 from maxread import repository
 from maxread.article_prompts import ARTICLE_SYSTEM_PROMPT, build_article_user_prompt
 from maxread.models import ArxivMetadata, ArticleBundle, ArticleSection, PaperBundle
-from maxread.prompts import FINAL_SYSTEM_PROMPT, build_final_user_prompt
-from maxread.review import REVIEW_SYSTEM_PROMPT, build_review_user_prompt, parse_review_response, review_markdown, review_markdown_with_report, visible_review_issues
+from maxread.prompts import FINAL_SYSTEM_PROMPT, build_final_user_prompt, build_paper_evidence_prefix, build_section_user_prompt, select_key_source_tables
+from maxread.review import EDITORIAL_VALIDATION_SYSTEM_PROMPT, METHOD_AUDIT_SYSTEM_PROMPT, METHOD_VALIDATION_SYSTEM_PROMPT, REVIEW_SYSTEM_PROMPT, audit_method_consistency_with_report, build_method_audit_user_prompt, build_review_user_prompt, parse_review_response, review_markdown, review_markdown_with_report, validate_editorial_quality, validate_method_consistency, visible_review_issues
 
 
 def _bundle():
@@ -33,12 +33,218 @@ def test_paper_prompt_requires_method_fidelity():
     prompt = build_final_user_prompt(_bundle())
     assert "方法部分保真优先" in FINAL_SYSTEM_PROMPT
     assert "Method/Approach/Algorithm/Model/Training/Inference" in prompt
-    assert "输入是什么、输出是什么" in prompt
-    assert "变量含义、计算顺序" in prompt
+    assert "输入、输出、要解决的具体瓶颈" in prompt
+    assert "关键变量是什么" in prompt
     assert "为什么需要它 -> 接收什么 -> 如何计算/执行" in prompt
     assert "端到端例子" in prompt
-    assert "35%-50%" in prompt
+    assert "以“读者能顺着流程说明白”为停止条件" in prompt
+    assert "模块之间要有承接句" in prompt
+    assert "方法节不是摘要的扩写" in FINAL_SYSTEM_PROMPT
     assert "原文未展开" in prompt
+    assert "实验或图示设置 -> 实际观测" in FINAL_SYSTEM_PROMPT
+    assert "彼此正交的设计轴" in FINAL_SYSTEM_PROMPT
+
+
+def test_paper_prompt_keeps_boundary_checks_selective_and_readable():
+    prompt = build_final_user_prompt(_bundle())
+
+    assert "容易误解的分组/reset 条件" in FINAL_SYSTEM_PROMPT
+    assert "不要为每个公式机械穷举" in FINAL_SYSTEM_PROMPT
+    assert "观测、作者解释、经验支持、数学结论" in prompt
+    assert "表格只选最能支撑主结论" in prompt
+    assert "不要单独生成符号账本、作用域矩阵" in FINAL_SYSTEM_PROMPT
+    assert "MRoPE/spatial-reset" not in FINAL_SYSTEM_PROMPT
+    assert "不要搬运所有 source/附录表" in prompt
+
+
+def test_review_prompt_receives_source_evidence_without_forcing_formal_audit():
+    prompt = build_review_user_prompt(
+        "# 草稿\n\n## 3. 方法框架\n\n结论。",
+        [],
+        kind="paper",
+        source_context=r"m_i=(s_i+\tau_i,s_i+h_i,s_i+w_i)",
+    )
+
+    assert r"m_i=(s_i+\tau_i,s_i+h_i,s_i+w_i)" in prompt
+    assert "符号只有真实歧义时才需一句话澄清" in prompt
+    assert "不要补作用域矩阵或穷举组合" in prompt
+    assert "attention pattern" in prompt
+    assert "不得从 source 把未选中的主表、附录表" in REVIEW_SYSTEM_PROMPT
+
+
+def test_runtime_editorial_guidance_is_scoped_to_one_generation_and_review():
+    guidance = "区分局部时间 tau 与视觉块全局偏移 s，并比较同块和跨块。"
+    generation = build_final_user_prompt(_bundle(), editorial_guidance=guidance)
+    review = build_review_user_prompt("# 草稿", [], kind="paper", source_context="source", editorial_guidance=guidance)
+
+    assert guidance in generation
+    assert guidance in review
+    assert "这是待核查清单，不是论文事实" in generation
+    assert "不得当作既定论文事实" in review
+
+
+def test_method_audit_checks_core_facts_without_expanding_formalism():
+    prompt = build_method_audit_user_prompt(
+        "# 草稿\n\n定义 y_i=c_g+x_i，随后讨论差分。",
+        [],
+        source_context="source",
+        editorial_guidance="检查同组和跨组。",
+    )
+
+    assert "只复核支撑核心结论的关键公式" in prompt
+    assert "不新增形式化符号体系" in prompt
+    assert "禁止新增符号账本" in METHOD_AUDIT_SYSTEM_PROMPT
+
+
+def test_method_audit_returns_complete_corrected_markdown():
+    class AuditLLM:
+        def responses_text(self, _system, _user, **_kwargs):
+            return json.dumps({"markdown": "# T\n\n## 3. 方法框架\n\n修正后的推导。", "issues": []}, ensure_ascii=False)
+
+    original = "# T\n\n## 3. 方法框架\n\n错误推导。"
+    result = audit_method_consistency_with_report(AuditLLM(), original, [])
+
+    assert "修正后的推导" in result.markdown
+
+
+def test_method_validation_blocks_internal_math_contradiction():
+    class ValidationLLM:
+        def responses_text(self, _system, _user, **_kwargs):
+            return json.dumps(
+                {
+                    "passed": False,
+                    "findings": [
+                        {
+                            "category": "math",
+                            "severity": "high",
+                            "detail": "由 y_i=c+x_i 可得同组差分不含 c，草稿仍保留 c。",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+    result = validate_method_consistency(ValidationLLM(), "# T\n\n错误推导。")
+
+    assert result.passed is False
+    assert result.issues[0].category == "math"
+    assert "同组差分" in result.issues[0].detail
+    assert "不要要求形式化完备" in METHOD_VALIDATION_SYSTEM_PROMPT
+
+
+def test_method_validation_accepts_noisy_fenced_pass_response():
+    class NoisyValidationLLM:
+        def responses_text(self, _system, _user, **_kwargs):
+            return (
+                'I will return the requested object. Example: {"passed":true|false}.\n'
+                '```json\n'
+                '{"passed":true,"findings":[{"category":"math","severity":"low","detail":"checked"}]}\n'
+                '```'
+            )
+
+    result = validate_method_consistency(NoisyValidationLLM(), "# T")
+
+    assert result.passed is True
+    assert result.issues[0].severity == "low"
+
+
+def test_method_validation_accepts_string_findings():
+    class StringFindingLLM:
+        def responses_text(self, _system, _user, **_kwargs):
+            return '{"passed":true,"findings":["all equations checked"]}'
+
+    result = validate_method_consistency(StringFindingLLM(), "# T")
+
+    assert result.passed is True
+    assert result.issues[0].detail == "all equations checked"
+
+
+def test_method_validation_protocol_failure_is_inconclusive_not_blocking():
+    class InvalidJsonLLM:
+        def responses_text(self, _system, _user, **_kwargs):
+            return "not valid json"
+
+    result = validate_method_consistency(InvalidJsonLLM(), "# T")
+
+    assert result.passed is True
+    assert result.issues[0].severity == "medium"
+    assert "inconclusive" in result.issues[0].detail
+
+
+def test_editorial_validation_returns_compact_pass_without_rewriting():
+    class EditorialLLM:
+        def responses_text(self, system, _user, **_kwargs):
+            assert "交付可读性验收员" in system
+            return '{"passed":true,"findings":[]}'
+
+    result = validate_editorial_quality(EditorialLLM(), "# T\n\n## 1. A", [])
+
+    assert result.passed is True
+    assert result.issues == []
+    assert "不重写文章" in EDITORIAL_VALIDATION_SYSTEM_PROMPT
+
+
+def test_editorial_validation_blocks_concrete_layout_issue():
+    class EditorialLLM:
+        def responses_text(self, _system, _user, **_kwargs):
+            return '{"passed":false,"findings":[{"category":"heading","severity":"high","detail":"重复 H1"}]}'
+
+    result = validate_editorial_quality(EditorialLLM(), "# T\n\n# T", [])
+
+    assert result.passed is False
+    assert result.issues[0].detail == "重复 H1"
+
+
+def test_method_validation_allows_faithfully_disclosed_source_inconsistency():
+    class SourceConflictLLM:
+        def responses_text(self, _system, _user, **_kwargs):
+            return json.dumps(
+                {
+                    "passed": False,
+                    "findings": [
+                        {
+                            "category": "factual_risk",
+                            "severity": "high",
+                            "detail": "补充材料定义无法复算原表报告值；稿件已正确标注不一致并说明以表值为准。",
+                        },
+                        {"category": "math", "severity": "low", "detail": "其余推导正确。"},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+    result = validate_method_consistency(
+        SourceConflictLLM(),
+        "# T\n\n原文内部不一致，相关指标无法复算，以下按原表报告值并以表值为准。",
+    )
+
+    assert result.passed is True
+    assert result.issues[0].category == "source_inconsistency"
+    assert result.issues[0].severity == "medium"
+    assert "source_inconsistency/medium" in METHOD_VALIDATION_SYSTEM_PROMPT
+
+
+def test_method_validation_still_blocks_undisclosed_source_conflict():
+    class UndisclosedConflictLLM:
+        def responses_text(self, _system, _user, **_kwargs):
+            return json.dumps(
+                {
+                    "passed": False,
+                    "findings": [
+                        {
+                            "category": "factual_risk",
+                            "severity": "high",
+                            "detail": "补充材料定义无法复算原表，但稿件没有披露该矛盾。",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+    result = validate_method_consistency(UndisclosedConflictLLM(), "# T\n\n直接复述结果。")
+
+    assert result.passed is False
+    assert result.issues[0].category == "factual_risk"
 
 
 def test_paper_prompt_keeps_program_identifiers_out_of_latex():
@@ -74,6 +280,75 @@ def test_paper_prompt_requires_readable_h1_title():
     assert "不要写“深网”" in prompt
     assert "深层网络一定要很深吗？" in prompt
     assert "用深层模型蒸馏浅层网络" in prompt
+
+
+def test_paper_prompt_omits_pdf_text_when_tex_source_exists():
+    bundle = _bundle()
+    bundle.pdf_text = "UNIQUE PDF TEXT SHOULD NOT ENTER PROMPT"
+
+    prompt = build_final_user_prompt(bundle)
+
+    assert "UNIQUE PDF TEXT SHOULD NOT ENTER PROMPT" not in prompt
+    assert "PDF text excerpt" not in prompt
+
+
+def test_paper_prompt_uses_pdf_only_when_tex_source_is_unavailable():
+    bundle = _bundle()
+    bundle.source_text = ""
+    bundle.pdf_text = "PDF FALLBACK CONTENT"
+
+    prompt = build_final_user_prompt(bundle)
+
+    assert "PDF FALLBACK CONTENT" in prompt
+    assert "仅在 TeX source 不可用时启用" in prompt
+
+
+def test_section_prompts_share_identical_evidence_prefix_and_put_contract_last():
+    bundle = _bundle()
+    evidence = build_paper_evidence_prefix(bundle)
+    method = build_section_user_prompt(evidence, "method", bundle.metadata.paper_id, markers=["[MaxReadFigure:1:m]"], table_ids=[1])
+    ablation = build_section_user_prompt(evidence, "ablation", bundle.metadata.paper_id, table_ids=[2])
+
+    assert method.startswith(evidence)
+    assert ablation.startswith(evidence)
+    assert method.split("\n\n分章生成任务：", 1)[0] == ablation.split("\n\n分章生成任务：", 1)[0]
+    assert method.rstrip().endswith(f"论文 ID：{bundle.metadata.paper_id}。")
+    assert "[MaxReadTable:1]" in method
+    assert "图和表都采用唯一所有权" in method
+    assert "禁止单独制作符号账本或作用域矩阵" in method
+    assert "讲清后立即收束" in method
+    assert "禁止逐行复述图表" in ablation
+    assert "不设篇幅上限" not in ablation
+    full = build_final_user_prompt(bundle)
+    assert full.index("TeX/source excerpt") < full.index("最终生成任务与验收要求")
+
+
+def test_key_table_selection_prefers_results_efficiency_and_ablation():
+    tables = [
+        r"\begin{table}\caption{Complete supplementary results 1}\begin{tabular}{cc}a&1\end{tabular}\end{table}",
+        r"\begin{table}\caption{Main comparison on ImageNet}\begin{tabular}{cc}main&2\end{tabular}\end{table}",
+        r"\begin{table}\caption{Efficiency and throughput}\begin{tabular}{cc}speed&3\end{tabular}\end{table}",
+        r"\begin{table}\caption{Ablation of decoding heads}\begin{tabular}{cc}head&4\end{tabular}\end{table}",
+        r"\begin{table}\caption{Additional full results 2}\begin{tabular}{cc}b&5\end{tabular}\end{table}",
+        r"\begin{table}\caption{Additional full results 3}\begin{tabular}{cc}c&6\end{tabular}\end{table}",
+        r"\begin{table}\caption{Additional full results 4}\begin{tabular}{cc}d&7\end{tabular}\end{table}",
+    ]
+
+    selected = select_key_source_tables(tables, max_tables=3)
+
+    assert len(selected) == 3
+    assert any("Main comparison" in table for table in selected)
+    assert any("Efficiency" in table for table in selected)
+    assert any("Ablation" in table for table in selected)
+
+
+def test_key_table_selection_deduplicates_repeated_main_and_supplement_tables():
+    main = r"\begin{table}\caption{Main results}\begin{tabular}{cc}Model&Score\\A&1\end{tabular}\end{table}"
+    repeated = r"\begin{table}\caption{Complete supplementary results}\label{tab:repeat}\begin{tabular}{cc}Model & Score \\ A & 1\end{tabular}\end{table}"
+
+    selected = select_key_source_tables([main, repeated], max_tables=6)
+
+    assert selected == [main]
 
 
 def test_article_prompt_prefers_blog_localization_over_relayout():
@@ -327,6 +602,18 @@ def test_review_markdown_keeps_original_when_review_truncates_method_section():
     assert any("truncated method section" in issue.detail for issue in result.issues)
 
 
+def test_review_markdown_keeps_original_when_reviewer_bloats_method_section():
+    original_method = "## 3. 方法框架\n\n" + ("模块按输入、计算和输出衔接。" * 50)
+    original = "# 标题\n\n**TL;DR**：摘要。\n\n" + original_method + "\n\n## 4. 实验结果\n\n结果。"
+    reviewed_method = "## 3. 方法框架\n\n" + ("额外符号、作用域矩阵和边界证明。" * 300)
+    reviewed = "# 标题\n\n**TL;DR**：摘要。\n\n" + reviewed_method + "\n\n## 4. 实验结果\n\n结果。"
+
+    result = review_markdown_with_report(_MethodTruncatingReviewLLM(reviewed), original, [])
+
+    assert result.markdown == original + "\n"
+    assert any("expanded section 3 beyond readability budget" in issue.detail for issue in result.issues)
+
+
 class _FenceLLM:
     def responses_text(self, system, user, **kwargs):
         return '{"markdown":"# T\\n\\n[MaxReadFigure:1:a]", "issues":[{"category":"tex_macro", "severity":"medium", "detail":"清理宏"}]}'
@@ -392,6 +679,20 @@ def test_parse_review_response_filters_resolved_fix_notes():
     result = parse_review_response(raw)
     assert len(result.issues) == 1
     assert result.issues[0].category == "factual_risk"
+
+
+def test_parse_review_response_recovers_longest_json_after_model_noise():
+    raw = (
+        "我会修复格式并返回完整文档。\n"
+        + json.dumps({"markdown": "# 标题\n\n短稿。", "issues": []}, ensure_ascii=False)
+        + "\n"
+        + json.dumps({"markdown": "# 标题\n\n完整稿。\n\n补充方法上下文。", "issues": []}, ensure_ascii=False)
+    )
+
+    result = parse_review_response(raw)
+
+    assert result.markdown == "# 标题\n\n完整稿。\n\n补充方法上下文。\n"
+    assert result.issues == []
 
 
 def test_visible_review_issues_hides_existing_resolved_rows():

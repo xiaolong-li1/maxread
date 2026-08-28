@@ -451,6 +451,14 @@ def architecture_spec() -> dict:
             "metrics": {
                 "states": len(spec["states"]),
                 "transitions": len(spec["transitions"]),
+                "durable_states": len(spec["states"]),
+                "durable_transitions": len(spec["transitions"]),
+                "compact_states": len(spec["compact_graph"]["states"]),
+                "compact_transitions": len(spec["compact_graph"]["transitions"]),
+                "collapsed_states": len(spec["states"]) - len(spec["compact_graph"]["states"]),
+                "compact_retryable_terminals": sum(
+                    1 for state in spec["compact_graph"]["states"] if state["terminal"] and state["retryable"]
+                ),
                 "repair_loops": 3,
                 "quality_gates": len(QUALITY_GATES),
                 "retryable_terminals": sum(1 for state in spec["states"] if state["terminal"] and state["retryable"]),
@@ -491,6 +499,21 @@ def _validate_architecture_spec(spec: dict) -> None:
             actual = transition(source, policy["event"]).to_state.value
             if actual != policy["to"]:
                 raise RuntimeError(f"invalid policy edge: {source} + {policy['event']} -> {actual}")
+
+    compact = spec.get("compact_graph") or {}
+    compact_states = {item["id"] for item in compact.get("states", [])}
+    if not compact_states:
+        raise RuntimeError("compact workflow graph is empty")
+    for edge in compact.get("transitions", []):
+        if edge["from"] not in compact_states or edge["to"] not in compact_states:
+            raise RuntimeError(f"compact graph references unknown state: {edge}")
+        if not edge.get("label") or not edge.get("condition"):
+            raise RuntimeError(f"missing compact transition presentation: {edge}")
+    for scenario in compact.get("scenarios", []):
+        if len(scenario["events"]) != len(scenario["states"]) - 1:
+            raise RuntimeError(f"invalid compact scenario length: {scenario['id']}")
+        if set(scenario["states"]) - compact_states:
+            raise RuntimeError(f"unknown compact scenario state: {scenario['id']}")
 
     handling_ids = {item["id"] for item in spec["handling_types"]}
     failure_ids = [item["id"] for item in spec["failure_modes"]]

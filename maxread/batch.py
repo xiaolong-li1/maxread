@@ -86,6 +86,8 @@ class BatchProcessor:
                     review_reasoning_effort=self.settings.openai_review_reasoning_effort,
                     visual_qa=VisualQAController.from_settings(self.settings, llm=llm),
                     generation_repair_rounds=self.settings.generation_repair_rounds,
+                    sectional_generation_enabled=self.settings.sectional_generation_enabled,
+                    sectional_generation_workers=self.settings.sectional_generation_workers,
                     quality_repair_rounds=self.settings.quality_repair_rounds,
                 )
                 result = pipeline.process_ref(ref, send_progress=False)

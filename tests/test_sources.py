@@ -1,12 +1,31 @@
 from maxread.batch import _queue_message
 from maxread.db import Store
 from maxread.job_queue import QueueItem, _cached_doc
-from maxread.sources import extract_supported_inputs
+from maxread.sources import extract_supported_inputs, is_supported_web_article_url
 
 
 def test_huggingface_papers_maps_to_arxiv():
     refs, web_refs = extract_supported_inputs("读 https://huggingface.co/papers/2605.18739")
     assert [ref.paper_id for ref in refs] == ["2605.18739"]
+    assert web_refs == []
+
+
+def test_papers_cool_arxiv_url_maps_to_canonical_arxiv_pipeline():
+    refs, web_refs = extract_supported_inputs("读 https://papers.cool/arxiv/2608.25479")
+
+    assert [(ref.paper_id, ref.url) for ref in refs] == [
+        ("2608.25479", "https://arxiv.org/abs/2608.25479")
+    ]
+    assert web_refs == []
+    assert is_supported_web_article_url("https://papers.cool/arxiv/2608.25479") is False
+
+
+def test_papers_cool_version_and_query_deduplicate_plain_arxiv_id():
+    refs, web_refs = extract_supported_inputs(
+        "2608.25479 https://papers.cool/arxiv/2608.25479v2?from=feed"
+    )
+
+    assert [ref.paper_id for ref in refs] == ["2608.25479"]
     assert web_refs == []
 
 
@@ -58,3 +77,16 @@ def test_queue_cached_doc_for_paper(tmp_path):
     cached = _cached_doc(store, QueueItem("paper", "2604.12946", "https://arxiv.org/abs/2604.12946", "2604.12946"))
     assert cached == ("https://doc", "T")
     store.close()
+
+
+def test_feishu_login_trap_is_never_treated_as_web_article():
+    url = (
+        "https://login.feishu.cn/accounts/trap?app_id=2&query_scope=all&"
+        "redirect_uri=https%3A%2F%2Ftenant.feishu.cn%2Fdocx%2Fdoc"
+    )
+
+    papers, articles = extract_supported_inputs(f"重试 2410.06205\n失败原因：{url}")
+
+    assert [paper.paper_id for paper in papers] == ["2410.06205"]
+    assert articles == []
+    assert is_supported_web_article_url(url) is False

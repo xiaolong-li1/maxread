@@ -1,8 +1,12 @@
+import hashlib
+import http.client
+import json
+import threading
 from types import SimpleNamespace
 
 import maxread.admin_server as admin_server
 from maxread.admin_architecture import architecture_html, architecture_spec
-from maxread.admin_server import _admin_summary, _attach_user_names, _limit
+from maxread.admin_server import AdminHandler, AdminServer, INDEX_HTML, _admin_summary, _attach_user_names, _limit, _record_filters
 from maxread.db import Store
 from maxread.workflow import transition
 
@@ -31,6 +35,13 @@ def test_admin_limit_is_bounded():
     assert _limit("limit=5000") == 300
     assert _limit("limit=0") == 1
     assert _limit("limit=bad") == 80
+
+
+def test_admin_record_filters_default_to_three_days_and_accept_user():
+    since, sender_id = _record_filters("sender_id=ou_1")
+    assert since
+    assert sender_id == "ou_1"
+    assert _record_filters("days=0") == ("", "")
 
 
 def test_attach_user_names_uses_contact_search():
@@ -105,16 +116,95 @@ def test_architecture_spec_covers_states_and_scenarios_follow_real_transitions()
 def test_architecture_html_is_self_contained_and_uses_workflow_api():
     html = architecture_html()
     assert "MaxRead Pipeline Architecture" in html
-    assert "fetch('/api/workflow-spec'" in html
-    assert 'id="failure-list"' in html
+    assert "fetch('api/workflow-spec'" in html
     assert 'class="state-graph"' in html
-    assert 'class="terminal-edge-grid"' in html
-    assert "isTerminalTransition" in html
     assert "selectedTransitionKey" in html
     assert "renderNextHopSummary" in html
-    assert "下一步：" in html
-    assert 'id="quality-gate-list"' in html
-    assert "renderQualityGates" in html
-    assert "renderPolicyRail" in html
-    assert "renderFailures()" in html
+    assert "shortCondition" in html
+    assert "edge-condition-svg" in html
+    assert "spec.compact_graph" in html
+    assert "服务端状态规范仍是旧版本" in html
+    assert 'id="failure-list"' not in html
+    assert 'id="quality-gate-list"' not in html
+    assert "renderQualityGates();" not in html
+    assert "renderFailures();" not in html
+    assert 'id="input-assembly"' in html
+    assert "主生成不接收图片二进制" in html
+    assert "build_final_user_prompt()" in html
     assert "https://" not in html
+
+
+def test_admin_html_recovers_from_transient_api_failure():
+    assert "Promise.all([loadUsers(), loadAdminStatus()]).finally(refreshAll)" in INDEX_HTML
+    assert "数据加载失败" in INDEX_HTML
+    assert "AbortController" in INDEX_HTML
+
+
+def test_admin_mutations_require_authenticated_server_side_session(tmp_path):
+    password = "test-admin-password"
+    settings = SimpleNamespace(
+        db_path=tmp_path / "maxread.sqlite3",
+        admin_password_hash=hashlib.sha256(password.encode("utf-8")).hexdigest(),
+        lark_cli="lark-cli",
+    )
+    server = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+
+    def request(method, path, payload=None, cookie=""):
+        headers = {"content-type": "application/json"}
+        if cookie:
+            headers["cookie"] = cookie
+        connection.request(method, path, body=json.dumps(payload or {}), headers=headers)
+        response = connection.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+        return response, body
+
+    try:
+        response, body = request("GET", "/api/admin/status")
+        assert response.status == 200
+        assert body == {"authenticated": False}
+
+        response, body = request(
+            "POST",
+            "/api/service-status",
+            {"mode": "outage", "reason": "test"},
+        )
+        assert response.status == 401
+        assert body["error"] == "需要管理员登录"
+
+        response, body = request("POST", "/api/admin/login", {"password": password})
+        assert response.status == 200
+        assert body["authenticated"] is True
+        cookie = response.getheader("set-cookie").split(";", 1)[0]
+        assert cookie.startswith("maxread_admin_session=")
+        assert password not in response.getheader("set-cookie")
+
+        response, body = request(
+            "POST",
+            "/api/service-status",
+            {"mode": "outage", "reason": "test", "updated_by": "admin"},
+            cookie,
+        )
+        assert response.status == 200
+        assert body["mode"] == "outage"
+
+        response, body = request("GET", "/api/admin/status", cookie=cookie)
+        assert response.status == 200
+        assert body == {"authenticated": True}
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_admin_html_defaults_to_read_only_and_has_explicit_login():
+    assert "管理员登录" in INDEX_HTML
+    assert "adminAuthenticated: false" in INDEX_HTML
+    assert "state.adminAuthenticated ? editor : readonly" in INDEX_HTML
+    assert "000000" not in INDEX_HTML
+    assert "worker 心跳正常；任务失败或租约失效后方可重试" in INDEX_HTML
+    assert "查看恢复记录" in INDEX_HTML
+    assert "任务已在队列中，无需重复提交" in INDEX_HTML

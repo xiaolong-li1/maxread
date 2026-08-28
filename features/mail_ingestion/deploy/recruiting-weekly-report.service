@@ -1,0 +1,12 @@
+[Unit]
+Description=ZIP Lab weekly recruiting report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/lixiaolong/projects/maxread
+EnvironmentFile=-/home/lixiaolong/projects/maxread/features/mail_ingestion/data/accounts/zip-lab.env
+ExecStart=/home/lixiaolong/projects/maxread/features/mail_ingestion/bin/recruiting-pipeline --root /home/lixiaolong/projects/maxread --env-file features/mail_ingestion/data/accounts/zip-lab.env weekly-report --send --chat-id ${RECRUITING_NOTIFY_CHAT_ID}
+NoNewPrivileges=true
+PrivateTmp=true

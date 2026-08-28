@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
@@ -18,6 +20,7 @@ STRUCTURAL_SELECTORS = (
     ".docx-text-block, .docx-heading-block, .docx-table-block, "
     ".docx-image-block, .docx-code-block, .docx-bullet-block"
 )
+EDITOR_SELECTORS = ".page-main-item.editor, .editor-container, .bear-web-x-container"
 
 
 def main() -> int:
@@ -44,23 +47,43 @@ def main() -> int:
         "sections_checked": 0,
         "metrics": {},
     }
+    emitted = False
     try:
+        _phase("playwright-start")
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-background-timer-throttling",
+                    "--disable-renderer-backgrounding",
+                ],
+            )
             page = browser.new_page(
                 viewport={"width": max(1024, args.viewport_width), "height": max(720, args.viewport_height)},
                 locale="zh-CN",
                 device_scale_factor=1,
             )
-            page.goto(args.url, wait_until="domcontentloaded", timeout=120_000)
-            page.wait_for_timeout(4_500)
+            page.set_default_timeout(5_000)
+            _phase("navigate")
+            page.goto(args.url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(3_000)
+            try:
+                page.locator(EDITOR_SELECTORS).first.wait_for(state="attached", timeout=20_000)
+            except Exception:
+                pass
             report["url"] = page.url
-            report["title"] = page.title()
+            try:
+                report["title"] = page.locator("title").text_content(timeout=5_000) or ""
+            except Exception:
+                report["title"] = ""
             if "accounts.feishu" in page.url or ("登录" in report["title"] and not _has_document_editor(page)):
                 report["status"] = "auth_required"
                 report["findings"].append(_finding("auth-required", "high", "文档访问跳转到登录页"))
             else:
-                _inspect_document(
+                _phase("inspect")
+                _inspect_document_cdp(
                     page,
                     output_dir,
                     report,
@@ -69,16 +92,201 @@ def main() -> int:
                     expected_formulas=max(0, args.expected_formulas),
                     expected_tables=max(0, args.expected_tables),
                 )
+            _emit_report(output_dir, report)
+            emitted = True
             browser.close()
+            _phase("complete")
     except Exception as exc:
-        report["status"] = "error"
-        report["error"] = _clip(str(exc), 600)
+        if not emitted:
+            report["status"] = "error"
+            report["error"] = _clip(str(exc), 600)
 
-    report_path = output_dir / "report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    # The local coordinator consumes one compact JSON object from stdout.
-    print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+    if not emitted:
+        _emit_report(output_dir, report)
     return 0 if report["status"] in {"ok", "issues"} else 2
+
+
+def _inspect_document_cdp(
+    page: Page,
+    output_dir: Path,
+    report: Dict[str, Any],
+    max_sections: int,
+    expected_images: int = 0,
+    expected_formulas: int = 0,
+    expected_tables: int = 0,
+) -> None:
+    """Collect one bounded DevTools snapshot per rendered viewport."""
+
+    session = page.context.new_cdp_session(page)
+    findings: List[Dict[str, Any]] = report["findings"]
+    screenshots: List[str] = report["screenshots"]
+    seen_positions: set[int] = set()
+    seen_invalid: set[str] = set()
+    observed_images: Dict[str, Dict[str, Any]] = {}
+    observed_formulas: Dict[str, Dict[str, Any]] = {}
+    observed_tables: Dict[str, Dict[str, Any]] = {}
+    raw_count = 0
+    overlap_count = 0
+    invalid_count = 0
+    max_overflow = 0.0
+    last_snapshot: Dict[str, Any] = {}
+    for index in range(max(1, max_sections)):
+            _phase(f"cdp-viewport-{index + 1}-of-{max_sections}")
+            shot_path = output_dir / f"{index:02d}-viewport.png"
+            _capture_screenshot_session(session, shot_path)
+            snapshot = _cdp_viewport_snapshot(session)
+            last_snapshot = snapshot
+            scroll_top = round(float(snapshot.get("scroll_top") or 0))
+            position_key = round(scroll_top / 100)
+            if position_key in seen_positions and index > 0:
+                shot_path.unlink(missing_ok=True)
+                break
+            seen_positions.add(position_key)
+            screenshots.append(str(shot_path))
+            report["sections_checked"] += 1
+            section = f"视口-{index + 1}"
+            finding_start = len(findings)
+
+            invalid_contexts = []
+            for context in snapshot.get("invalid", []):
+                key = str(context.get("key") or context.get("block_id") or context.get("context") or "")
+                if not key or key in seen_invalid:
+                    continue
+                seen_invalid.add(key)
+                invalid_contexts.append(context)
+            invalid_count += len(invalid_contexts)
+            if invalid_contexts:
+                findings.append(
+                    _finding(
+                        "invalid-formula",
+                        "high",
+                        f"章节视口出现 {len(invalid_contexts)} 个无效公式提示",
+                        section=section,
+                        autofixable=True,
+                        data={"contexts": invalid_contexts[:8]},
+                    )
+                )
+
+            artifacts = _raw_formatting_artifacts(str(snapshot.get("text") or ""))
+            raw_count += len(artifacts)
+            if artifacts:
+                findings.append(
+                    _finding(
+                        "raw-formatting",
+                        "high",
+                        "页面显示了格式化控制字符：" + ", ".join(artifacts[:4]),
+                        section=section,
+                        autofixable=True,
+                    )
+                )
+
+            overlaps = _detect_overlaps(list(snapshot.get("blocks") or []))
+            overlap_count += len(overlaps)
+            if overlaps:
+                findings.append(
+                    _finding(
+                        "block-overlap",
+                        "high",
+                        f"检测到 {len(overlaps)} 处正文 block 垂直重叠",
+                        section=section,
+                        data={"pairs": overlaps[:4]},
+                    )
+                )
+
+            editor = dict(snapshot.get("editor") or {})
+            for formula in snapshot.get("formulas", []):
+                observed_formulas[_object_position_key("formula", formula, scroll_top)] = formula
+            for table in snapshot.get("tables", []):
+                observed_tables[_object_position_key("table", table, scroll_top)] = table
+            for image in snapshot.get("images", []):
+                key = str(image.get("block_id") or image.get("src") or _object_position_key("image", image, scroll_top))
+                observed_images[key] = image
+                name = image.get("name") or image.get("block_id") or "image"
+                if int(image.get("natural_width") or 0) <= 1 or int(image.get("natural_height") or 0) <= 1:
+                    findings.append(
+                        _finding(
+                            "image-render-failed",
+                            "high",
+                            "图片节点存在，但浏览器未加载出有效像素",
+                            section=section,
+                            image_name=name,
+                            block_id=str(image.get("block_id") or ""),
+                        )
+                    )
+                    continue
+                overflow = float(image.get("right", 0)) - float(editor.get("right", 0))
+                max_overflow = max(max_overflow, overflow)
+                if overflow > 12 or float(image.get("left", 0)) < float(editor.get("left", 0)) - 12:
+                    findings.append(
+                        _finding(
+                            "image-overflow",
+                            "high",
+                            f"图片超出正文区域 {round(max(overflow, 0))}px",
+                            section=section,
+                            image_name=name,
+                            block_id=str(image.get("block_id") or ""),
+                            autofixable=True,
+                            data={"editor_width": round(float(editor.get("width", 0))), "render_width": round(float(image.get("width", 0)))},
+                        )
+                    )
+                image_box = _crop_image_box(shot_path, image, page.viewport_size or {})
+                if image_box:
+                    blank = _edge_blank_ratios(image_box)
+                    if blank["total"] > 0.46 or blank["bottom"] > 0.38 or blank["top"] > 0.30:
+                        severe = blank["total"] > 0.72 or blank["bottom"] > 0.62 or blank["top"] > 0.55
+                        findings.append(
+                            _finding(
+                                "image-large-white-border",
+                                "high" if severe else "medium",
+                                f"图片内容周围空白过大（总空白约 {round(blank['total'] * 100)}%）",
+                                section=section,
+                                image_name=name,
+                                block_id=str(image.get("block_id") or ""),
+                                data=blank,
+                            )
+                        )
+            if _viewport_is_mostly_blank(shot_path, editor):
+                findings.append(
+                    _finding(
+                        "large-empty-viewport",
+                        "medium",
+                        "章节视口正文区域大面积空白，可能存在图片画布或 block 高度异常",
+                        section=section,
+                    )
+                )
+            for finding in findings[finding_start:]:
+                finding.setdefault("screenshot", str(shot_path))
+            if not bool(snapshot.get("can_scroll_more")):
+                break
+
+    for table in observed_tables.values():
+        if int(table.get("rows", 0)) < 1 or int(table.get("cells", 0)) < 1:
+            findings.append(
+                _finding(
+                    "table-render-failed",
+                    "high",
+                    "表格节点存在，但没有渲染出有效行列",
+                    screenshot=screenshots[0] if screenshots else "",
+                    data={"rows": table.get("rows", 0), "cells": table.get("cells", 0)},
+                )
+            )
+    report["findings"] = _dedupe_findings(findings)
+    report["status"] = "issues" if report["findings"] else "ok"
+    report["metrics"] = {
+        "invalid_formula_count": invalid_count,
+        "raw_formatting_count": raw_count,
+        "overlap_count": overlap_count,
+        "rendered_image_count": len(observed_images),
+        "rendered_formula_count": len(observed_formulas),
+        "rendered_table_count": len(observed_tables),
+        "expected_image_min": expected_images,
+        "expected_formula_min": expected_formulas,
+        "expected_table_min": expected_tables,
+        "max_image_overflow_px": round(max_overflow, 1),
+        "scroll_height": round(float(last_snapshot.get("scroll_height") or 0)),
+        "scroll_client_height": round(float(last_snapshot.get("client_height") or 0)),
+        "transport": "cdp-single-snapshot",
+    }
 
 
 def _inspect_document(
@@ -90,10 +298,13 @@ def _inspect_document(
     expected_formulas: int = 0,
     expected_tables: int = 0,
 ) -> None:
+    _phase("inspect-scroller")
     scroller = _main_scroller(page)
+    _phase("inspect-editor")
     editor = _editor_box(page)
+    _phase("inspect-stabilize")
     _stabilize_document_height(page, scroller)
-    inventory = _rendered_object_inventory(page, scroller)
+    _phase("inspect-targets")
     catalogue = _catalogue_links(page, max_sections)
     catalogue_budget = min(len(catalogue), max(0, (max_sections - 1) // 2))
     catalogue = _select_evenly(catalogue, catalogue_budget)
@@ -104,26 +315,26 @@ def _inspect_document(
             targets.append(catalogue[index])
         if index < len(scroll_targets):
             targets.append(scroll_targets[index])
-    image_sections = [
-        {"section": f"图片-{index}", "scroll_top": str(item.get("scroll_top", 0))}
-        for index, item in enumerate(inventory["images"], start=1)
-    ]
-    targets.extend(_select_evenly(image_sections, min(6, len(image_sections))))
     targets = _dedupe_targets(targets)
 
     findings: List[Dict[str, Any]] = report["findings"]
     screenshots: List[str] = report["screenshots"]
     seen_viewports = set()
+    seen_invalid_keys = set()
     invalid_count = 0
     raw_formatting_count = 0
     overlap_count = 0
     max_overflow = 0.0
     image_count = 0
     samples: List[Dict[str, Any]] = []
+    observed_images: Dict[str, Dict[str, Any]] = {}
+    observed_formulas: Dict[str, Dict[str, Any]] = {}
+    observed_tables: Dict[str, Dict[str, Any]] = {}
 
     for index, target in enumerate(targets):
+        _phase(f"inspect-viewport-{index + 1}-of-{len(targets)}")
         _navigate_target(page, scroller, target, editor)
-        page.wait_for_timeout(600)
+        page.wait_for_timeout(300)
         scroll_top = _scroll_top(scroller)
         key = round(scroll_top / 120)
         if key in seen_viewports:
@@ -133,15 +344,20 @@ def _inspect_document(
 
         slug = f"{index:02d}-{_slug(target.get('section') or 'section')}"
         shot_path = output_dir / f"{slug}.png"
-        page.screenshot(path=str(shot_path), full_page=False)
+        _capture_screenshot(page, shot_path)
         screenshots.append(str(shot_path))
         report["sections_checked"] += 1
         finding_start = len(findings)
 
         visible_text = _visible_text(page)
-        current_invalid = sum(visible_text.count(text) for text in INVALID_TEXTS)
-        invalid_contexts = _visible_invalid_formula_contexts(page)
-        current_invalid = max(current_invalid, len(invalid_contexts))
+        invalid_contexts = []
+        for context in _visible_invalid_formula_contexts(page):
+            key = str(context.get("key") or context.get("block_id") or context.get("context") or "")
+            if not key or key in seen_invalid_keys:
+                continue
+            seen_invalid_keys.add(key)
+            invalid_contexts.append(context)
+        current_invalid = len(invalid_contexts)
         invalid_count += current_invalid
         if current_invalid:
             findings.append(
@@ -180,9 +396,27 @@ def _inspect_document(
                     data={"pairs": overlaps[:4]},
                 )
             )
-        for image in _visible_images(page):
+        visible_images = _visible_images(page)
+        for formula in _visible_formulas(page):
+            observed_formulas[_object_position_key("formula", formula, scroll_top)] = formula
+        for table in _visible_tables(page):
+            observed_tables[_object_position_key("table", table, scroll_top)] = table
+        for image in visible_images:
+            observed_images[str(image.get("block_id") or image.get("src") or _object_position_key("image", image, scroll_top))] = image
             image_count += 1
             name = image.get("name") or image.get("block_id") or "image"
+            if int(image.get("natural_width") or 0) <= 1 or int(image.get("natural_height") or 0) <= 1:
+                findings.append(
+                    _finding(
+                        "image-render-failed",
+                        "high",
+                        "图片节点存在，但浏览器未加载出有效像素",
+                        section=target.get("section", ""),
+                        image_name=name,
+                        block_id=str(image.get("block_id") or ""),
+                    )
+                )
+                continue
             overflow = float(image.get("right", 0)) - float(editor.get("right", 0))
             max_overflow = max(max_overflow, overflow)
             if overflow > 12 or float(image.get("left", 0)) < float(editor.get("left", 0)) - 12:
@@ -239,45 +473,14 @@ def _inspect_document(
         for finding in findings[finding_start:]:
             finding.setdefault("screenshot", str(shot_path))
 
-    rendered_images = len(inventory["images"])
-    rendered_formulas = len(inventory["formulas"])
-    rendered_tables = len(inventory["tables"])
+    rendered_images = len(observed_images)
+    rendered_formulas = len(observed_formulas)
+    rendered_tables = len(observed_tables)
     count_screenshot = screenshots[0] if screenshots else ""
-    for kind, actual, expected, label in (
-        ("missing-image", rendered_images, expected_images, "图片"),
-        ("missing-table", rendered_tables, expected_tables, "表格"),
-    ):
-        if expected and actual < expected:
-            findings.append(
-                _finding(
-                    kind,
-                    "high",
-                    f"真实页面只渲染出 {actual}/{expected} 个{label}",
-                    screenshot=count_screenshot,
-                    data={"actual": actual, "expected": expected},
-                )
-            )
-    if expected_formulas and rendered_formulas < expected_formulas:
-        missing = expected_formulas - rendered_formulas
-        # Feishu can merge or canonicalize one equation block in the rendered
-        # DOM. With no invalid-formula or raw-formatting signal, a one-block
-        # difference is a count drift rather than evidence of broken math.
-        tolerance = max(1, math.ceil(expected_formulas * 0.01))
-        count_drift = missing <= tolerance and invalid_count == 0 and raw_formatting_count == 0
-        findings.append(
-            _finding(
-                "formula-count-drift" if count_drift else "missing-formula",
-                "medium" if count_drift else "high",
-                f"真实页面只渲染出 {rendered_formulas}/{expected_formulas} 个公式",
-                screenshot=count_screenshot,
-                data={
-                    "actual": rendered_formulas,
-                    "expected": expected_formulas,
-                    "tolerance": tolerance,
-                },
-            )
-        )
-    for table in inventory["tables"]:
+    # Feishu virtualizes long documents, so mounted DOM object counts are not
+    # stable completeness evidence. Keep observed/expected values as telemetry
+    # below, but only concrete visible failures may create findings.
+    for table in observed_tables.values():
         if int(table.get("rows", 0)) < 1 or int(table.get("cells", 0)) < 1:
             findings.append(
                 _finding(
@@ -310,30 +513,15 @@ def _inspect_document(
 
 
 def _main_scroller(page: Page) -> Locator:
-    preferred = page.locator(".bear-web-x-container").first
-    if preferred.count():
-        try:
-            if preferred.evaluate("el => el.scrollHeight > el.clientHeight + 300"):
-                return preferred
-        except Exception:
-            pass
-    candidates = page.locator("*")
-    handle = candidates.evaluate_all(
-        """els => {
-          const rows = els.map((e, i) => { const r=e.getBoundingClientRect(), s=getComputedStyle(e); return {
-            i, area:r.width*r.height, h:r.height, sh:e.scrollHeight, oy:s.overflowY, cls:String(e.className||'')};
-          }).filter(x => x.h > 500 && x.sh > x.h + 500 && ['scroll','auto'].includes(x.oy));
-          rows.sort((a,b) => b.area-a.area); return rows[0]?.i ?? -1;
-        }"""
-    )
-    if handle < 0:
-        return page.locator("body")
-    return candidates.nth(handle)
+    return page.locator(".bear-web-x-container").first
 
 
 def _editor_box(page: Page) -> Dict[str, float]:
-    locator = page.locator(".page-main-item.editor, .editor-container").first
-    box = locator.bounding_box()
+    locator = page.locator(EDITOR_SELECTORS).first
+    try:
+        box = locator.bounding_box(timeout=3_000)
+    except Exception:
+        box = None
     if not box:
         viewport = page.viewport_size or {"width": 1440, "height": 1000}
         return {"left": 260.0, "right": float(viewport["width"] - 120), "width": float(viewport["width"] - 380)}
@@ -408,14 +596,23 @@ def _navigate_target(page: Page, scroller: Locator, target: Dict[str, str], edit
 
 
 def _visible_text(page: Page) -> str:
-    editor = page.locator(".page-main-item.editor, .editor-container").first
+    editor = page.locator(EDITOR_SELECTORS).first
     if not editor.count():
         return str(page.locator("body").inner_text(timeout=10_000))
     return str(
         editor.evaluate(
-            """element => { const clone=element.cloneNode(true);
-              clone.querySelectorAll('pre, code').forEach(node => node.remove());
-              return clone.innerText || clone.textContent || ''; }"""
+            """element => { const output=[]; const walker=document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+              for (let node=walker.nextNode(); node; node=walker.nextNode()) {
+                const parent=node.parentElement;
+                if (!parent || parent.closest('pre, code')) continue;
+                const style=getComputedStyle(parent);
+                if (style.display==='none' || style.visibility==='hidden' || Number(style.opacity||1)===0) continue;
+                const range=document.createRange(); range.selectNodeContents(node);
+                const visible=Array.from(range.getClientRects()).some(r =>
+                  r.width>0 && r.height>0 && r.bottom>64 && r.top<window.innerHeight && r.right>0 && r.left<window.innerWidth);
+                if (visible && String(node.textContent||'').trim()) output.push(node.textContent);
+              }
+              return output.join('\\n'); }"""
         )
     )
 
@@ -441,7 +638,7 @@ def _visible_images(page: Page) -> List[Dict[str, Any]]:
 
 
 def _visible_formulas(page: Page) -> List[Dict[str, Any]]:
-    editor = page.locator(".page-main-item.editor, .editor-container").first
+    editor = page.locator(EDITOR_SELECTORS).first
     if not editor.count():
         return []
     # Feishu renders a formula as one equation block containing a KaTeX tree.
@@ -458,30 +655,47 @@ def _visible_formulas(page: Page) -> List[Dict[str, Any]]:
     )
 
 
-def _visible_invalid_formula_contexts(page: Page) -> List[Dict[str, str]]:
-    editor = page.locator(".page-main-item.editor, .editor-container").first
+def _visible_invalid_formula_contexts(page: Page) -> List[Dict[str, Any]]:
+    editor = page.locator(EDITOR_SELECTORS).first
     if not editor.count():
         return []
     return editor.locator("*").evaluate_all(
-        """els => { const rows = els.filter(el => String(el.textContent || '').trim() === '无效公式' ||
-          String(el.textContent || '').trim() === 'Invalid formula').map(el => {
+        """els => { const labels=new Set(['无效公式','Invalid formula']);
+          const rows = els.filter(el => labels.has(String(el.textContent || '').trim()) &&
+          !Array.from(el.children || []).some(child => labels.has(String(child.textContent || '').trim()))).filter(el => {
+            const r=el.getBoundingClientRect(), style=getComputedStyle(el);
+            return r.width>0 && r.height>0 && r.bottom>64 && r.top<window.innerHeight &&
+              r.right>0 && r.left<window.innerWidth && style.display!=='none' &&
+              style.visibility!=='hidden' && Number(style.opacity||1)!==0;
+          }).map(el => {
+          window.__maxreadQaInvalidSeq = Number(window.__maxreadQaInvalidSeq || 0);
+          if (!el.dataset.maxreadQaInvalidKey) el.dataset.maxreadQaInvalidKey = `invalid-${++window.__maxreadQaInvalidSeq}`;
           let current = el;
           let block = '';
           let context = '';
-          for (let i = 0; i < 6 && current; i++, current = current.parentElement) {
+          let scrollParent = null;
+          for (let i = 0; i < 12 && current; i++, current = current.parentElement) {
             for (const key of ['data-block-id','data-block-token','data-node-id','data-token','data-mount-node-token']) {
               if (!block && current.getAttribute && current.getAttribute(key)) block = current.getAttribute(key);
             }
-            if (!context && current.parentElement) context = String(current.parentElement.innerText || '').trim().slice(0, 360);
+            if (!context && current.matches && current.matches('.docx-equation-block,.docx-text-block,.docx-heading-block'))
+              context = String(current.innerText || current.textContent || '').trim().slice(0, 360);
+            if (!scrollParent && current.scrollHeight > current.clientHeight + 8) {
+              const style=getComputedStyle(current);
+              if (['auto','scroll'].includes(style.overflowY)) scrollParent=current;
+            }
           }
-          return {block_id: block, context};
+          if (!context && el.parentElement) context = String(el.parentElement.innerText || '').trim().slice(0, 360);
+          const r=el.getBoundingClientRect();
+          const absoluteTop=Math.round(r.top + (scrollParent ? scrollParent.scrollTop : window.scrollY));
+          return {key:block || el.dataset.maxreadQaInvalidKey, block_id: block, context, absolute_top:absoluteTop};
         }); return rows.filter((row, index) => rows.findIndex(other =>
-          other.block_id === row.block_id && other.context === row.context) === index).slice(0, 8); }"""
+          other.key === row.key) === index).slice(0, 8); }"""
     )
 
 
 def _visible_tables(page: Page) -> List[Dict[str, Any]]:
-    editor = page.locator(".page-main-item.editor, .editor-container").first
+    editor = page.locator(EDITOR_SELECTORS).first
     if not editor.count():
         return []
     return editor.locator("table").evaluate_all(
@@ -540,7 +754,7 @@ def _object_position_key(kind: str, item: Dict[str, Any], scroll_top: float) -> 
 
 
 def _has_document_editor(page: Page) -> bool:
-    return page.locator(".page-main-item.editor, .editor-container, .bear-web-x-container").count() > 0
+    return page.locator(EDITOR_SELECTORS).count() > 0
 
 
 def _detect_overlaps(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -653,7 +867,7 @@ def _scroll_client_height(scroller: Locator) -> float:
 def _stabilize_document_height(page: Page, scroller: Locator) -> None:
     previous = 0.0
     stable_rounds = 0
-    for _ in range(7):
+    for _ in range(1):
         height = _scroll_height(scroller)
         _set_scroll(scroller, height)
         page.wait_for_timeout(420)
@@ -667,6 +881,67 @@ def _stabilize_document_height(page: Page, scroller: Locator) -> None:
         previous = updated
     _set_scroll(scroller, 0)
     page.wait_for_timeout(300)
+
+
+def _phase(name: str) -> None:
+    print(f"[visual-qa] {name}", file=sys.stderr, flush=True)
+
+
+def _emit_report(output_dir: Path, report: Dict[str, Any]) -> None:
+    report_path = output_dir / "report.json"
+    temporary = output_dir / ".report.json.tmp"
+    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(report_path)
+    print(json.dumps(report, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+def _capture_screenshot(page: Page, path: Path) -> None:
+    session = page.context.new_cdp_session(page)
+    try:
+        payload = session.send(
+            "Page.captureScreenshot",
+            {"format": "png", "captureBeyondViewport": False, "fromSurface": True},
+        )
+        path.write_bytes(base64.b64decode(str(payload["data"])))
+    finally:
+        session.detach()
+
+
+def _capture_screenshot_session(session, path: Path) -> None:
+    payload = session.send(
+        "Page.captureScreenshot",
+        {"format": "png", "captureBeyondViewport": False, "fromSurface": True},
+    )
+    path.write_bytes(base64.b64decode(str(payload["data"])))
+
+
+def _cdp_viewport_snapshot(session) -> Dict[str, Any]:
+    result = session.send(
+        "Runtime.evaluate",
+        {
+            "returnByValue": True,
+            "expression": r"""(() => {
+              const editor = document.querySelector('.page-main-item.editor, .editor-container, .bear-web-x-container') || document.body;
+              const scroller = document.querySelector('.bear-web-x-container') || document.scrollingElement || document.body;
+              const visible = e => { const r=e.getBoundingClientRect(), s=getComputedStyle(e); return r.width>0 && r.height>0 && r.bottom>64 && r.top<innerHeight && r.right>0 && r.left<innerWidth && s.display!=='none' && s.visibility!=='hidden' && Number(s.opacity||1)!==0; };
+              const rect = e => { const r=e.getBoundingClientRect(); return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}; };
+              const er=editor.getBoundingClientRect();
+              const text=Array.from(editor.querySelectorAll('.docx-text-block,.docx-heading-block,.docx-bullet-block')).filter(visible).map(e=>String(e.innerText||e.textContent||'')).join('\n');
+              const blocks=Array.from(editor.querySelectorAll('.docx-text-block,.docx-heading-block,.docx-table-block,.docx-image-block,.docx-code-block,.docx-bullet-block')).filter(visible).map((e,i)=>({...rect(e),i,cls:String(e.className||'').slice(0,100),text:String(e.innerText||e.textContent||'').trim().slice(0,80)}));
+              const images=Array.from(editor.querySelectorAll('img.docx-image')).filter(visible).map(e=>{const u=new URL(e.src,location.href);return {...rect(e),natural_width:e.naturalWidth,natural_height:e.naturalHeight,name:u.searchParams.get('name')||e.alt||'',block_id:u.searchParams.get('mount_node_token')||'',src:e.src};});
+              const formulas=Array.from(editor.querySelectorAll('.docx-equation-block')).filter(visible).map(e=>({...rect(e),text:String(e.textContent||'').trim().slice(0,200),html:String(e.outerHTML||'').slice(0,500)}));
+              const invalid=Array.from(editor.querySelectorAll('*')).filter(e=>['无效公式','Invalid formula'].includes(String(e.textContent||'').trim())&&visible(e)).map((e,i)=>({key:e.getAttribute('data-block-id')||`invalid-${i}`,block_id:e.getAttribute('data-block-id')||'',context:String(e.parentElement?.innerText||'').trim().slice(0,360)})).slice(0,8);
+              const tables=Array.from(editor.querySelectorAll('table')).filter(visible).map(e=>({...rect(e),rows:e.querySelectorAll('tr').length,cells:e.querySelectorAll('th,td').length}));
+              const scrollTop=Number(scroller.scrollTop||window.scrollY||0), clientHeight=Number(scroller.clientHeight||innerHeight), scrollHeight=Number(scroller.scrollHeight||document.documentElement.scrollHeight||0), maxTop=Math.max(0,scrollHeight-clientHeight);
+              const nextTop=Math.min(maxTop,scrollTop+Math.round(clientHeight*.82)); scroller.scrollTop=nextTop; scroller.dispatchEvent(new Event('scroll'));
+              return {text,blocks,images,formulas,invalid,tables,editor:{left:er.left,right:er.right,width:er.width},scroll_top:scrollTop,client_height:clientHeight,scroll_height:scrollHeight,can_scroll_more:nextTop>scrollTop+40};
+            })()""",
+        },
+    )
+    value = result.get("result", {}).get("value")
+    if not isinstance(value, dict):
+        raise RuntimeError("CDP viewport snapshot returned no object")
+    return value
 
 
 def _scroll_top(scroller: Locator) -> float:

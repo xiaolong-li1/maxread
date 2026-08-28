@@ -11,16 +11,17 @@ from typing import Iterable, List, Tuple
 from .admin_server import run_admin_server
 from .arxiv import ArxivClient, extract_arxiv_refs
 from .article_pipeline import ArticlePipeline
+from .cache_cleanup import cleanup_completed_cache, local_date_cutoff_utc
 from .config import Settings
 from .db import Store
 from .feedback import classify_feedback_text, is_feedback_text as _is_feedback_text
 from .feishu import FeishuClient, parse_event
 from .help import group_intro_message, intro_message, plain_message_text, should_send_intro
-from .job_queue import QueueManager, enqueue_event_items, run_worker_forever
+from .job_queue import QueueManager, _queue_eta_text, enqueue_event_items, run_worker_forever
 from .openai_client import OpenAIClient
 from .pipeline import MaxReadPipeline
 from .models import PaperRef
-from .sources import WebRef, extract_supported_inputs
+from .sources import WebRef, extract_supported_inputs, is_supported_web_article_url
 from .web_article import WebArticleClient
 from .visual_qa import VisualQAController
 from .duty import run_duty_command
@@ -79,6 +80,14 @@ def main(argv: List[str] | None = None) -> int:
 
     sub.add_parser("job-stats", help="Show queue status counts")
 
+    p_cleanup = sub.add_parser("cache-cleanup", help="Delete rebuildable source/render caches for completed work")
+    p_cleanup.add_argument("--older-than-hours", type=float, default=1.0)
+    p_cleanup.add_argument("--dry-run", action="store_true")
+
+    p_invalidate = sub.add_parser("invalidate-cache", help="Mark completed documents before a local date as legacy")
+    p_invalidate.add_argument("--before", required=True, help="Local date YYYY-MM-DD; records before 00:00 become legacy")
+    p_invalidate.add_argument("--timezone", default="Asia/Shanghai")
+
     p_admin = sub.add_parser("admin", help="Run local MaxRead admin web UI")
     p_admin.add_argument("--host", default="127.0.0.1", help="Bind host, default localhost only")
     p_admin.add_argument("--port", type=int, default=8765, help="Bind port")
@@ -99,16 +108,40 @@ def main(argv: List[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "extract":
-        refs = extract_arxiv_refs(" ".join(args.text))
+        refs, _web_refs = extract_supported_inputs(" ".join(args.text))
         print(json.dumps([r.paper_id for r in refs], ensure_ascii=False))
         return 0
 
     settings = Settings.load(Path.cwd())
+    # The admin UI is an independent read-only surface. Start it before
+    # constructing model, source, and visual-QA clients so a slow dependency
+    # or work-directory filesystem cannot leave systemd reporting an active
+    # process with no listening port.
+    if args.cmd == "admin":
+        run_admin_server(settings, host=args.host, port=args.port)
+        return 0
+
     settings.workdir.mkdir(parents=True, exist_ok=True)
     store = Store(settings.db_path)
     if args.cmd == "duty":
         store.close()
         return run_duty_command(settings, args)
+    if args.cmd == "cache-cleanup":
+        result = cleanup_completed_cache(
+            store,
+            settings.workdir,
+            args.older_than_hours,
+            dry_run=args.dry_run,
+        )
+        store.close()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "invalidate-cache":
+        cutoff = local_date_cutoff_utc(args.before, args.timezone)
+        result = store.mark_cache_legacy_before(cutoff)
+        store.close()
+        print(json.dumps({"ok": True, "cutoff_utc": cutoff, **result}, ensure_ascii=False, indent=2))
+        return 0
     arxiv = ArxivClient(
         settings.workdir,
         timeout=settings.arxiv_timeout,
@@ -131,6 +164,8 @@ def main(argv: List[str] | None = None) -> int:
         review_reasoning_effort=settings.openai_review_reasoning_effort,
         visual_qa=visual_qa,
         generation_repair_rounds=settings.generation_repair_rounds,
+        sectional_generation_enabled=settings.sectional_generation_enabled,
+        sectional_generation_workers=settings.sectional_generation_workers,
         quality_repair_rounds=settings.quality_repair_rounds,
     )
     article_pipeline = ArticlePipeline(
@@ -209,7 +244,6 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.cmd == "admin":
         store.close()
-        run_admin_server(settings, host=args.host, port=args.port)
         return 0
 
     if args.cmd == "worker":
@@ -249,6 +283,8 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
         return
 
     retry_requested = _is_retry_command(event.content)
+    if retry_requested and _handle_retry_event(settings, store, article_pipeline.feishu, event):
+        return
     refs, web_refs = _extract_event_supported_inputs(article_pipeline.feishu, event)
 
     if _is_private_chat(event) and store.should_send_intro_to_user(event.sender_id):
@@ -282,16 +318,136 @@ def _extract_event_supported_inputs(feishu: FeishuClient, event) -> Tuple[List[P
     refs, web_refs = extract_supported_inputs(event.content)
     if refs or web_refs:
         return refs, web_refs
-    if _is_private_chat(event):
+    retry_requested = _is_retry_command(event.content)
+    if _is_private_chat(event) and not retry_requested:
         return refs, web_refs
     if not getattr(event, "mentioned_bot", False) and not (
-        _is_retry_command(event.content) and _is_thread_reply(event)
+        retry_requested and (_is_private_chat(event) or _is_thread_reply(event))
     ):
         return refs, web_refs
     context = feishu.fetch_related_message_text(event)
     if not context:
         return refs, web_refs
     return extract_supported_inputs(event.content + "\n" + context)
+
+
+def _handle_retry_event(settings: Settings, store: Store, feishu: FeishuClient, event) -> bool:
+    """Retry durable topic jobs without parsing bot failure text as input."""
+    explicit_papers, explicit_web = extract_supported_inputs(event.content)
+    explicit_keys = tuple(
+        [store.dedupe_key("paper", ref.paper_id) for ref in explicit_papers]
+        + [store.dedupe_key("article", ref.url) for ref in explicit_web]
+    )
+    related_ids = _retry_related_message_ids(
+        getattr(event, "raw", {}) or {},
+        exclude={str(getattr(event, "message_id", "") or "")},
+    )
+    if not related_ids and hasattr(feishu, "fetch_related_message_ids"):
+        try:
+            # Thread messages are fetched in ascending order; the first one is
+            # the root request. Previous retry replies may already contain
+            # poisoned historical jobs and must not expand the source set.
+            related_ids = tuple(feishu.fetch_related_message_ids(event)[:1])
+        except Exception:
+            related_ids = ()
+    jobs = store.find_retryable_queue_jobs(
+        str(getattr(event, "chat_id", "") or ""),
+        str(getattr(event, "sender_id", "") or ""),
+        message_ids=related_ids,
+        dedupe_keys=explicit_keys,
+    )
+    jobs = [job for job in jobs if _is_valid_retry_source(job)]
+    retried = []
+    for job in jobs:
+        if store.retry_queue_job(
+            int(job["id"]),
+            reason=f"topic retry requested by {getattr(event, 'sender_id', '')}",
+            event_type="topic_retry",
+            rebuild_pipeline=_retry_requires_rebuild(job),
+        ):
+            retried.append(job)
+    if retried:
+        lines = [f"收到 {len(retried)} 篇，已重新加入全局队列。"]
+        for job in retried:
+            position = store.queue_position(int(job["id"]))
+            duration = store.recent_job_duration_seconds(str(job.get("source_kind") or ""))
+            lines.append(
+                f"- {job.get('source_id') or job.get('source_url')}："
+                f"{_queue_eta_text(position, settings.queue_workers, duration)}"
+            )
+        _reply_retry_result(feishu, event, "\n".join(lines))
+        return True
+    if explicit_papers or explicit_web:
+        # No owned failed row exists for this explicit source. Treat it as a
+        # fresh request, while still using the retry wording in the receipt.
+        enqueue_event_items(
+            settings,
+            store,
+            feishu,
+            event,
+            explicit_papers,
+            explicit_web,
+            retry_requested=True,
+        )
+        return True
+    return False
+
+
+def _retry_requires_rebuild(job: dict) -> bool:
+    """Reuse a published checkpoint only for delivery infrastructure faults."""
+    error = str(job.get("error") or "").lower()
+    has_published_checkpoint = bool(str(job.get("checkpoint_json") or "").strip() or str(job.get("doc_url") or "").strip())
+    if not has_published_checkpoint:
+        return True
+    delivery_infrastructure_markers = (
+        "visual-qa:remote-error",
+        "visual-qa:recheck-error",
+        "visual runner failed",
+        "browser timeout",
+        "login.feishu.cn/accounts/trap",
+    )
+    return not any(marker in error for marker in delivery_infrastructure_markers)
+
+
+def _is_valid_retry_source(job: dict) -> bool:
+    kind = str(job.get("source_kind") or "")
+    if kind == "paper":
+        return bool(str(job.get("source_id") or "").strip())
+    if kind == "article":
+        return is_supported_web_article_url(str(job.get("source_url") or job.get("source_id") or ""))
+    return False
+
+
+def _retry_related_message_ids(payload: dict, exclude: set[str] | None = None) -> tuple[str, ...]:
+    excluded = {item for item in (exclude or set()) if item}
+    root_keys = {"root_id", "root_message_id", "thread_root_id"}
+    parent_keys = {"parent_id", "parent_message_id"}
+    roots: list[str] = []
+    parents: list[str] = []
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                text = str(child or "")
+                lowered = str(key).lower()
+                target = roots if lowered in root_keys else parents if lowered in parent_keys else None
+                if target is not None and text.startswith("om_") and text not in excluded and text not in target:
+                    target.append(text)
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(payload)
+    return tuple(roots or parents)
+
+
+def _reply_retry_result(feishu: FeishuClient, event, text: str) -> None:
+    key = sha256(f"retry-result:{event.event_id}:{event.message_id}".encode("utf-8")).hexdigest()[:32]
+    try:
+        feishu.reply_text(event.message_id, text, idempotency_key=key)
+    except Exception:
+        pass
 
 
 def _should_accept_event(event) -> bool:
@@ -358,7 +514,7 @@ def _reply_retry_missing(feishu: FeishuClient, event) -> None:
     try:
         feishu.reply_text(
             event.message_id,
-            "我在这个话题里没找到可重试的论文或文章。请回复「重试 2608.10416」，或重新带上原链接。",
+            "我在这个话题里没找到可重试的论文或文章。请回复「重试 + 论文 ID」，或重新带上原链接。",
             idempotency_key=key,
         )
     except Exception:

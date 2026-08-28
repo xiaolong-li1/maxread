@@ -3,11 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import ssl
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict
+
+from .text_safety import sanitize_unicode_text, sanitize_unicode_value
 
 
 class OpenAIRequestError(RuntimeError):
@@ -42,10 +45,12 @@ class OpenAIClient:
     def responses_text(self, system: str, user: str, reasoning_effort: str | None = None) -> str:
         if self.api_mode == "chat":
             return self.chat_completions_text(system, user, reasoning_effort=reasoning_effort)
+        safe_system, _ = sanitize_unicode_text(system)
+        safe_user, _ = sanitize_unicode_text(user)
         base_payload = {
             "model": self.model,
-            "instructions": system.strip(),
-            "input": user.strip(),
+            "instructions": safe_system.strip(),
+            "input": safe_user.strip(),
             "text": {"verbosity": "medium"},
             "stream": True,
         }
@@ -74,21 +79,30 @@ class OpenAIClient:
             raise RuntimeError(f"OpenAI response had no output text: {data}")
         return text
 
-    def responses_image_text(self, system: str, user: str, image_path: str | Path) -> str:
+    def responses_image_text(
+        self,
+        system: str,
+        user: str,
+        image_path: str | Path,
+        reasoning_effort: str | None = None,
+    ) -> str:
         image_url = _image_data_url(Path(image_path))
+        safe_system, _ = sanitize_unicode_text(system)
+        safe_user, _ = sanitize_unicode_text(user)
+        effort = self.reasoning_effort if reasoning_effort is None else _normalize_reasoning_effort(reasoning_effort)
         payload = {
             "model": self.model,
-            "instructions": system.strip(),
+            "instructions": safe_system.strip(),
             "input": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": user.strip()},
+                        {"type": "input_text", "text": safe_user.strip()},
                         {"type": "input_image", "image_url": image_url, "detail": "high"},
                     ],
                 },
             ],
-            "reasoning": {"effort": self.reasoning_effort} if self.reasoning_effort else {},
+            "reasoning": {"effort": effort} if effort else {},
         }
         data = self._post("/responses", payload)
         text = _extract_output_text(data)
@@ -102,11 +116,13 @@ class OpenAIClient:
         user: str,
         reasoning_effort: str | None = None,
     ) -> str:
+        safe_system, _ = sanitize_unicode_text(system)
+        safe_user, _ = sanitize_unicode_text(user)
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "system", "content": safe_system},
+                {"role": "user", "content": safe_user},
             ],
         }
         effort = self.reasoning_effort if reasoning_effort is None else _normalize_reasoning_effort(reasoning_effort)
@@ -119,6 +135,7 @@ class OpenAIClient:
             raise RuntimeError(f"Chat completions response had no message content: {data}") from exc
 
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload, _ = sanitize_unicode_value(payload)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -150,6 +167,25 @@ class OpenAIClient:
         raise RuntimeError(f"{path} failed")
 
     def _post_stream_text(self, path: str, payload: Dict[str, Any]) -> str:
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                return self._post_stream_text_once(path, payload)
+            except OpenAIRequestError as exc:
+                last_error = exc
+                if exc.status not in {429, 500, 502, 503, 504} or attempt >= 3:
+                    raise
+            except (urllib.error.URLError, TimeoutError, ssl.SSLError, ConnectionError, EOFError) as exc:
+                last_error = exc
+                if attempt >= 3:
+                    raise
+            time.sleep(min(2 ** attempt, 8))
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"{path} stream failed")
+
+    def _post_stream_text_once(self, path: str, payload: Dict[str, Any]) -> str:
+        payload, _ = sanitize_unicode_value(payload)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

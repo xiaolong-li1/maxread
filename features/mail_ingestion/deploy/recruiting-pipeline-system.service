@@ -1,0 +1,19 @@
+[Unit]
+Description=ZIP Lab recruiting mailbox pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/maxread
+Environment=HOME=/root
+ExecStart=/opt/maxread/features/mail_ingestion/bin/recruiting-pipeline --root /opt/maxread --env-file features/mail_ingestion/data/accounts/zip-lab.env run
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

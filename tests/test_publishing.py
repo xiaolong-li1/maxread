@@ -194,3 +194,26 @@ def test_prepare_feishu_image_keeps_normal_chart_margins(tmp_path):
 
     with Image.open(safe) as opened:
         assert opened.size == (1000, 500)
+
+
+def test_prepare_feishu_image_constrains_upload_copy_without_rejecting_or_rewriting_source(tmp_path):
+    import hashlib
+    import os
+
+    from PIL import Image
+
+    source = tmp_path / "large-source.png"
+    image = Image.frombytes("RGB", (2400, 1800), os.urandom(2400 * 1800 * 3))
+    image.save(source, format="PNG")
+    source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert source.stat().st_size > 10 * 1024 * 1024
+
+    safe = prepare_feishu_image(source)
+
+    assert safe != source
+    assert safe.parent.name == "feishu_safe"
+    assert safe.exists()
+    assert safe.stat().st_size <= 10 * 1024 * 1024
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == source_digest
+    with Image.open(safe) as opened:
+        assert max(opened.size) <= 2200
