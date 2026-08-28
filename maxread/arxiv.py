@@ -595,6 +595,7 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
     for tex_path in sorted(source_dir.rglob("*.tex"), key=_source_file_rank):
         rel_tex = str(tex_path.relative_to(source_dir))
         text = _expand_simple_macros(_strip_latex_comments(_decode_text(tex_path.read_bytes())), macros)
+        graphics_macros = _extract_graphics_macro_definitions(text)
         appendix_match = re.search(
             r"\\appendix\b|\\section\*?\s*\{\s*(?:appendix|supplementary\s+material)",
             text,
@@ -602,12 +603,13 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
         )
         appendix_at = appendix_match.start() if appendix_match else -1
         search_cursor = 0
-        for block in _figure_blocks(text):
-            block_at = text.find(block, search_cursor)
+        for raw_block in _figure_blocks(text):
+            block_at = text.find(raw_block, search_cursor)
             if block_at < 0:
-                block_at = text.find(block)
+                block_at = text.find(raw_block)
             if block_at >= 0:
-                search_cursor = block_at + len(block)
+                search_cursor = block_at + len(raw_block)
+            block = _expand_graphics_macros(raw_block, graphics_macros)
             is_appendix = appendix_at >= 0 and block_at >= appendix_at
             if _is_subfigure_block(block):
                 caption = _last_caption(block)
@@ -637,11 +639,13 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
                 continue
             for segment, caption, label in _figure_segments(block):
                 segment_figures = 0
+                panel_captions = _graphics_panel_captions(segment)
                 for asset_index, (asset, row, col) in enumerate(_includegraphics_assets_with_layout(segment, tex_path.parent, source_dir)):
                     figures.append(
                         PaperFigure(
                             asset=asset,
                             caption=caption,
+                            panel_caption=panel_captions[asset_index] if asset_index < len(panel_captions) else "",
                             tex_file=rel_tex,
                             label=label,
                             figure_index=figure_index,
@@ -684,6 +688,15 @@ def _subfigure_panel_captions(block: str) -> List[str]:
         captions.append(caption)
     return captions
 
+
+def _graphics_panel_captions(block: str) -> List[str]:
+    captions: List[str] = []
+    pattern = re.compile(r"\\maxreadpanelcaption\s*\{")
+    for match in pattern.finditer(block):
+        value = _balanced_brace_content(block, match.end() - 1)
+        captions.append(_clip(_clean_latex_text(_norm(value)), 500))
+    return captions
+
 def _extract_simple_macros(tex_text: str) -> dict[str, str]:
     stripped = _strip_latex_comments(tex_text)
     macros: dict[str, str] = {}
@@ -702,6 +715,89 @@ def _extract_simple_macros(tex_text: str) -> dict[str, str]:
             if value and len(value) <= 80:
                 macros[name] = value
     return macros
+
+
+def _extract_graphics_macro_definitions(tex_text: str) -> dict[str, tuple[int, str]]:
+    r"""Collect parameterized wrappers that materialize one or more images.
+
+    Papers often keep large qualitative figures readable by defining a helper
+    such as ``\case{label}{path}{prompt}``, with ``\includegraphics{#2}``
+    inside the helper body.  Figure extraction must expand those invocations;
+    otherwise the whole composed figure silently disappears.
+    """
+    stripped = _strip_latex_comments(tex_text)
+    definitions: dict[str, tuple[int, str]] = {}
+    pattern = re.compile(
+        r"\\(?:re)?newcommand\*?\s*(?:\{\\(?P<name1>[A-Za-z]+)\}|\\(?P<name2>[A-Za-z]+))"
+        r"\s*\[(?P<argc>[1-9])\]\s*\{"
+    )
+    for match in pattern.finditer(stripped):
+        name = match.group("name1") or match.group("name2") or ""
+        body = _balanced_brace_content(stripped, match.end() - 1)
+        if not name or not body or len(body) > 20_000 or not GRAPHICS_COMMAND_RE.search(body):
+            continue
+        definitions[name] = (int(match.group("argc")), body)
+    return definitions
+
+
+def _expand_graphics_macros(text: str, definitions: dict[str, tuple[int, str]]) -> str:
+    """Expand image-wrapper macro calls without executing arbitrary TeX."""
+    if not definitions:
+        return text
+    for _round in range(3):
+        changed = False
+        for name, (argc, body) in sorted(definitions.items(), key=lambda item: -len(item[0])):
+            cursor = 0
+            chunks: list[str] = []
+            pattern = re.compile(rf"\\{re.escape(name)}(?![A-Za-z])")
+            for match in pattern.finditer(text):
+                if match.start() < cursor:
+                    continue
+                args, end = _macro_call_arguments(text, match.end(), argc)
+                if len(args) != argc:
+                    continue
+                expanded = body
+                for index, value in enumerate(args, start=1):
+                    expanded = expanded.replace(f"#{index}", value)
+                graphics = list(GRAPHICS_COMMAND_RE.finditer(body))
+                if len(graphics) == 1:
+                    path_args = {int(value) for value in re.findall(r"#([1-9])", graphics[0].group(1))}
+                    visible_args = [
+                        cleaned
+                        for index, value in enumerate(args, start=1)
+                        if index not in path_args and (cleaned := _clean_latex_text(value))
+                    ]
+                    if len(visible_args) >= 2 and len(visible_args[0]) <= 12:
+                        panel_caption = f"({visible_args[0]}) {' '.join(visible_args[1:])}"
+                    else:
+                        panel_caption = " ".join(visible_args)
+                    if panel_caption:
+                        expanded += f"\\maxreadpanelcaption{{{panel_caption}}}"
+                chunks.extend((text[cursor:match.start()], expanded))
+                cursor = end
+                changed = True
+            if changed and cursor:
+                chunks.append(text[cursor:])
+                text = "".join(chunks)
+        if not changed:
+            break
+    return text
+
+
+def _macro_call_arguments(text: str, start: int, argc: int) -> tuple[list[str], int]:
+    args: list[str] = []
+    cursor = start
+    while len(args) < argc:
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != "{":
+            return [], start
+        end = _balanced_brace_end_index(text, cursor)
+        if end < 0:
+            return [], start
+        args.append(text[cursor + 1:end])
+        cursor = end + 1
+    return args, cursor
 
 
 def _extract_latex_macro_definitions(tex_text: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -842,10 +938,20 @@ def _includegraphics_assets_with_layout(block: str, tex_dir: Path, source_dir: P
 
 
 def _contains_graphics_row_break(text: str) -> bool:
-    return bool(
-        re.search(r"\\\\(?:\s*\[[^\]]*\])?", text)
-        or re.search(r"\\(?:vspace|smallskip|medskip|bigskip|par)(?![A-Za-z])", text)
+    if re.search(r"\\\\(?:\s*\[[^\]]*\])?", text) or re.search(
+        r"\\(?:smallskip|medskip|bigskip|par)(?![A-Za-z])", text
+    ):
+        return True
+    if not re.search(r"\\vspace(?![A-Za-z])", text):
+        return False
+    # Captions inside adjacent minipages commonly use a tiny vspace before
+    # ``\hfill``.  That is still a horizontal panel boundary, not a new row.
+    adjacent_minipages = (
+        "\\hfill" in text
+        and "\\end{minipage}" in text
+        and "\\begin{minipage}" in text
     )
+    return not adjacent_minipages
 
 
 def _compact_layout_rows(assets: List[Tuple[str, int, int]]) -> List[Tuple[str, int, int]]:

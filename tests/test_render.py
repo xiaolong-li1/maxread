@@ -1021,6 +1021,29 @@ def test_compose_related_figure_groups_keeps_unrelated_figures_separate(tmp_path
     assert grouped == inserts
 
 
+def test_compose_related_figure_groups_does_not_recombine_complete_latex_figures(tmp_path):
+    from PIL import Image
+
+    rendered = tmp_path / "rendered_figures"
+    rendered.mkdir()
+    data = rendered / "fig_data_pairs.png"
+    results = rendered / "fig_visual-quality.png"
+    Image.new("RGB", (1200, 320), "white").save(data)
+    Image.new("RGB", (1200, 1500), "white").save(results)
+    inserts = [
+        ("[MaxReadFigure:1:data]", data, "Proxy paired data construction."),
+        ("[MaxReadFigure:2:results]", results, "Proxy visual quality results."),
+    ]
+    visuals = {
+        inserts[0][0]: "Proxy RGB pairs for training data.",
+        inserts[1][0]: "Proxy RGB pairs for visual results.",
+    }
+
+    grouped, _visuals = compose_related_figure_groups(inserts, visuals)
+
+    assert grouped == inserts
+
+
 def test_related_panel_label_falls_back_to_ascii_without_cjk_font(monkeypatch):
     import maxread.render as render_module
 

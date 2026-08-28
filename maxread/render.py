@@ -329,6 +329,8 @@ _RELATED_FIGURE_STOPWORDS = {
 def _should_group_related_figures(a, b, visuals: Dict[str, str]) -> bool:
     marker_a, path_a, caption_a = a
     marker_b, path_b, caption_b = b
+    if _is_reconstructed_latex_figure(Path(path_a)) or _is_reconstructed_latex_figure(Path(path_b)):
+        return False
     target_a = _figure_section_target(Path(path_a), caption_a, visuals.get(marker_a, ""))
     target_b = _figure_section_target(Path(path_b), caption_b, visuals.get(marker_b, ""))
     if target_a and target_b and target_a != target_b:
@@ -338,6 +340,11 @@ def _should_group_related_figures(a, b, visuals: Dict[str, str]) -> bool:
     common = tokens_a & tokens_b
     required = 2 if target_a or target_b else 3
     return len(common) >= required
+
+
+def _is_reconstructed_latex_figure(path: Path) -> bool:
+    """A source-level multi-asset Figure is already a complete visual unit."""
+    return path.parent.name == "rendered_figures" and path.stem.lower().startswith(("fig_", "fig-"))
 
 
 def _figure_relation_tokens(path: Path, caption: str, visual: str) -> set[str]:
@@ -1739,20 +1746,36 @@ def _compose_grid_figure(items: List[Tuple[Path, PaperFigure]], output_path: Pat
             resized.append((scaled, path, figure, row, col))
             row_heights[row] = max(row_heights[row], height)
 
-        col_labels = _grid_column_labels([(path, figure, row, col) for _image, path, figure, row, col in opened], cols)
-        row_labels = _grid_row_labels([(path, figure, row, col) for _image, path, figure, row, col in opened], rows)
+        col_labels = [] if cols == 1 else _grid_column_labels(
+            [(path, figure, row, col) for _image, path, figure, row, col in opened], cols
+        )
+        row_labels = [] if cols == 1 else _grid_row_labels(
+            [(path, figure, row, col) for _image, path, figure, row, col in opened], rows
+        )
         panel_labels = {
             (row, col): label
             for (_image, _path, figure, row, col), label in zip(resized, _panel_labels([item[2] for item in resized]))
             if label
         }
         font = _figure_label_font()
+        measure_draw = ImageDraw.Draw(Image.new("RGB", (1, 1), "white"))
+        panel_label_lines = {
+            cell: _wrap_figure_label(measure_draw, label, font, cell_width - 20)
+            for cell, label in panel_labels.items()
+        } if font else {}
+        line_height = _figure_text_line_height(measure_draw, font) if font else 0
         gap = 18 if cols >= 4 else 24
         padding = gap
         header_height = 48 if col_labels else 0
         row_label_width = 128 if row_labels else 0
         width = row_label_width + cols * cell_width + (cols - 1) * gap + padding * 2
-        panel_label_heights = [58 if any((row, col) in panel_labels for col in range(cols)) else 0 for row in range(rows)]
+        panel_label_heights = [
+            max(
+                [len(panel_label_lines.get((row, col), [])) * line_height + 16 for col in range(cols)]
+                or [0]
+            )
+            for row in range(rows)
+        ]
         height = header_height + sum(row_heights) + sum(panel_label_heights) + (rows - 1) * gap + padding * 2
         canvas = Image.new("RGBA", (width, height), (255, 255, 255, 255))
         draw = ImageDraw.Draw(canvas)
@@ -1774,9 +1797,18 @@ def _compose_grid_figure(items: List[Tuple[Path, PaperFigure]], output_path: Pat
                 if image:
                     image_y = y + max(0, (row_heights[row] - image.height) // 2)
                     canvas.alpha_composite(image, (x, image_y))
-                label = panel_labels.get((row, col), "")
-                if label and font:
-                    _draw_centered_text(draw, label, x, y + row_heights[row], cell_width, panel_label_heights[row], font)
+                lines = panel_label_lines.get((row, col), [])
+                if lines and font:
+                    _draw_centered_multiline_text(
+                        draw,
+                        lines,
+                        x,
+                        y + row_heights[row],
+                        cell_width,
+                        panel_label_heights[row],
+                        font,
+                        line_height,
+                    )
                 x += cell_width + gap
             y += row_heights[row] + panel_label_heights[row] + gap
 
@@ -1905,6 +1937,45 @@ def _draw_centered_text(draw, label: str, x: int, y: int, width: int, height: in
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
     draw.text((x + max(0, (width - text_width) // 2), y + max(0, (height - text_height) // 2)), label, fill=(25, 25, 25, 255), font=font)
+
+
+def _wrap_figure_label(draw, label: str, font, max_width: int, max_lines: int = 3) -> List[str]:
+    words = re.sub(r"\s+", " ", str(label or "")).strip().split(" ")
+    if not words:
+        return []
+    lines: List[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        suffix = "..."
+        while lines[-1] and draw.textbbox((0, 0), lines[-1] + suffix, font=font)[2] > max_width:
+            lines[-1] = lines[-1][:-1].rstrip()
+        lines[-1] += suffix
+    return lines
+
+
+def _figure_text_line_height(draw, font) -> int:
+    bbox = draw.textbbox((0, 0), "Ag", font=font)
+    return max(1, bbox[3] - bbox[1] + 8)
+
+
+def _draw_centered_multiline_text(draw, lines: List[str], x: int, y: int, width: int, height: int, font, line_height: int) -> None:
+    block_height = len(lines) * line_height
+    line_y = y + max(0, (height - block_height) // 2)
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        text_width = bbox[2] - bbox[0]
+        draw.text((x + max(0, (width - text_width) // 2), line_y), line, fill=(25, 25, 25, 255), font=font)
+        line_y += line_height
 
 
 def _side_labels_from_caption(caption: str, count: int) -> List[str]:

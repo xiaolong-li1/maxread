@@ -414,6 +414,108 @@ def test_fetch_source_text_groups_subfigures_under_parent_caption(tmp_path):
     assert [figure.asset_index for figure in figures] == [0, 1, 2]
 
 
+def test_fetch_source_text_expands_parameterized_graphics_wrapper(tmp_path):
+    paper_dir = tmp_path / "papers" / "2608.25927"
+    paper_dir.mkdir(parents=True)
+    source_path = paper_dir / "2608.25927.source"
+    tex = br"""
+\newcommand{\resultcase}[3]{%
+  \begin{minipage}[t]{\textwidth}
+    \includegraphics[width=\linewidth]{#2}
+    \vspace{-3pt}
+    {\scriptsize\textbf{Prompt (#1):} #3\par}
+  \end{minipage}}
+\begin{figure*}
+\resultcase{A}{figures/case_a.png}{First prompt.}
+\vspace{2pt}
+\resultcase{B}{figures/case_b.png}{Second prompt.}
+\caption{Visual quality results.}\label{fig:visual-quality}
+\end{figure*}
+"""
+    blob = io.BytesIO()
+    with tarfile.open(fileobj=blob, mode="w:gz") as tf:
+        info = tarfile.TarInfo("main.tex")
+        info.size = len(tex)
+        tf.addfile(info, io.BytesIO(tex))
+        for name in ("case_a", "case_b"):
+            image = b"png"
+            info = tarfile.TarInfo(f"figures/{name}.png")
+            info.size = len(image)
+            tf.addfile(info, io.BytesIO(image))
+    source_path.write_bytes(blob.getvalue())
+
+    client = ArxivClient(tmp_path)
+    _, _source_dir, _source_text, _tree, _assets, _captions, figures, _tables, _macros, _latex_macros, _latex_arg_macros, warnings = client.fetch_source_text("2608.25927", paper_dir)
+
+    assert warnings == []
+    assert [figure.asset for figure in figures] == ["figures/case_a.png", "figures/case_b.png"]
+    assert [figure.label for figure in figures] == ["fig:visual-quality"] * 2
+    assert [figure.caption for figure in figures] == ["Visual quality results."] * 2
+    assert [figure.panel_caption for figure in figures] == [
+        "(A) First prompt.",
+        "(B) Second prompt.",
+    ]
+    assert [(figure.row, figure.col) for figure in figures] == [(0, 0), (1, 0)]
+
+
+def test_fetch_source_text_keeps_hfilled_nested_minipages_on_one_row(tmp_path):
+    paper_dir = tmp_path / "papers" / "2608.25928"
+    paper_dir.mkdir(parents=True)
+    source_path = paper_dir / "2608.25928.source"
+    tex = br"""
+\begin{figure*}
+  \begin{subfigure}{0.495\textwidth}
+    \begin{minipage}{0.49\linewidth}
+      \includegraphics{figures/game_rgb.png}\vspace{-2pt}{\scriptsize RGB target}
+    \end{minipage}\hfill
+    \begin{minipage}{0.49\linewidth}
+      \includegraphics{figures/game_proxy.png}\vspace{-2pt}{\scriptsize proxy}
+    \end{minipage}
+    \caption{Game pair data.}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.495\textwidth}
+    \begin{minipage}{0.49\linewidth}
+      \includegraphics{figures/real_rgb.png}\vspace{-2pt}{\scriptsize RGB target}
+    \end{minipage}\hfill
+    \begin{minipage}{0.49\linewidth}
+      \includegraphics{figures/real_proxy.png}\vspace{-2pt}{\scriptsize proxy}
+    \end{minipage}
+    \caption{Real pair data.}
+  \end{subfigure}
+  \caption{Paired data construction.}\label{fig:data-pairs}
+\end{figure*}
+"""
+    blob = io.BytesIO()
+    with tarfile.open(fileobj=blob, mode="w:gz") as tf:
+        info = tarfile.TarInfo("main.tex")
+        info.size = len(tex)
+        tf.addfile(info, io.BytesIO(tex))
+        for name in ("game_rgb", "game_proxy", "real_rgb", "real_proxy"):
+            image = b"png"
+            info = tarfile.TarInfo(f"figures/{name}.png")
+            info.size = len(image)
+            tf.addfile(info, io.BytesIO(image))
+    source_path.write_bytes(blob.getvalue())
+
+    client = ArxivClient(tmp_path)
+    _, _source_dir, _source_text, _tree, _assets, _captions, figures, _tables, _macros, _latex_macros, _latex_arg_macros, warnings = client.fetch_source_text("2608.25928", paper_dir)
+
+    assert warnings == []
+    assert [figure.asset for figure in figures] == [
+        "figures/game_rgb.png",
+        "figures/game_proxy.png",
+        "figures/real_rgb.png",
+        "figures/real_proxy.png",
+    ]
+    assert [(figure.row, figure.col) for figure in figures] == [(0, 0), (0, 1), (0, 2), (0, 3)]
+    assert [figure.panel_caption for figure in figures] == [
+        "Game pair data.",
+        "Game pair data.",
+        "Real pair data.",
+        "Real pair data.",
+    ]
+
+
 def test_fetch_source_text_expands_simple_caption_macros(tmp_path):
     paper_dir = tmp_path / "papers" / "2210.10340"
     paper_dir.mkdir(parents=True)
