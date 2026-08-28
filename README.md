@@ -101,6 +101,11 @@ If arXiv returns HTTP 429, wait a few minutes before retrying. MaxRead stores fa
 
 Large arXiv source downloads use two bounded Range streams by default. This avoids long single-connection stalls while keeping request concurrency conservative; do not increase it without measuring the target network and respecting arXiv rate limits.
 
+For hosts whose direct route to arXiv is unstable, configure the
+application-scoped egress described in
+[`docs/arxiv-egress.md`](docs/arxiv-egress.md). Do not use global proxy
+environment variables or alter the machine default route.
+
 By default `MAXREAD_REQUIRE_SOURCE=true`, so MaxRead will not generate a full document unless TeX source is available. This keeps formula/image/table alignment reliable.
 
 If you can download source from the arXiv web page manually, import it first:

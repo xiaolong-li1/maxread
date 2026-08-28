@@ -71,6 +71,18 @@ class ArxivClient:
         self.parallel_min_bytes = max(0, int(parallel_min_bytes or 0))
         self._last_request_at = 0.0
         self.arxiv_relay_url = os.environ.get("MAXREAD_ARXIV_RELAY_URL", "").strip().rstrip("/")
+        self.arxiv_proxy_url = os.environ.get("MAXREAD_ARXIV_PROXY_URL", "").strip()
+        self.arxiv_proxy_required = os.environ.get("MAXREAD_ARXIV_PROXY_REQUIRED", "false").lower() in {
+            "1", "true", "yes", "on",
+        }
+        self._proxy_opener = None
+        if self.arxiv_proxy_url:
+            self._proxy_opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({
+                    "http": self.arxiv_proxy_url,
+                    "https": self.arxiv_proxy_url,
+                })
+            )
 
     def fetch(self, paper_id: str) -> PaperBundle:
         paper_dir = self.workdir / "papers" / paper_id
@@ -313,7 +325,7 @@ class ArxivClient:
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                with self._open_request(req, timeout=self.timeout) as response:
                     self._last_request_at = time.monotonic()
                     return response.read()
             except urllib.error.HTTPError as exc:
@@ -339,6 +351,18 @@ class ArxivClient:
                 time.sleep(min(2 ** (attempt + 1), 8))
         assert last_exc is not None
         raise last_exc
+
+    def _open_request(self, request: urllib.request.Request, timeout: int):
+        if self._proxy_opener is None:
+            return urllib.request.urlopen(request, timeout=timeout)
+        try:
+            return self._proxy_opener.open(request, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            if self.arxiv_proxy_required:
+                raise RuntimeError(f"dedicated arXiv proxy unavailable: {exc}") from exc
+            return urllib.request.urlopen(request, timeout=timeout)
 
     def _get_via_relay(self, url: str) -> bytes:
         relay_url = f"{self.arxiv_relay_url}/fetch?{urllib.parse.urlencode({'url': url})}"
@@ -368,7 +392,7 @@ class ArxivClient:
             },
         )
         try:
-            with urllib.request.urlopen(probe_req, timeout=self.timeout) as response:
+            with self._open_request(probe_req, timeout=self.timeout) as response:
                 status = getattr(response, "status", response.getcode())
                 if status == 200:
                     self._last_request_at = time.monotonic()

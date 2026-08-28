@@ -146,6 +146,76 @@ def test_get_uses_arxiv_relay_after_direct_connection_failures(monkeypatch, tmp_
     assert client._get_once("https://arxiv.org/src/2608.24646") == b"relay bytes"
 
 
+class _FakeResponse:
+    status = 200
+    headers = {}
+
+    def __init__(self, data=b"proxied bytes"):
+        self.data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def read(self):
+        return self.data
+
+    def getcode(self):
+        return self.status
+
+
+def test_arxiv_client_uses_dedicated_proxy_opener(monkeypatch, tmp_path):
+    monkeypatch.setenv("MAXREAD_ARXIV_PROXY_URL", "http://127.0.0.1:17890")
+    client = ArxivClient(tmp_path)
+    calls = []
+
+    def proxy_open(request, timeout):
+        calls.append((request.full_url, timeout))
+        return _FakeResponse()
+
+    monkeypatch.setattr(client._proxy_opener, "open", proxy_open)
+    monkeypatch.setattr(
+        arxiv_module.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("direct opener should not be used")),
+    )
+
+    assert client._get_once("https://arxiv.org/src/2608.24646") == b"proxied bytes"
+    assert calls == [("https://arxiv.org/src/2608.24646", client.timeout)]
+
+
+def test_optional_arxiv_proxy_falls_back_to_direct(monkeypatch, tmp_path):
+    monkeypatch.setenv("MAXREAD_ARXIV_PROXY_URL", "http://127.0.0.1:17890")
+    monkeypatch.delenv("MAXREAD_ARXIV_PROXY_REQUIRED", raising=False)
+    client = ArxivClient(tmp_path)
+    monkeypatch.setattr(client._proxy_opener, "open", lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionResetError("proxy down")))
+    monkeypatch.setattr(arxiv_module.urllib.request, "urlopen", lambda *_args, **_kwargs: _FakeResponse(b"direct bytes"))
+
+    assert client._get_once("https://arxiv.org/src/2608.24646") == b"direct bytes"
+
+
+def test_required_arxiv_proxy_never_falls_back_to_direct(monkeypatch, tmp_path):
+    monkeypatch.setenv("MAXREAD_ARXIV_PROXY_URL", "http://127.0.0.1:17890")
+    monkeypatch.setenv("MAXREAD_ARXIV_PROXY_REQUIRED", "true")
+    monkeypatch.setattr(arxiv_module.time, "sleep", lambda _seconds: None)
+    client = ArxivClient(tmp_path)
+    monkeypatch.setattr(client._proxy_opener, "open", lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionResetError("proxy down")))
+    monkeypatch.setattr(
+        arxiv_module.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("direct opener should not be used")),
+    )
+
+    try:
+        client._get_once("https://arxiv.org/src/2608.24646")
+    except RuntimeError as exc:
+        assert "dedicated arXiv proxy unavailable" in str(exc)
+    else:
+        raise AssertionError("required proxy failure must be surfaced")
+
+
 def test_process_wide_arxiv_pacing_interval_is_conservative():
     from maxread import arxiv as module
 

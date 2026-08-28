@@ -1,0 +1,30 @@
+mixed-port: 17890
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: warning
+ipv6: false
+unified-delay: true
+tcp-concurrent: true
+
+proxies:
+  - name: stable-egress-1
+    type: anytls
+    server: proxy.example.com
+    port: 443
+    password: replace-locally
+    sni: example.com
+
+proxy-groups:
+  - name: ARXIV
+    type: url-test
+    proxies:
+      - stable-egress-1
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 80
+    lazy: false
+
+rules:
+  - DOMAIN-SUFFIX,arxiv.org,ARXIV
+  - MATCH,DIRECT
