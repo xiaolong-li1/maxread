@@ -192,6 +192,8 @@ def progress_payload(settings, store: Store, identity) -> dict:
             "label": "完成交付" if status == "done" else (status or "已记录"),
             "percent": 100 if status == "done" else 5,
             "remaining_seconds": 0,
+            "elapsed_seconds": 0,
+            "overdue": False,
             "attempts": 0,
             "doc_url": str(usage.get("doc_url") or ""),
             "error": _friendly_error(str(usage.get("error") or "")),
@@ -215,7 +217,7 @@ def _progress_row(store: Store, job: dict, duration: int, workers: int) -> dict:
         batches = max(1, (position - 1) // max(1, int(workers or 1)) + 1)
         remaining = batches * duration
     elif status == "running":
-        remaining = max(30, duration - elapsed)
+        remaining = max(0, duration - elapsed)
     else:
         remaining = 0
     error = _friendly_error(str(job.get("error") or ""))
@@ -229,6 +231,8 @@ def _progress_row(store: Store, job: dict, duration: int, workers: int) -> dict:
         "label": label,
         "percent": percent,
         "remaining_seconds": remaining,
+        "elapsed_seconds": elapsed,
+        "overdue": status == "running" and elapsed >= duration,
         "attempts": int(job.get("attempts") or 0),
         "doc_url": str(job.get("doc_url") or ""),
         "error": error,
@@ -239,8 +243,12 @@ def _progress_row(store: Store, job: dict, duration: int, workers: int) -> dict:
 def deterministic_status_answer(progress: dict) -> str:
     active = progress.get("active")
     if active:
-        eta = max(1, round(int(active["remaining_seconds"] or 0) / 60))
-        return f"{active['source_id']} 现在在“{active['label']}”，整体约 {active['percent']}%。按最近任务估计还要 {eta} 分钟。"
+        remaining = int(active.get("remaining_seconds") or 0)
+        if remaining > 0:
+            eta = max(1, round(remaining / 60))
+            return f"{active['source_id']} 现在在“{active['label']}”，整体约 {active['percent']}%。按最近任务估计还要 {eta} 分钟。"
+        elapsed = max(1, round(int(active.get("elapsed_seconds") or 0) / 60))
+        return f"{active['source_id']} 现在仍在“{active['label']}”，已经运行约 {elapsed} 分钟并超过近期同类任务用时。我会继续报告真实阶段，不再给一个假的倒计时。"
     recent = progress.get("recent") or []
     if not recent:
         return "现在没有论文在跑。把 arXiv 链接交给我，任务进入队列后我就能一直盯着。"

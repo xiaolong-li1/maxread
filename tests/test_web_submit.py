@@ -12,7 +12,12 @@ from maxread.web_submit import (
     retry_web_job,
     submit_web_papers,
 )
-from maxread.web_pet import WebPetAgent, chat_with_project_pet, progress_payload
+from maxread.web_pet import (
+    WebPetAgent,
+    chat_with_project_pet,
+    deterministic_status_answer,
+    progress_payload,
+)
 
 
 def test_web_identity_defaults_to_guest_and_is_stable(tmp_path):
@@ -101,6 +106,23 @@ def test_progress_and_pet_agent_are_scoped_to_current_identity(tmp_path):
     assert "2608.25927" in answer
     assert "2608.27456" not in answer
     store.close()
+
+
+def test_overdue_project_does_not_claim_one_minute_remaining():
+    answer = deterministic_status_answer({
+        "active": {
+            "source_id": "2308.04079",
+            "label": "生成初稿",
+            "percent": 38,
+            "remaining_seconds": 0,
+            "elapsed_seconds": 24 * 60,
+        },
+        "recent": [],
+    })
+
+    assert "运行约 24 分钟" in answer
+    assert "假的倒计时" in answer
+    assert "还要 1 分钟" not in answer
 
 
 def test_project_pet_rejects_another_identity_job(tmp_path):

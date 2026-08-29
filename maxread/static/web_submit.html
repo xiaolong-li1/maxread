@@ -526,7 +526,9 @@
       const status = project.status || 'queued';
       const percent = Math.max(0, Math.min(100, Number(project.percent || 0)));
       const repair = String(project.workflow_state || '').includes('repair');
-      const eta = project.remaining_seconds ? `约 ${minutes(project.remaining_seconds)} 分钟` : '';
+      const eta = project.remaining_seconds
+        ? `约 ${minutes(project.remaining_seconds)} 分钟`
+        : (project.overdue ? `已运行 ${minutes(project.elapsed_seconds)} 分钟，超过近期均值` : '');
       const error = status === 'failed' ? `<div class="project-error">${esc(friendlyError(project))}</div>${project.error ? `<details class="technical"><summary>技术详情</summary><div>${esc(String(project.error).slice(0, 700))}</div></details>` : ''}` : '';
       const doc = project.doc_url ? `<a class="action-link" href="${esc(project.doc_url)}" target="_blank" rel="noopener">${icon('open')}打开文档</a>` : '';
       const retry = status === 'failed' && Number(project.job_id) > 0 ? `<button class="retry-button" onclick="retryProject(${Number(project.job_id)}, this)">${icon('retry')}重试</button>` : '';
