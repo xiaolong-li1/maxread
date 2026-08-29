@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -100,7 +101,16 @@ class Store:
 
     def persist(self, mailbox: str, source_uid: str, message: ParsedMessage) -> tuple[int, bool]:
         self.initialize()
-        folder = self.data_dir / "messages" / source_uid.replace("/", "_").replace(":", "_")
+        # UIDs are only unique within one mailbox folder. Check the durable key
+        # before touching files, then namespace new material by folder so a
+        # Sent UID can never overwrite an Inbox UID with the same number.
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM messages WHERE mailbox = ? AND source_uid = ?", (mailbox, source_uid)
+            ).fetchone()
+            if existing:
+                return int(existing["id"]), False
+        folder = self.data_dir / "messages" / _safe_component(mailbox) / _safe_component(source_uid)
         folder.mkdir(parents=True, exist_ok=True)
         raw_path = folder / "message.eml"
         raw_path.write_bytes(message.raw_bytes)
@@ -108,12 +118,6 @@ class Store:
         now = datetime.now(UTC).isoformat()
 
         with self.connect() as connection:
-            existing = connection.execute(
-                "SELECT id FROM messages WHERE mailbox = ? AND source_uid = ?", (mailbox, source_uid)
-            ).fetchone()
-            if existing:
-                return int(existing["id"]), False
-
             cursor = connection.execute(
                 """INSERT INTO messages(
                      mailbox, source_uid, message_id, subject, sender_name, sender_address,
@@ -163,8 +167,7 @@ class Store:
                         skipped_reason,
                     ),
                 )
-        return message_record_id, True
-
+            return message_record_id, True
     def summary(self) -> dict[str, int]:
         self.initialize()
         with self.connect() as connection:
@@ -185,3 +188,8 @@ class Store:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+
+def _safe_component(value: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+    return clean.strip("._") or "unknown"

@@ -57,7 +57,25 @@ class StoreTest(unittest.TestCase):
             self.assertTrue(first_created)
             self.assertFalse(second_created)
             self.assertEqual(store.summary()["total"], 1)
-            self.assertTrue((root / "data" / "messages" / "42" / "01-简历.pdf").exists())
+            self.assertTrue((root / "data" / "messages" / "fixture" / "42" / "01-简历.pdf").exists())
+
+    def test_same_uid_in_different_folders_cannot_overwrite_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = Store(root / "collector.sqlite3", root / "data", 1024 * 1024)
+            parsed = parse_message(sample_message())
+
+            inbox_id, _ = store.persist("INBOX", "42", parsed)
+            inbox_raw = root / "data" / "messages" / "INBOX" / "42" / "message.eml"
+            sent_id, _ = store.persist("Sent", "42", parsed)
+            sent_raw = root / "data" / "messages" / "Sent" / "42" / "message.eml"
+
+            self.assertNotEqual(inbox_id, sent_id)
+            self.assertTrue(inbox_raw.exists())
+            self.assertTrue(sent_raw.exists())
+            inbox_raw.write_bytes(b"sentinel")
+            store.persist("INBOX", "42", parsed)
+            self.assertEqual(inbox_raw.read_bytes(), b"sentinel")
 
 
 class ConfigureTest(unittest.TestCase):
