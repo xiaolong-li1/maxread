@@ -13,7 +13,7 @@ from unittest.mock import patch
 from mail_collector.cli import command_configure
 from mail_collector.oauth import access_token
 from mail_collector.config import Settings
-from mail_collector.imap_client import _folder_name_from_list_row, decode_modified_utf7, encode_modified_utf7
+from mail_collector.imap_client import ImapClient, _folder_name_from_list_row, decode_modified_utf7, encode_modified_utf7
 from mail_collector.parser import parse_message
 from mail_collector.store import Store
 
@@ -31,6 +31,10 @@ def sample_message() -> bytes:
 
 
 class ParserTest(unittest.TestCase):
+    def test_imap_client_exposes_scan_methods(self) -> None:
+        self.assertTrue(callable(ImapClient.search_uids))
+        self.assertTrue(callable(ImapClient.fetch_raw))
+
     def test_parses_candidate_and_pdf(self) -> None:
         parsed = parse_message(sample_message())
         self.assertEqual(parsed.subject, "科研实习申请-浙江大学-林同学")
