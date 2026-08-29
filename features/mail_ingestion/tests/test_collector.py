@@ -40,6 +40,24 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(len(parsed.attachments), 1)
         self.assertTrue(parsed.attachments[0].is_pdf)
 
+    def test_docx_attachment_is_candidate_evidence(self) -> None:
+        message = EmailMessage()
+        message["Subject"] = "材料补充"
+        message["From"] = "candidate@example.com"
+        message["To"] = "lab@example.com"
+        message.set_content("附件是我的材料。")
+        message.add_attachment(
+            b"PK\x03\x04fixture",
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename="resume.docx",
+        )
+
+        parsed = parse_message(message.as_bytes())
+
+        self.assertTrue(parsed.likely_candidate)
+        self.assertIn("has_resume_document_attachment", parsed.candidate_reasons)
+
     def test_imap_folder_modified_utf7_round_trip(self) -> None:
         for folder in ("Inbox", "初筛", "面试通过", "A&B"):
             self.assertEqual(decode_modified_utf7(encode_modified_utf7(folder)), folder)

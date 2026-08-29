@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import json
 import sqlite3
+import zipfile
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -13,6 +14,7 @@ from mail_collector.parser import parse_message
 from recruiting_pipeline.config import PipelineSettings
 from recruiting_pipeline.cli import build_parser
 from recruiting_pipeline.base_sync import BaseSync
+from recruiting_pipeline.attachment_text import extract_attachment_text
 from recruiting_pipeline.models import ProcessedThread, StoredMessage, ThreadEnvelope
 from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _other_fields, _within_days
 from recruiting_pipeline.llm import _fields_from_json, _strip_json_fence
@@ -24,6 +26,23 @@ from recruiting_pipeline.weekly_report import markdown_to_post, render_weekly_re
 
 
 class RecruitingPipelineTest(unittest.TestCase):
+    def test_docx_resume_text_reaches_evidence_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "resume.docx"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "word/document.xml",
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    '<w:body><w:p><w:r><w:t>GPA 3.905/4.0</w:t></w:r></w:p>'
+                    '<w:p><w:r><w:t>专业排名 26/556</w:t></w:r></w:p></w:body></w:document>',
+                )
+
+            text = extract_attachment_text(path)
+
+        self.assertIn("GPA 3.905/4.0", text)
+        self.assertIn("专业排名 26/556", text)
+
     def test_pipeline_settings_load_multiple_mail_accounts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

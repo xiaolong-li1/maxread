@@ -76,9 +76,9 @@ def _candidate_score(subject: str, body: str, attachments: tuple[Attachment, ...
     subject_patterns = ("申请", "实习", "硕士", "博士", "phd", "intern", "application", "candidate")
     body_patterns = ("简历", "resume", "curriculum vitae", "科研", "research", "成绩", "排名")
 
-    if any(item.is_pdf for item in attachments):
+    if any(item.is_pdf or Path(item.filename).suffix.casefold() in {".doc", ".docx", ".odt", ".rtf"} for item in attachments):
         score += 3
-        reasons.append("has_pdf_attachment")
+        reasons.append("has_resume_document_attachment")
     if any(pattern in subject.lower() for pattern in subject_patterns):
         score += 2
         reasons.append("subject_keyword")

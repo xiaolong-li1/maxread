@@ -45,8 +45,8 @@ class RecruitingLLM:
         self.attempts = attempts
         self.retry_base_seconds = retry_base_seconds
 
-    def extract(self, envelope: ThreadEnvelope, pdf_texts: dict[str, str], previous: CandidateFields | None = None) -> CandidateFields:
-        prompt = self._build_prompt(envelope, pdf_texts, previous)
+    def extract(self, envelope: ThreadEnvelope, attachment_texts: dict[str, str], previous: CandidateFields | None = None) -> CandidateFields:
+        prompt = self._build_prompt(envelope, attachment_texts, previous)
         raw = retry_call(
             lambda: self._post(prompt),
             attempts=self.attempts,
@@ -65,7 +65,7 @@ class RecruitingLLM:
             payload = json.loads(_strip_json_fence(repaired))
         return _fields_from_json(payload, previous)
 
-    def _build_prompt(self, envelope: ThreadEnvelope, pdf_texts: dict[str, str], previous: CandidateFields | None) -> str:
+    def _build_prompt(self, envelope: ThreadEnvelope, attachment_texts: dict[str, str], previous: CandidateFields | None) -> str:
         previous_json = json.dumps(previous.__dict__ if previous else {}, ensure_ascii=False)
         messages: list[str] = []
         for message in envelope.messages:
@@ -74,8 +74,8 @@ class RecruitingLLM:
                 f"[邮件 {message.source_uid} | {direction} | {message.received_at} | {message.subject}]\n{message.body_text[:50000]}"
             )
         attachments = []
-        for name, text in pdf_texts.items():
-            attachments.append(f"[附件 {name}]\n{text[:60000] if text else '(PDF 无可提取文字)'}")
+        for name, text in attachment_texts.items():
+            attachments.append(f"[附件 {name}]\n{text[:60000] if text else '(附件无可提取文字)'}")
         return (
             "请根据以下材料输出结构化 JSON。线程中后来的内容可以补充或更正早期内容，但没有新证据的字段不要清空。\n\n"
             f"已有结构化记录（可能为空）：{previous_json}\n\n"

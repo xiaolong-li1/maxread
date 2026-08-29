@@ -10,13 +10,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .attachment_text import SUPPORTED_DOCUMENT_SUFFIXES, extract_attachment_text
 from .base_sync import BaseSync
 from .config import PipelineSettings
 from .docs_sync import DocsSync
 from .external_attachments import download_external_pdfs
 from .llm import RecruitingLLM
 from .models import CandidateFields, ProcessedThread, StoredMessage, ThreadEnvelope
-from .pdf_text import extract_pdf_text
 from .retry import is_transient_error, retry_call
 from .store import PipelineStore
 from .threading import build_envelope, candidate_address, read_headers, thread_key
@@ -234,11 +234,11 @@ class RecruitingRunner:
         previous_row = self.store.get_thread(envelope.key)
         previous_fields = self.store.fields_from_row(previous_row)
         self._download_external(envelope)
-        pdf_texts = self._pdf_texts(envelope)
+        attachment_texts = self._attachment_texts(envelope)
         if self._is_obvious_other(envelope):
             fields = _other_fields(envelope)
         elif self.llm:
-            fields = self.llm.extract(envelope, pdf_texts, previous=previous_fields)
+            fields = self.llm.extract(envelope, attachment_texts, previous=previous_fields)
             if fields.mail_type == "other":
                 fields = _other_fields(envelope, summary=fields.purpose_summary)
         elif previous_fields:
@@ -279,8 +279,8 @@ class RecruitingRunner:
             try:
                 if self.llm is None:
                     raise RuntimeError("AI is required for academic repair")
-                pdf_texts = self._pdf_texts(envelope)
-                refreshed = self.llm.extract(envelope, pdf_texts, previous=fields)
+                attachment_texts = self._attachment_texts(envelope)
+                refreshed = self.llm.extract(envelope, attachment_texts, previous=fields)
                 refreshed.source_accounts = sorted({_source_account_label(account) for account in envelope.source_accounts})
                 before = {
                     "school": fields.school,
@@ -503,10 +503,12 @@ class RecruitingRunner:
         items = grouped.get(key, [])
         return build_envelope(items, self._mailbox_addresses, key=key)
 
-    def _pdf_texts(self, envelope: ThreadEnvelope) -> dict[str, str]:
-        # Every local attachment is uploaded to the material document, but
-        # only PDFs are sent through the text extractor/LLM context.
-        paths = [path for path in self._attachment_paths(envelope) if path.suffix.lower() == ".pdf"]
+    def _attachment_texts(self, envelope: ThreadEnvelope) -> dict[str, str]:
+        paths = [
+            path
+            for path in self._attachment_paths(envelope)
+            if path.suffix.casefold() in SUPPORTED_DOCUMENT_SUFFIXES
+        ]
         if not paths:
             return {}
         unique_paths: list[Path] = []
@@ -517,7 +519,7 @@ class RecruitingRunner:
                 seen_digests.add(digest)
                 unique_paths.append(path)
         with ThreadPoolExecutor(max_workers=self.settings.pdf_workers) as executor:
-            pairs = list(executor.map(lambda path: (path.name, extract_pdf_text(path)), unique_paths))
+            pairs = list(executor.map(lambda path: (path.name, extract_attachment_text(path)), unique_paths))
         return dict(pairs)
 
     def _attachment_paths(self, envelope: ThreadEnvelope, messages: list[StoredMessage] | None = None) -> list[Path]:
