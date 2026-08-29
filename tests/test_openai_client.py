@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from maxread.openai_client import OpenAIClient
 from maxread import openai_client
 
@@ -133,3 +135,33 @@ def test_stream_retries_transient_http_502(monkeypatch):
 
     assert client._post_stream_text("/responses", {}) == "ok"
     assert len(calls) == 2
+
+
+def test_stream_total_timeout_is_not_extended_by_heartbeats(monkeypatch):
+    client = OpenAIClient("key", "model", timeout=1)
+    response = _StreamResponse([
+        {"type": "response.output_text.delta", "delta": "first"},
+        {"type": "response.output_text.delta", "delta": "second"},
+    ])
+    ticks = iter([0.0, 0.5, 1.1])
+    monkeypatch.setattr(openai_client.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(openai_client.urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(TimeoutError, match="total timeout"):
+        client._post_stream_text("/responses", {})
+
+
+def test_stream_timeout_is_not_retried(monkeypatch):
+    client = OpenAIClient("key", "model", timeout=1)
+    calls = []
+
+    def timed_out(_path, _payload):
+        calls.append(1)
+        raise TimeoutError("deadline")
+
+    client._post_stream_text_once = timed_out
+    monkeypatch.setattr(openai_client.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        client._post_stream_text("/responses", {})
+    assert len(calls) == 1

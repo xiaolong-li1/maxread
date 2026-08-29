@@ -175,7 +175,13 @@ class OpenAIClient:
                 last_error = exc
                 if exc.status not in {429, 500, 502, 503, 504} or attempt >= 3:
                     raise
-            except (urllib.error.URLError, TimeoutError, ssl.SSLError, ConnectionError, EOFError) as exc:
+            except TimeoutError:
+                # A streaming response can keep the socket alive with SSE
+                # heartbeats forever. A completed request deadline is not a
+                # transient connection error and must not restart another full
+                # timeout window.
+                raise
+            except (urllib.error.URLError, ssl.SSLError, ConnectionError, EOFError) as exc:
                 last_error = exc
                 if attempt >= 3:
                     raise
@@ -200,11 +206,14 @@ class OpenAIClient:
             headers=headers,
             method="POST",
         )
+        deadline = time.monotonic() + max(1, int(self.timeout))
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
                 chunks: list[str] = []
                 completed = None
                 for raw_line in response:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"{path} stream exceeded total timeout of {self.timeout}s")
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
