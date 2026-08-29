@@ -193,6 +193,7 @@
       align-items: center;
       gap: 10px;
     }
+    .project-row.completed { grid-template-columns: minmax(0, 1fr); }
     .project-card {
       min-width: 0;
       background: var(--paper);
@@ -587,7 +588,9 @@
       const retry = status === 'failed' && Number(project.job_id) > 0 ? `<button class="retry-button" onclick="retryProject(${Number(project.job_id)}, this)">${icon('retry')}重试</button>` : '';
       const favorite = `<button class="project-icon-action ${project.favorite ? 'favorite' : ''}" aria-label="${project.favorite ? '取消收藏' : '收藏'}" title="${project.favorite ? '取消收藏' : '收藏'}" onclick="toggleFavorite('${esc(project.source_id)}', ${project.favorite ? 'false' : 'true'})">${icon('star')}</button>`;
       const remove = `<button class="project-icon-action delete" aria-label="删除项目" title="从我的项目中删除" onclick="deleteProject('${esc(project.source_id)}')">${icon('trash')}</button>`;
-      return `<article class="project-row" data-source="${esc(project.source_id)}">
+      const progress = status === 'done' ? '' : `<div class="project-progress"><div class="project-progress-head"><strong>${esc(project.label || '等待调度')}</strong><span>${percent}%${eta ? ` · ${esc(eta)}` : ''}</span></div><div class="track"><div class="fill ${repair ? 'repair' : ''}" style="width:${percent}%"></div></div></div>`;
+      const companion = status === 'done' ? '' : `<div class="pet-dock"><button class="project-pet" aria-label="询问 Max 当前项目" title="问 Max" onclick="openPet(${Number(project.job_id || 0)}, '${esc(project.source_id)}')"><div class="pet-sprite ${petFrame(project)}"></div></button><span class="pet-label">问 Max</span></div>`;
+      return `<article class="project-row ${status === 'done' ? 'completed' : ''}" data-source="${esc(project.source_id)}">
         <div class="project-card ${esc(status)}">
           <div class="project-main">
             <div class="project-top">
@@ -595,15 +598,12 @@
               <span class="project-state ${esc(status)}">${esc(stateLabel(status))}</span>
             </div>
             ${project.summary ? `<p class="project-summary">${esc(project.summary)}</p>` : ''}
-            <div class="project-progress">
-              <div class="project-progress-head"><strong>${esc(project.label || '等待调度')}</strong><span>${percent}%${eta ? ` · ${esc(eta)}` : ''}</span></div>
-              <div class="track"><div class="fill ${repair ? 'repair' : ''}" style="width:${percent}%"></div></div>
-            </div>
+            ${progress}
             ${error}
           </div>
           <div class="project-actions"><div class="project-organize"><select class="category-select" aria-label="调整项目分类" onchange="changeCategory('${esc(project.source_id)}', this.value)">${categoryOptions(project.category)}</select><span class="project-updated">${project.category_source === 'manual' ? '人工分类' : '自动分类'}</span></div><div class="action-group">${favorite}${doc}${retry}${remove}</div></div>
         </div>
-        <div class="pet-dock"><button class="project-pet" aria-label="询问 Max 当前项目" title="问 Max" onclick="openPet(${Number(project.job_id || 0)}, '${esc(project.source_id)}')"><div class="pet-sprite ${petFrame(project)}"></div></button><span class="pet-label">问 Max</span></div>
+        ${companion}
       </article>`;
     }
 

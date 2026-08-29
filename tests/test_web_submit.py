@@ -294,6 +294,25 @@ def test_cached_document_appears_as_personal_project(tmp_path):
     store.close()
 
 
+def test_legacy_done_stage_is_normalized_to_completed_without_twelve_percent(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="", workdir=tmp_path / "work")
+    queued = submit_web_papers(settings, store, identity, "2608.25927")["items"][0]
+    store.conn.execute(
+        "update queue_jobs set status='done', workflow_state='', stage='done', doc_url='https://tenant/doc' where id=?",
+        (queued["job_id"],),
+    )
+    store.conn.commit()
+
+    project = progress_payload(settings, store, identity)["recent"][0]
+
+    assert project["status"] == "done"
+    assert project["percent"] == 100
+    assert project["label"] == "完成交付"
+    store.close()
+
+
 def test_project_favorite_and_manual_category_are_identity_scoped(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     _token, identity = new_web_identity(store)
@@ -473,6 +492,8 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "调整项目分类" in WEB_SUBMIT_HTML
     assert "删除项目" in WEB_SUBMIT_HTML
     assert "收藏" in WEB_SUBMIT_HTML
+    assert "status === 'done' ? ''" in WEB_SUBMIT_HTML
+    assert "project-row completed" not in WEB_SUBMIT_HTML
     assert "web-pet-sprite.png" in WEB_SUBMIT_HTML
     assert "小绿" not in WEB_SUBMIT_HTML
     assert "问 Max" in WEB_SUBMIT_HTML

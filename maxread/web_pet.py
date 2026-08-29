@@ -26,6 +26,7 @@ PROGRESS_STATES = {
     "visual_checking": (92, "视觉验收"),
     "visual_repairing": (89, "修复页面"),
     "completed": (100, "完成交付"),
+    "done": (100, "完成交付"),
     "failed": (100, "执行失败"),
     "quality_failed": (100, "质量未通过"),
     "cancelled": (100, "已取消"),
