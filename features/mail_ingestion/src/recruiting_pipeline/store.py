@@ -200,6 +200,11 @@ class PipelineStore:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM recruiting_threads WHERE thread_key=?", (thread_key,)).fetchone()
 
+    def list_threads(self) -> list[sqlite3.Row]:
+        self.initialize()
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM recruiting_threads ORDER BY latest_time DESC, thread_key").fetchall()
+
     def reset_base_links(
         self,
         since_days: int,

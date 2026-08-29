@@ -10,7 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import PipelineSettings
-from .runner import RecruitingRunner
+from .runner import RecruitingRunner, _within_days
 from .store import PipelineStore
 from .weekly_report import markdown_to_post, render_weekly_report
 
@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     academics.add_argument("--days", type=int, default=None, help="only inspect threads updated within this window")
     academics.add_argument("--dry-run", action="store_true", help="preview changes without writing")
     academics.add_argument("--confirm", action="store_true", help="required before updating SQLite, Base, and document summaries")
+    tags = sub.add_parser("tag-records", help="refresh AI extraction and write school/rank/reply tags to Base")
+    tags.add_argument("--days", type=int, default=None, help="only reprocess threads updated within this window")
+    tags.add_argument("--max-threads", type=int, default=None, help="bound reprocessing to the newest N threads")
+    tags.add_argument("--dry-run", action="store_true", help="show how many durable rows would be processed")
+    tags.add_argument("--confirm", action="store_true", help="required before AI calls and Base updates")
     return parser
 
 
@@ -141,6 +146,31 @@ def main(argv: list[str] | None = None) -> int:
         runner = RecruitingRunner(settings)
         runner.llm = None
         result = runner.repair_academics(apply=bool(args.confirm), since_days=args.days)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "tag-records":
+        if not args.dry_run and not args.confirm:
+            raise SystemExit("tag-records requires --dry-run or --confirm")
+        rows = store.list_threads()
+        if args.days is not None:
+            rows = [row for row in rows if _within_days(str(row["latest_time"] or ""), args.days)]
+        if args.max_threads is not None:
+            rows = rows[: max(0, args.max_threads)]
+        if args.dry_run:
+            print(json.dumps({"ok": True, "dry_run": True, "planned_threads": len(rows)}, ensure_ascii=False, indent=2))
+            return 0
+        runner = RecruitingRunner(settings, no_docs=True)
+        result = runner.run_once(
+            skip_scan=True,
+            max_threads=args.max_threads,
+            reprocess=True,
+            since_days=args.days,
+        )
+        result["tagging"] = {
+            "ai_refreshed": True,
+            "base_fields": ["院校", "排名", "是否985", "是否C9", "是否已回复"],
+        }
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 

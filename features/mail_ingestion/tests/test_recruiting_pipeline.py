@@ -16,6 +16,7 @@ from recruiting_pipeline.base_sync import BaseSync
 from recruiting_pipeline.models import StoredMessage, ThreadEnvelope
 from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _other_fields, _within_days
 from recruiting_pipeline.llm import _fields_from_json, _strip_json_fence
+from recruiting_pipeline.institution_tags import C9, PROJECT_985, classify_institution, extract_rank_feature
 from recruiting_pipeline.models import CandidateFields
 from recruiting_pipeline.store import PipelineStore
 from recruiting_pipeline.threading import HeaderInfo, build_envelope, candidate_address, normalize_subject
@@ -23,6 +24,25 @@ from recruiting_pipeline.weekly_report import markdown_to_post, render_weekly_re
 
 
 class RecruitingPipelineTest(unittest.TestCase):
+    def test_official_985_and_c9_lists_have_expected_membership(self) -> None:
+        self.assertEqual(len(PROJECT_985), 39)
+        self.assertEqual(len(C9), 9)
+        self.assertIn("电子科技大学", PROJECT_985)
+        self.assertIn("浙江大学", C9)
+
+    def test_institution_aliases_are_tagged_without_substring_false_positive(self) -> None:
+        self.assertEqual(classify_institution("浙大").is_c9, "是")
+        self.assertEqual(classify_institution("电子科技大学").is_985, "是")
+        self.assertEqual(classify_institution("电子科技大学").is_c9, "否")
+        self.assertEqual(classify_institution("浙江大学城市学院").is_985, "否")
+        self.assertEqual(classify_institution("unknown").is_985, "未知")
+        self.assertEqual(classify_institution("—", applicable=False).is_985, "不适用")
+
+    def test_rank_feature_is_separate_and_filterable(self) -> None:
+        self.assertEqual(extract_rank_feature("GPA 3.8 · 专业排名第 4 名（总人数未提供）"), "第 4 名")
+        self.assertEqual(extract_rank_feature("绩点排名第 2/55（Top 3%）"), "第 2 / 55 · Top 3%")
+        self.assertEqual(extract_rank_feature("GPA 4.0 · 排名未提供"), "未提供")
+
     def test_academic_display_preserves_term_gpas_without_inventing_rank(self) -> None:
         material = "大一上均分88，绩点3.99；大一下均分94，绩点4；大一学年均分为91。"
 
@@ -112,6 +132,8 @@ class RecruitingPipelineTest(unittest.TestCase):
                 conn.execute("CREATE TABLE messages(id INTEGER PRIMARY KEY)")
                 conn.execute("INSERT INTO messages(id) VALUES (1)")
             fields = CandidateFields(name="A", school="浙大", mail_type="internship_application").normalized()
+            self.assertEqual(fields.is_985, "是")
+            self.assertEqual(fields.is_c9, "是")
             store.save_thread("key", "a@example.com", "subject", fields, screening_status="面试资格", interview_assigned=1)
             row = store.get_thread("key")
             self.assertEqual(row["screening_status"], "面试资格")
@@ -190,6 +212,47 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertTrue(preview.dry_run)
         self.assertTrue(apply.confirm)
         self.assertEqual(apply.days, 30)
+
+    def test_tag_records_cli_requires_explicit_mode(self) -> None:
+        preview = build_parser().parse_args(["tag-records", "--dry-run"])
+        apply = build_parser().parse_args(["tag-records", "--confirm", "--days", "30"])
+
+        self.assertTrue(preview.dry_run)
+        self.assertTrue(apply.confirm)
+        self.assertEqual(apply.days, 30)
+
+    def test_base_payload_contains_school_rank_and_reply_tags(self) -> None:
+        sync = BaseSync.__new__(BaseSync)
+        sync.find_existing = lambda *_args, **_kwargs: None
+        captured = {}
+
+        def call(command, body):
+            captured["command"] = command
+            captured["body"] = body
+            return {"data": {"record_id_list": ["rec-1"]}}
+
+        sync._call = call
+        fields = CandidateFields(
+            name="A",
+            school="浙江大学",
+            mail_type="candidate",
+            academic_display="GPA 3.9 · 专业排名第 4/120（Top 3.33%）",
+        ).normalized()
+
+        sync.upsert(
+            record_id=None,
+            fields=fields,
+            latest_time="2026-08-29 10:00",
+            document_url="https://example/doc",
+            has_replied=True,
+        )
+
+        payload = captured["body"]["create_records"][0]
+        self.assertEqual(payload["院校"], "浙江大学")
+        self.assertEqual(payload["排名"], "第 4 / 120 · Top 3.33%")
+        self.assertEqual(payload["是否985"], ["是"])
+        self.assertEqual(payload["是否C9"], ["是"])
+        self.assertTrue(payload["是否已回复"])
 
     def test_thread_window_filter(self) -> None:
         now = datetime(2026, 8, 28, tzinfo=timezone.utc)

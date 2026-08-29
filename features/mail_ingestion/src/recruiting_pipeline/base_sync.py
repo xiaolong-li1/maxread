@@ -43,16 +43,22 @@ class BaseSync:
         status: str = "未筛选",
         interview_assigned: bool = False,
         interview_result: str = "未开始",
+        has_replied: bool = False,
     ) -> BaseSyncResult:
         is_other = fields.mail_type == "other"
         payload = {
             "姓名": fields.name,
             "最新邮件时间": latest_time,
             "院校 / 就读信息": "—" if is_other else fields.school_study_display,
+            "院校": "—" if is_other else fields.school,
             "专业信息": "—" if is_other else fields.major,
             "邮件类型": [MAIL_TYPES.get(fields.mail_type, "其他")],
             "申请项目": [] if is_other else fields.projects,
             "学业表现": "—" if is_other else fields.academic_display,
+            "排名": fields.rank,
+            "是否985": [fields.is_985],
+            "是否C9": [fields.is_c9],
+            "是否已回复": bool(has_replied),
             "申请目的 / 科研摘要": fields.purpose_summary,
             "材料文档": document_url,
             "筛选状态": [status],

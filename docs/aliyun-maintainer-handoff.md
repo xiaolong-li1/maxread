@@ -147,6 +147,10 @@ can be found. Follow-ups merge into the existing thread; outgoing lab replies
 must not become new candidates. GPA/rank evidence is extracted from email and
 resume PDF, while human screening status always has precedence. Manual sends or
 test sends require the owner's permission; do not use a real chat as a dry run.
+Base also stores standalone `院校` and `排名` fields plus `是否985`、`是否C9`、
+`是否已回复`. AI extracts the school/evidence, official deterministic lists
+assign the institution tags, and outgoing thread direction determines reply
+state. Use `tag-records --confirm` for an audited full refresh.
 
 ### C. Daily duty reminder
 

@@ -88,9 +88,12 @@ class DocsSync:
             "姓名": fields.name,
             "邮件类型": "其他" if fields.mail_type == "other" else "候选人来信",
             "院校 / 就读信息": fields.school_study_display,
+            "院校": fields.school,
             "专业信息": fields.major,
             "申请项目": "—" if fields.mail_type == "other" else "、".join(fields.projects),
             "学业表现": fields.academic_display,
+            "排名": fields.rank,
+            "院校标签": f"985={fields.is_985}；C9={fields.is_c9}",
             "最新邮件时间": latest_time or "unknown",
         }
         changed = False

@@ -357,6 +357,7 @@ class RecruitingRunner:
             status=status,
             interview_assigned=assigned,
             interview_result=previous_result,
+            has_replied=bool(envelope.outgoing),
         )
         self.store.save_thread(
             thread.thread_key,
@@ -484,9 +485,12 @@ class RecruitingRunner:
             f"- 姓名：{fields.name}",
             f"- 邮件类型：{'其他' if fields.mail_type == 'other' else '候选人来信'}",
             f"- 院校 / 就读信息：{fields.school_study_display}",
+            f"- 院校：{fields.school}",
             f"- 专业信息：{fields.major}",
             f"- 申请项目：{'、'.join(fields.projects)}",
             f"- 学业表现：{fields.academic_display}",
+            f"- 排名：{fields.rank}",
+            f"- 院校标签：985={fields.is_985}；C9={fields.is_c9}",
             "- 申请目的 / 科研摘要：",
             fields.purpose_summary,
             f"- 最新邮件时间：{envelope.latest_time or 'unknown'}",

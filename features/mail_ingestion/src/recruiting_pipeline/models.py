@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .institution_tags import classify_institution, extract_rank_feature
+
 
 @dataclass(frozen=True)
 class StoredMessage:
@@ -48,6 +50,9 @@ class CandidateFields:
     mail_type: str = "other"
     projects: list[str] = field(default_factory=lambda: ["unknown"])
     academic_display: str = "unknown"
+    rank: str = "未提供"
+    is_985: str = "未知"
+    is_c9: str = "未知"
     purpose_summary: str = "unknown"
     rejection_recommendation: str = "none"
 
@@ -78,6 +83,10 @@ class CandidateFields:
             # infer from the extracted research background instead.
             explicit = [item for item in self.projects if item != "unknown"]
             self.projects = explicit or [_infer_project(self.purpose_summary, self.major, self.projects)]
+        tags = classify_institution(self.school, applicable=self.mail_type == "candidate")
+        self.is_985 = tags.is_985
+        self.is_c9 = tags.is_c9
+        self.rank = extract_rank_feature(self.academic_display, applicable=self.mail_type == "candidate")
         return self
 
     @property
