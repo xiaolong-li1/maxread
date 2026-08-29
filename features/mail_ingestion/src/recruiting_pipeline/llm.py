@@ -6,7 +6,6 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .academic import normalize_academic_display
 from .models import CandidateFields, ThreadEnvelope
 from .retry import is_transient_error, retry_call
 
@@ -20,10 +19,10 @@ SYSTEM_PROMPT = """
 2. projects 必须从 MLSys、Agentic Infrastructure、Kernel Efficiency、World Model 中选择；不要因为邮件没有明确写方向就输出 unknown，而要根据科研经历、论文、工程栈和申请目的选择最相近的一个或多个方向。
    如果邮件主体是明确的 poster 格式实习生申请（如“实习生-院校-年级-姓名-方向”），即使方向名称是 3D、RL、System Efficiency 等别名，也要映射到最相近的四个方向；普通套磁也要根据背景选择最相近方向。
 3. 专业、院校、年级和年份只保留原文明确的信息。school 尽量输出院校官方全称（例如“浙大”规范为“浙江大学”），多个就读院校用 `｜` 分隔；无法确认时写 unknown。2027 只有在原文明确表示毕业时才写 expected_grad_year=2027；明确入学时才写 entry_year=2027；写“大二”等就写 current_grade=大二；裸年份不要猜。
-4. academic_display 按原文证据依次保留“均分/百分制成绩 · GPA · 绝对排名/Top 百分位”；存在多学期 GPA 时都保留。没有排名证据写“排名未提供”，不要把“绩点 4”误解为“排名第 4”。不要把 CET、课程分数当作总成绩，也不要根据 GPA 猜排名。
+4. academic_display 按原文证据保留均分/百分制成绩与 GPA，不要在这里混写竞赛比例。rank 单独输出原文明确的绝对排名或 Top 百分位；rank_evidence 必须复制最短的原文证据片段。没有明确排名证据时 rank 和 rank_evidence 都写“未提供”。严禁把均分、GPA、课程分数、奖项比例或分母为 100 的成绩写成排名。例如“平均学分绩排名：94.73/100（专业前3%）”应输出 academic_display="均分 94.73/100"、rank="Top 3%"，不得输出“73/100”或“第84名”；“均分93.38/100，GPA 4.02/4.3，排名未提供”必须输出 rank="未提供"。
 5. purpose_summary：候选邮件最多 4 行，每行一个标签，按需输出：`申请目的：...`、`科研经历：...`、`论文/发表：...`、`奖项/竞赛：...`。没有对应内容就省略该行；每行短而具体，不要把多项内容挤成一行。论文必须写明论文名（如果材料中有）和发表/投稿会议；奖学金、竞赛按类别合并。other 邮件只写一句内容描述，候选字段全部 unknown。
 6. rejection_recommendation 只能是 `未通过` 或 `none`。必须阅读完整邮件往返和附件后判断；只有确认实验室/联系人明确拒绝、不再推进或名额原因不接收时才写 `未通过`。候选人转述、引用旧邮件、表达“没关系/以后有机会”不等于新的拒绝；不确定时写 `none`。这是模型判断，不要只靠关键词匹配。
-7. 只输出 JSON，不要 Markdown、解释、证据、置信度或额外字段。JSON 必须包含 rejection_recommendation 字段。
+7. 只输出 JSON，不要 Markdown、解释、置信度或额外字段。JSON 必须包含 rank、rank_evidence、rejection_recommendation 字段。
 """.strip()
 
 
@@ -64,14 +63,7 @@ class RecruitingLLM:
                 retryable=is_transient_error,
             )
             payload = json.loads(_strip_json_fence(repaired))
-        fields = _fields_from_json(payload, previous)
-        if fields.mail_type == "candidate":
-            material = "\n".join(
-                [message.body_text for message in envelope.messages]
-                + [text for text in pdf_texts.values() if text]
-            )
-            fields.academic_display = normalize_academic_display(fields.academic_display, material)
-        return fields
+        return _fields_from_json(payload, previous)
 
     def _build_prompt(self, envelope: ThreadEnvelope, pdf_texts: dict[str, str], previous: CandidateFields | None) -> str:
         previous_json = json.dumps(previous.__dict__ if previous else {}, ensure_ascii=False)
@@ -161,6 +153,8 @@ def _fields_from_json(payload: dict[str, Any], previous: CandidateFields | None)
         mail_type=mail_type,
         projects=list(projects_value or old.projects),
         academic_display=str(payload.get("academic_display") or old.academic_display),
+        rank=str(payload.get("rank") or old.rank),
+        rank_evidence=str(payload.get("rank_evidence") or old.rank_evidence),
         purpose_summary=str(payload.get("purpose_summary") or old.purpose_summary),
         rejection_recommendation=str(payload.get("rejection_recommendation") or old.rejection_recommendation),
     )

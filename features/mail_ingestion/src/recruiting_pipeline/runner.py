@@ -10,7 +10,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .academic import normalize_academic_display
 from .base_sync import BaseSync
 from .config import PipelineSettings
 from .docs_sync import DocsSync
@@ -246,11 +245,6 @@ class RecruitingRunner:
             fields = previous_fields
         else:
             fields = CandidateFields(name=envelope.candidate_address, purpose_summary=envelope.subject).normalized()
-        if fields.mail_type == "candidate":
-            fields.academic_display = normalize_academic_display(
-                fields.academic_display,
-                self._academic_material(envelope, pdf_texts),
-            )
         fields.source_accounts = sorted({_source_account_label(account) for account in envelope.source_accounts})
         folder_status = next((FOLDER_STATUS[name] for name in ("面试通过", "面试寄") if name in envelope.folders), None)
         assigned = self.settings.mark_interview_assigned if "面试寄" in envelope.folders else None
@@ -269,7 +263,7 @@ class RecruitingRunner:
         )
 
     def repair_academics(self, *, apply: bool = False, since_days: int | None = None) -> dict[str, Any]:
-        """Audit and optionally repair academic summaries without another LLM call."""
+        """Re-extract academic fields with AI; never infer ranks from number patterns."""
 
         envelopes, _changed = self._load_threads()
         changes: list[dict[str, str]] = []
@@ -283,17 +277,80 @@ class RecruitingRunner:
             if row is None or fields is None or fields.mail_type != "candidate":
                 continue
             try:
+                if self.llm is None:
+                    raise RuntimeError("AI is required for academic repair")
                 pdf_texts = self._pdf_texts(envelope)
-                repaired = normalize_academic_display(
-                    fields.academic_display,
-                    self._academic_material(envelope, pdf_texts),
-                )
-                if repaired == fields.academic_display:
+                refreshed = self.llm.extract(envelope, pdf_texts, previous=fields)
+                refreshed.source_accounts = sorted({_source_account_label(account) for account in envelope.source_accounts})
+                before = {
+                    "school": fields.school,
+                    "academic_display": fields.academic_display,
+                    "rank": fields.rank,
+                    "rank_evidence": fields.rank_evidence,
+                }
+                after = {
+                    "school": refreshed.school,
+                    "academic_display": refreshed.academic_display,
+                    "rank": refreshed.rank,
+                    "rank_evidence": refreshed.rank_evidence,
+                }
+                if before == after:
                     continue
-                changes.append({"thread_key": key, "name": fields.name, "before": fields.academic_display, "after": repaired})
+                changes.append({"thread_key": key, "name": fields.name, "before": before, "after": after})
                 if not apply:
                     continue
-                fields.academic_display = repaired
+                self._sync_thread(
+                    ProcessedThread(
+                        thread_key=key,
+                        candidate_address=str(row["candidate_address"] or envelope.candidate_address),
+                        latest_time=str(row["latest_time"] or _base_time(envelope.latest_time) or ""),
+                        fields=refreshed,
+                        folder_status=None,
+                        interview_assigned=None,
+                        document_id=str(row["doc_id"] or "") or None,
+                        document_url=str(row["doc_url"] or "") or None,
+                        changed=True,
+                    )
+                )
+            except Exception as exc:
+                failures.append({"thread_key": key, "name": fields.name, "error": str(exc)[:500]})
+        return {
+            "ok": not failures,
+            "dry_run": not apply,
+            "changed": len(changes),
+            "failed": len(failures),
+            "changes": changes,
+            "failures": failures,
+        }
+
+    def sync_provenance(self, *, apply: bool = False, since_days: int | None = None) -> dict[str, Any]:
+        envelopes, _changed = self._load_threads()
+        changes: list[dict[str, Any]] = []
+        failures: list[dict[str, str]] = []
+        for key, envelope in sorted(envelopes.items(), key=lambda item: item[1].latest_time or "", reverse=True):
+            if since_days is not None and not _within_days(envelope.latest_time, since_days):
+                continue
+            row = self.store.get_thread(key)
+            fields = self.store.fields_from_row(row)
+            if row is None or fields is None:
+                continue
+            sources = sorted({_source_account_label(account) for account in envelope.source_accounts})
+            replied = bool(envelope.outgoing)
+            previous_replied = bool(str(row["last_outgoing_time"] or ""))
+            if fields.source_accounts == sources and previous_replied == replied:
+                continue
+            changes.append({
+                "thread_key": key,
+                "name": fields.name,
+                "before_sources": fields.source_accounts,
+                "after_sources": sources,
+                "before_replied": previous_replied,
+                "after_replied": replied,
+            })
+            if not apply:
+                continue
+            fields.source_accounts = sources
+            try:
                 self._sync_thread(
                     ProcessedThread(
                         thread_key=key,
@@ -317,13 +374,6 @@ class RecruitingRunner:
             "changes": changes,
             "failures": failures,
         }
-
-    @staticmethod
-    def _academic_material(envelope: ThreadEnvelope, pdf_texts: dict[str, str]) -> str:
-        return "\n".join(
-            [message.body_text for message in envelope.messages]
-            + [text for text in pdf_texts.values() if text]
-        )
 
     def _sync_thread(self, thread: ProcessedThread) -> dict[str, bool]:
         envelope = self._envelope_cache.get(thread.thread_key) or self._load_envelope(thread.thread_key)
@@ -539,6 +589,7 @@ class RecruitingRunner:
             f"- 申请项目：{'、'.join(fields.projects)}",
             f"- 学业表现：{fields.academic_display}",
             f"- 排名：{fields.rank}",
+            f"- 排名依据：{fields.rank_evidence}",
             f"- 院校标签：985={fields.is_985}；C9={fields.is_c9}",
             f"- 来源邮箱：{'、'.join(fields.source_accounts)}",
             "- 申请目的 / 科研摘要：",

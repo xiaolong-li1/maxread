@@ -69,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
     tags.add_argument("--max-threads", type=int, default=None, help="bound reprocessing to the newest N threads")
     tags.add_argument("--dry-run", action="store_true", help="show how many durable rows would be processed")
     tags.add_argument("--confirm", action="store_true", help="required before AI calls and Base updates")
+    provenance = sub.add_parser("sync-provenance", help="recompute source mailboxes and reply status without AI")
+    provenance.add_argument("--days", type=int, default=None)
+    provenance.add_argument("--dry-run", action="store_true")
+    provenance.add_argument("--confirm", action="store_true")
     return parser
 
 
@@ -144,7 +148,6 @@ def main(argv: list[str] | None = None) -> int:
         if not args.dry_run and not args.confirm:
             raise SystemExit("repair-academics requires --dry-run or --confirm")
         runner = RecruitingRunner(settings)
-        runner.llm = None
         result = runner.repair_academics(apply=bool(args.confirm), since_days=args.days)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
@@ -169,8 +172,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         result["tagging"] = {
             "ai_refreshed": True,
-            "base_fields": ["院校", "排名", "是否985", "是否C9", "是否已回复"],
+            "base_fields": ["院校", "排名", "排名依据", "是否985", "是否C9", "是否已回复", "来源邮箱"],
         }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "sync-provenance":
+        if not args.dry_run and not args.confirm:
+            raise SystemExit("sync-provenance requires --dry-run or --confirm")
+        runner = RecruitingRunner(settings, no_docs=True)
+        runner.llm = None
+        result = runner.sync_provenance(apply=bool(args.confirm), since_days=args.days)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 

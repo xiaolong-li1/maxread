@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .institution_tags import classify_institution, extract_rank_feature
+from .institution_tags import classify_institution
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,7 @@ class CandidateFields:
     projects: list[str] = field(default_factory=lambda: ["unknown"])
     academic_display: str = "unknown"
     rank: str = "未提供"
+    rank_evidence: str = "未提供"
     is_985: str = "未知"
     is_c9: str = "未知"
     source_accounts: list[str] = field(default_factory=list)
@@ -89,7 +90,16 @@ class CandidateFields:
         tags = classify_institution(self.school, applicable=self.mail_type == "candidate")
         self.is_985 = tags.is_985
         self.is_c9 = tags.is_c9
-        self.rank = extract_rank_feature(self.academic_display, applicable=self.mail_type == "candidate")
+        if self.mail_type == "candidate":
+            self.rank = (self.rank or "未提供").strip()
+            self.rank_evidence = (self.rank_evidence or "未提供").strip()
+            if self.rank.casefold() in {"", "unknown", "none", "n/a", "—"}:
+                self.rank = "未提供"
+            if self.rank_evidence.casefold() in {"", "unknown", "none", "n/a", "—"}:
+                self.rank_evidence = "未提供"
+        else:
+            self.rank = "不适用"
+            self.rank_evidence = "不适用"
         normalized_sources: list[str] = []
         for value in self.source_accounts:
             raw = str(value).strip()

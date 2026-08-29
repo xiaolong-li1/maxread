@@ -93,6 +93,7 @@ class DocsSync:
             "申请项目": "—" if fields.mail_type == "other" else "、".join(fields.projects),
             "学业表现": fields.academic_display,
             "排名": fields.rank,
+            "排名依据": fields.rank_evidence,
             "院校标签": f"985={fields.is_985}；C9={fields.is_c9}",
             "来源邮箱": "、".join(fields.source_accounts),
             "最新邮件时间": latest_time or "unknown",

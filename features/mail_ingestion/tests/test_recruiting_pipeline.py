@@ -10,14 +10,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mail_collector.parser import parse_message
-from recruiting_pipeline.academic import normalize_academic_display
 from recruiting_pipeline.config import PipelineSettings
 from recruiting_pipeline.cli import build_parser
 from recruiting_pipeline.base_sync import BaseSync
 from recruiting_pipeline.models import ProcessedThread, StoredMessage, ThreadEnvelope
 from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _other_fields, _within_days
 from recruiting_pipeline.llm import _fields_from_json, _strip_json_fence
-from recruiting_pipeline.institution_tags import C9, PROJECT_985, classify_institution, extract_rank_feature
+from recruiting_pipeline.institution_tags import C9, PROJECT_985, classify_institution
 from recruiting_pipeline.models import CandidateFields
 from recruiting_pipeline.store import PipelineStore
 from recruiting_pipeline.threading import HeaderInfo, build_envelope, candidate_address, normalize_subject
@@ -59,79 +58,29 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertEqual(classify_institution("unknown").is_985, "未知")
         self.assertEqual(classify_institution("—", applicable=False).is_985, "不适用")
 
-    def test_rank_feature_is_separate_and_filterable(self) -> None:
-        self.assertEqual(extract_rank_feature("GPA 3.8 · 专业排名第 4 名（总人数未提供）"), "第 4 名")
-        self.assertEqual(extract_rank_feature("绩点排名第 2/55（Top 3%）"), "第 2 / 55 · Top 3%")
-        self.assertEqual(extract_rank_feature("GPA 4.0 · 排名未提供"), "未提供")
+    def test_ai_rank_fields_are_preserved_without_numeric_reinterpretation(self) -> None:
+        fields = _fields_from_json({
+            "name": "张佳怡",
+            "mail_type": "candidate",
+            "academic_display": "均分 94.73/100",
+            "rank": "Top 3%",
+            "rank_evidence": "平均学分绩排名：94.73/100（专业前3%）",
+        }, None)
 
-    def test_academic_display_preserves_term_gpas_without_inventing_rank(self) -> None:
-        material = "大一上均分88，绩点3.99；大一下均分94，绩点4；大一学年均分为91。"
+        self.assertEqual(fields.academic_display, "均分 94.73/100")
+        self.assertEqual(fields.rank, "Top 3%")
+        self.assertNotIn("84", fields.rank)
 
-        display = normalize_academic_display("91/100 · unknown", material)
+    def test_ai_can_explicitly_report_rank_missing(self) -> None:
+        fields = _fields_from_json({
+            "name": "李奕博",
+            "mail_type": "candidate",
+            "academic_display": "均分 93.38/100 · GPA 4.02/4.3",
+            "rank": "未提供",
+            "rank_evidence": "未提供",
+        }, None)
 
-        self.assertEqual(display, "均分 91/100 · GPA 3.99（大一上）、4.00（大一下） · 排名未提供")
-
-    def test_academic_display_preserves_gpa_and_converted_score(self) -> None:
-        material = "GPA：4.43 / 5.00（89.43 / 100）"
-
-        display = normalize_academic_display("4.43/5.00 · unknown", material)
-
-        self.assertEqual(display, "百分制 89.43/100 · GPA 4.43/5.00 · 排名未提供")
-
-    def test_academic_display_keeps_explicit_absolute_rank_without_total(self) -> None:
-        material = "学年均分92，GPA 3.8/4.0，专业排名第4。"
-
-        display = normalize_academic_display("92/100 · Top unknown", material)
-
-        self.assertEqual(display, "均分 92/100 · GPA 3.80/4.00 · 专业排名第 4 名（总人数未提供）")
-
-    def test_academic_display_treats_weighted_100_point_gpa_as_score(self) -> None:
-        material = "绩点：88.35，排名 2/55 (3%)；综测排名 2/55 (3%)"
-
-        display = normalize_academic_display("88.35/100 · Top 3%", material)
-
-        self.assertEqual(display, "均分 88.35/100 · 绩点排名第 2/55（Top 3%）、综测排名第 2/55（Top 3%）")
-
-    def test_academic_display_treats_non_100_fraction_as_rank(self) -> None:
-        display = normalize_academic_display("unknown · 23/122", "")
-
-        self.assertEqual(display, "成绩未提供 · 排名第 23/122")
-
-    def test_academic_display_uses_percent_next_to_rank_not_award_percent(self) -> None:
-        material = "竞赛进入前1%。专业排名：5/130（3.85%）。"
-
-        display = normalize_academic_display("3.82/4.0 · Top 3.85%", material)
-
-        self.assertEqual(display, "GPA 3.82/4.00 · 专业排名第 5/130（Top 3.85%）")
-
-    def test_academic_display_prefers_model_aggregate_gpa_over_semester_values(self) -> None:
-        material = "GPA 4.66；GPA 4.69；GPA 4.67；当前 GPA：4.723/5.000"
-
-        display = normalize_academic_display("4.723/5.000 · Top 2%", material)
-
-        self.assertEqual(display, "GPA 4.723/5.00 · Top 2%")
-
-    def test_academic_display_reads_decimal_percent_rank_as_top_percent(self) -> None:
-        material = "硕士 GPA: 91.95 排名: 3.57%\n本科 GPA: 90.24 排名: 8.97%"
-
-        display = normalize_academic_display("91.95/100 · Top 3.57%", material)
-
-        self.assertEqual(display, "均分 91.95/100 · Top 3.57%")
-
-    def test_academic_display_does_not_take_course_score_as_gpa_conversion(self) -> None:
-        material = "B.S., GPA: 3.5/5.0\nSelected Coursework: English (95/100)"
-
-        display = normalize_academic_display("3.5/5.0 · Top unknown", material)
-
-        self.assertEqual(display, "GPA 3.50/5.00 · 排名未提供")
-
-    def test_academic_display_is_idempotent_with_chinese_parentheses_and_gpa_rank(self) -> None:
-        material = "大一上均分88，绩点3.99；大一下均分94，绩点4；大一学年均分为91。绩点排名 2/55 (3%)"
-        once = normalize_academic_display("91/100 · unknown", material)
-        twice = normalize_academic_display(once, material)
-
-        self.assertEqual(twice, once)
-        self.assertNotIn("GPA排名", twice)
+        self.assertEqual(fields.rank, "未提供")
 
     def test_subject_normalization_merges_replies(self) -> None:
         self.assertEqual(normalize_subject("Re: 回复： 实习生-浙大-大二"), "实习生-浙大-大二")
@@ -242,6 +191,14 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertTrue(apply.confirm)
         self.assertEqual(apply.days, 30)
 
+    def test_sync_provenance_cli_requires_explicit_mode(self) -> None:
+        preview = build_parser().parse_args(["sync-provenance", "--dry-run", "--days", "183"])
+        apply = build_parser().parse_args(["sync-provenance", "--confirm"])
+
+        self.assertTrue(preview.dry_run)
+        self.assertTrue(apply.confirm)
+        self.assertEqual(preview.days, 183)
+
     def test_base_payload_contains_school_rank_and_reply_tags(self) -> None:
         sync = BaseSync.__new__(BaseSync)
         sync.find_existing = lambda *_args, **_kwargs: None
@@ -257,7 +214,9 @@ class RecruitingPipelineTest(unittest.TestCase):
             name="A",
             school="浙江大学",
             mail_type="candidate",
-            academic_display="GPA 3.9 · 专业排名第 4/120（Top 3.33%）",
+            academic_display="GPA 3.9/4.0",
+            rank="第 4 / 120 · Top 3.33%",
+            rank_evidence="专业排名第 4/120（Top 3.33%）",
             source_accounts=["ZIP Lab", "Bohan"],
         ).normalized()
 
@@ -272,6 +231,7 @@ class RecruitingPipelineTest(unittest.TestCase):
         payload = captured["body"]["create_records"][0]
         self.assertEqual(payload["院校"], "浙江大学")
         self.assertEqual(payload["排名"], "第 4 / 120 · Top 3.33%")
+        self.assertEqual(payload["排名依据"], "专业排名第 4/120（Top 3.33%）")
         self.assertEqual(payload["是否985"], ["是"])
         self.assertEqual(payload["是否C9"], ["是"])
         self.assertTrue(payload["是否已回复"])

@@ -58,6 +58,7 @@ class BaseSync:
             "申请项目": [] if is_other else fields.projects,
             "学业表现": "—" if is_other else fields.academic_display,
             "排名": fields.rank,
+            "排名依据": fields.rank_evidence,
             "是否985": [fields.is_985],
             "是否C9": [fields.is_c9],
             "是否已回复": bool(has_replied),

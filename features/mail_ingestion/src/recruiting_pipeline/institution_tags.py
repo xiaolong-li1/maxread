@@ -98,24 +98,6 @@ def classify_institution(school: str, *, applicable: bool = True) -> Institution
     )
 
 
-def extract_rank_feature(academic_display: str, *, applicable: bool = True) -> str:
-    if not applicable:
-        return "不适用"
-    text = unicodedata.normalize("NFKC", str(academic_display or "")).strip()
-    if not text or text.casefold() in _UNKNOWN or "排名未提供" in text:
-        return "未提供"
-    values: list[str] = []
-    for current, total in re.findall(r"(?:排名\s*)?(?:第\s*)?(\d+)\s*(?:/|／|名?\s*(?:共|of))\s*(\d+)", text, flags=re.I):
-        values.append(f"第 {int(current)} / {int(total)}")
-    for percent in re.findall(r"(?:Top|前)\s*(\d+(?:\.\d+)?)\s*%", text, flags=re.I):
-        values.append(f"Top {percent}%")
-    for current in re.findall(r"(?:专业)?排名\s*第?\s*(\d+)\s*名?", text):
-        marker = f"第 {int(current)} 名"
-        if not any(value.startswith(f"第 {int(current)} /") for value in values):
-            values.append(marker)
-    return " · ".join(dict.fromkeys(values)) or "未提供"
-
-
 def _clean_part(value: str) -> str:
     text = re.sub(r"^(?:本科|硕士|博士|就读于|现就读于|毕业于)\s*", "", value.strip(), flags=re.I)
     return re.sub(r"\s+", " ", text).strip(" .")
