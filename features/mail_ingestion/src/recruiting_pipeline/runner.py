@@ -128,7 +128,7 @@ class RecruitingRunner:
                 "--limit",
                 str(self.settings.scan_limit),
             ]
-            for folder in ("arXiv", "Drafts", "Outbox", "Junk", "Deleted", "Trash", "Notes"):
+            for folder in ("arXiv", "Drafts", "Outbox", "Junk", "Junk E-mail", "Virus Items", "Deleted", "Trash", "Notes"):
                 command.extend(("--exclude-folder", folder))
             completed = subprocess.run(command, cwd=self.settings.collector_root, capture_output=True, text=True, timeout=600)
             if completed.returncode != 0:

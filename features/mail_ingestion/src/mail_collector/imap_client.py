@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import imaplib
 import re
+import re
 import ssl
 import base64
 from datetime import UTC, datetime, timedelta
@@ -125,11 +126,18 @@ class ImapClient:
                 continue
             if b"\\Noselect" in item.upper():
                 continue
-            raw_name = item.rsplit(b" ", 1)[-1].strip().strip(b'"')
-            decoded = decode_modified_utf7(raw_name.decode("ascii", errors="replace"))
+            decoded = _folder_name_from_list_row(item)
             if decoded:
                 folders.append(decoded)
         return list(dict.fromkeys(folders))
+
+
+def _folder_name_from_list_row(item: bytes) -> str:
+    match = re.match(rb"\([^)]*\)\s+(?:\"[^\"]*\"|NIL)\s+(.+)$", item.strip())
+    raw_name = (match.group(1) if match else item.rsplit(b" ", 1)[-1]).strip()
+    if len(raw_name) >= 2 and raw_name[:1] == raw_name[-1:] == b'"':
+        raw_name = raw_name[1:-1]
+    return decode_modified_utf7(raw_name.decode("ascii", errors="replace"))
 
     def search_uids(self, last_uid: int, limit: int) -> list[int]:
         assert self.client is not None
