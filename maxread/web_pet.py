@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .db import Store
 from .openai_client import OpenAIClient
-from .project_metadata import PROJECT_CATEGORIES, auto_project_category, load_generated_project_summary
+from .project_metadata import PROJECT_CATEGORIES, auto_project_category, load_generated_project_context, load_generated_project_summary
 
 
 PROGRESS_STATES = {
@@ -335,6 +335,7 @@ def progress_payload(settings, store: Store, identity) -> dict:
             store.set_paper_project_summary(item["source_id"], generated_summary)
     preferences = store.web_project_preferences(identity)
     visible = []
+    auto_assignments = {}
     for item in payload:
         preference = preferences.get(item["source_id"], {})
         if preference.get("deleted_at"):
@@ -342,14 +343,25 @@ def progress_payload(settings, store: Store, identity) -> dict:
         stored_category = str(preference.get("category") or "").strip()
         stored_source = str(preference.get("category_source") or "").strip()
         item["favorite"] = bool(preference.get("favorite"))
-        item["category"] = stored_category or auto_project_category(
-            item.get("title", ""),
-            item.get("summary", ""),
-        )
-        item["category_source"] = (
-            stored_source if stored_category and stored_source else "manual" if stored_category else "auto"
-        )
+        if item.get("status") != "done":
+            item["category"] = "进行中"
+            item["category_source"] = "status"
+        elif stored_category:
+            item["category"] = stored_category
+            item["category_source"] = stored_source or "manual"
+        else:
+            context = load_generated_project_context(
+                Path(getattr(settings, "workdir", ".")),
+                item["source_id"],
+                fallback=item.get("summary", ""),
+            )
+            category = auto_project_category(item.get("title", ""), context or item.get("summary", ""))
+            item["category"] = category
+            item["category_source"] = "ai"
+            auto_assignments[item["source_id"]] = category
         visible.append(item)
+    if auto_assignments and str(identity.get("feishu_open_id") or "").strip():
+        store.set_web_project_auto_categories(identity, auto_assignments)
     payload = visible
     payload.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     payload.sort(key=lambda item: 0 if item["status"] == "running" else 1 if item["status"] == "queued" else 2)
@@ -360,13 +372,14 @@ def progress_payload(settings, store: Store, identity) -> dict:
         "active": active,
         "recent": payload,
         "service": store.get_service_status(),
-        "categories": list(PROJECT_CATEGORIES),
+        "categories": ["进行中", *PROJECT_CATEGORIES],
     }
 
 
 def button_guide_answer() -> str:
     return (
         "这个项目台的按钮这样用：一键整理会对你发过的论文统一聚类并归类，且保留人工分类；"
+        "新任务固定留在进行中，完成后我会参考标题、TL;DR 和正文开头把它搬到主题分类；"
         "分类标题可以折叠或展开类内项目；搜索框按标题或 arXiv ID 查找；分类下拉框可手动修正；"
         "星标用于收藏；重试从失败检查点继续；垃圾桶只从你的项目台移除，不会删除飞书文档。"
     )

@@ -54,6 +54,45 @@ def extract_project_summary(markdown: str, fallback: str = "") -> str:
     return one_sentence_summary(fallback)
 
 
+def extract_project_context(markdown: str, fallback: str = "", limit: int = 1200) -> str:
+    """Collect high-level opening evidence for project classification."""
+    text = str(markdown or "")
+    evidence = []
+    heading = re.search(r"(?m)^#\s+(.+?)\s*$", text)
+    if heading:
+        title = re.sub(r"^\[[^]]+\]\s*", "", heading.group(1)).strip()
+        if title:
+            evidence.append(title)
+    tldr = re.search(
+        r"(?ms)^\*\*TL;DR\*\*\s*[：:]\s*(.+?)(?:\n\s*\n|\n#{1,6}\s|\Z)",
+        text,
+    )
+    if tldr:
+        evidence.append(re.sub(r"\s+", " ", tldr.group(1)).strip())
+    opening = re.search(
+        r"(?ms)^##\s+1(?:[.、]|\s).*?\n\s*\n(.+?)(?=\n\s*\n|^#{2,6}\s|\Z)",
+        text,
+    )
+    if opening:
+        paragraph = re.sub(r"\[MaxRead(?:Figure|Table):[^]]+\]", " ", opening.group(1))
+        paragraph = re.sub(r"<latex>.*?</latex>|\|.*?\|", " ", paragraph, flags=re.S)
+        paragraph = re.sub(r"[*_`#>]", "", paragraph)
+        paragraph = re.sub(r"\s+", " ", paragraph).strip()
+        if paragraph:
+            evidence.append(paragraph)
+    fallback_text = one_sentence_summary(fallback, limit=400)
+    if fallback_text:
+        evidence.append(fallback_text)
+    output = []
+    seen = set()
+    for item in evidence:
+        clean = str(item or "").strip()
+        if clean and clean not in seen:
+            output.append(clean)
+            seen.add(clean)
+    return "\n".join(output)[: max(200, int(limit))]
+
+
 def auto_project_category(title: str, summary: str = "") -> str:
     text = f"{title} {summary}".lower()
     scores = []
@@ -85,3 +124,27 @@ def load_generated_project_summary(workdir: Path, source_id: str) -> str:
         if summary:
             return summary
     return ""
+
+
+def load_generated_project_context(workdir: Path, source_id: str, fallback: str = "") -> str:
+    if not re.fullmatch(r"\d{4}\.\d{4,5}", str(source_id or "")):
+        return one_sentence_summary(fallback, limit=400)
+    root = Path(workdir) / "papers" / source_id / "pipeline_artifacts"
+    candidates = [root / "05-final.md"]
+    if root.is_dir():
+        candidates.extend(sorted(root.glob("05-quality-*.md"), reverse=True))
+        candidates.extend(sorted(root.glob("04-reviewed.md"), reverse=True))
+        candidates.extend(sorted(root.glob("02-polished.md"), reverse=True))
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            context = extract_project_context(
+                path.read_text(encoding="utf-8", errors="replace"),
+                fallback=fallback,
+            )
+        except OSError:
+            continue
+        if context:
+            return context
+    return one_sentence_summary(fallback, limit=400)

@@ -362,8 +362,15 @@ def test_project_favorite_and_manual_category_are_identity_scoped(tmp_path):
 
     update_web_project(store, identity, "2608.25927", "favorite", True)
     update_web_project(store, identity, "2608.25927", "category", "机器人")
+    active_project = progress_payload(settings, store, identity)["recent"][0]
+    store.conn.execute(
+        "update queue_jobs set status='done', workflow_state='completed', stage='done' where source_id=?",
+        ("2608.25927",),
+    )
+    store.conn.commit()
     project = progress_payload(settings, store, identity)["recent"][0]
 
+    assert active_project["category"] == "进行中"
     assert project["favorite"] is True
     assert project["category"] == "机器人"
     assert project["category_source"] == "manual"
@@ -387,6 +394,11 @@ def test_one_click_organizer_clusters_auto_projects_and_preserves_manual_categor
     identity = claim_binding_code(store, issue_binding_code(store, guest)["code"], "ou_feishu_user")
     store.upsert_paper("2608.25927", "done", title="Monocular 3D Object Detection with Point Clouds")
     store.upsert_paper("2608.27456", "done", title="LLM Inference with KV Cache Compression")
+    store.conn.execute(
+        "update queue_jobs set status='done', workflow_state='completed', stage='done' where source_id in (?, ?)",
+        ("2608.25927", "2608.27456"),
+    )
+    store.conn.commit()
     update_web_project(store, identity, "2608.25927", "category", "机器人")
 
     projects = progress_payload(settings, store, identity)["recent"]
@@ -398,6 +410,52 @@ def test_one_click_organizer_clusters_auto_projects_and_preserves_manual_categor
     assert organized["2608.25927"]["category_source"] == "manual"
     assert organized["2608.27456"]["category"] == "推理与系统"
     assert organized["2608.27456"]["category_source"] == "ai"
+    store.close()
+
+
+def test_new_project_stays_in_active_category_until_completion(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="", workdir=tmp_path / "work")
+    submit_web_papers(settings, store, guest, "2608.25927")
+    identity = claim_binding_code(store, issue_binding_code(store, guest)["code"], "ou_feishu_user")
+    store.upsert_paper("2608.25927", "queued", title="Diffusion Models for Video Generation")
+
+    project = progress_payload(settings, store, identity)["recent"][0]
+
+    assert project["category"] == "进行中"
+    assert project["category_source"] == "status"
+    assert progress_payload(settings, store, identity)["categories"][0] == "进行中"
+    store.close()
+
+
+def test_completed_project_uses_tldr_and_opening_context_for_category(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    workdir = tmp_path / "work"
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="", workdir=workdir)
+    queued = submit_web_papers(settings, store, guest, "2608.25927")["items"][0]
+    identity = claim_binding_code(store, issue_binding_code(store, guest)["code"], "ou_feishu_user")
+    store.upsert_paper("2608.25927", "done", title="A General Framework", project_summary="")
+    store.conn.execute(
+        "update queue_jobs set status='done', workflow_state='completed', stage='done', title=? where id=?",
+        ("A General Framework", queued["job_id"]),
+    )
+    store.conn.commit()
+    artifact = workdir / "papers" / "2608.25927" / "pipeline_artifacts" / "05-final.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        "# [2608.25927] 通用框架：可控视频扩散生成\n\n"
+        "**TL;DR**：本文用扩散模型生成长视频，并保持跨镜头一致性。\n\n"
+        "## 1. 这篇论文要解决什么问题\n\n现有视频生成方法难以维持长时一致性。\n",
+        encoding="utf-8",
+    )
+
+    project = progress_payload(settings, store, identity)["recent"][0]
+
+    assert project["category"] == "生成模型"
+    assert project["category_source"] == "ai"
+    assert store.web_project_preferences(identity)["2608.25927"]["category"] == "生成模型"
     store.close()
 
 
@@ -603,6 +661,9 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "这些按钮怎么用" in WEB_SUBMIT_HTML
     assert "智能整理" in WEB_SUBMIT_HTML
     assert ".category-list[hidden]" in WEB_SUBMIT_HTML
+    assert "完成后由 Max 自动归类" in WEB_SUBMIT_HTML
+    assert "animateProjectMoves" in WEB_SUBMIT_HTML
+    assert "归档中" in WEB_SUBMIT_HTML
     assert 'id="progress-panel"' not in WEB_SUBMIT_HTML
     assert 'class="project-progress"' in WEB_SUBMIT_HTML
     assert 'class="retry-button"' in WEB_SUBMIT_HTML

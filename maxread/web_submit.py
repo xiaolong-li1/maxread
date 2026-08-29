@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .db import Store
 from .openai_client import OpenAIClient
-from .project_metadata import PROJECT_CATEGORIES, auto_project_category
+from .project_metadata import PROJECT_CATEGORIES, auto_project_category, load_generated_project_context
 from .sources import extract_supported_inputs
 
 
@@ -256,13 +256,25 @@ def organize_web_projects(settings, store: Store, identity, projects: list[dict]
     candidates = [
         item for item in projects
         if str(item.get("source_id") or "").strip()
+        and str(item.get("status") or "") == "done"
         and str(item.get("category_source") or "auto") != "manual"
     ][:100]
     if not candidates:
         return {"ok": True, "updated": 0, "used_ai": False}
 
+    contexts = {
+        str(item["source_id"]): load_generated_project_context(
+            Path(getattr(settings, "workdir", ".")),
+            str(item["source_id"]),
+            fallback=str(item.get("summary") or ""),
+        )
+        for item in candidates
+    }
     assignments = {
-        str(item["source_id"]): auto_project_category(item.get("title", ""), item.get("summary", ""))
+        str(item["source_id"]): auto_project_category(
+            item.get("title", ""),
+            contexts.get(str(item["source_id"]), "") or item.get("summary", ""),
+        )
         for item in candidates
     }
     used_ai = False
@@ -272,7 +284,7 @@ def organize_web_projects(settings, store: Store, identity, projects: list[dict]
             {
                 "source_id": str(item["source_id"]),
                 "title": str(item.get("title") or "")[:300],
-                "summary": str(item.get("summary") or "")[:500],
+                "summary": str(contexts.get(str(item["source_id"])) or item.get("summary") or "")[:1200],
             }
             for item in candidates
         ]
