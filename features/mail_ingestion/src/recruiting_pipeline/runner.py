@@ -91,7 +91,8 @@ class RecruitingRunner:
                 selected = sorted((envelopes[key] for key in changed_keys if key in envelopes), key=lambda item: item.latest_time or "", reverse=True)[:max_threads]
                 changed_keys = {item.key for item in selected}
             stats.scanned_messages = sum(len(envelope.messages) for envelope in envelopes.values())
-            stats.new_threads = sum(1 for key in changed_keys if self.store.get_thread(key) is None)
+            known_threads = {str(row["thread_key"]) for row in self.store.list_threads()}
+            stats.new_threads = sum(1 for key in changed_keys if key not in known_threads)
             stats.updated_threads = len(changed_keys) - stats.new_threads
 
             for thread, envelope, preparation_error in self._extract_changed(envelopes, changed_keys):
@@ -142,6 +143,7 @@ class RecruitingRunner:
         grouped: dict[str, list[tuple[StoredMessage, Any]]] = {}
         changed: set[str] = set()
         message_id_to_key: dict[str, str] = {}
+        message_updates: list[tuple[int, str, str, str]] = []
         for message in messages:
             try:
                 headers = read_headers(message.raw_path)
@@ -161,17 +163,19 @@ class RecruitingRunner:
             if headers.message_id:
                 message_id_to_key[headers.message_id] = key
             direction = "outgoing" if headers.sender != candidate_address(headers, self._mailbox_addresses, message.body_text) else "incoming"
-            self.store.upsert_message(message.id, key, direction, message.mailbox)
+            message_updates.append((message.id, key, direction, message.mailbox))
             grouped.setdefault(key, []).append((message, headers))
             old = processing.get(message.id)
             if old is None or not old[1] or old[0] != key:
                 changed.add(key)
+        self.store.upsert_messages(message_updates)
+        thread_rows = {str(row["thread_key"]): row for row in self.store.list_threads()}
         # A backfill Base write can fail after durable mail/document state is
         # complete. The explicit pending marker retries only that repair;
         # unrelated historical rows with an intentionally absent mapping stay
         # dormant until a genuinely new message changes their thread.
         for key in grouped:
-            row = self.store.get_thread(key)
+            row = thread_rows.get(key)
             if (
                 row is not None
                 and not str(row["base_record_id"] or "")

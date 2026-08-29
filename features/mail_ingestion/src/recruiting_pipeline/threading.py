@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from email import policy
 from email.header import decode_header, make_header
-from email.parser import BytesParser
+from email.parser import BytesHeaderParser
 from email.utils import getaddresses
 from pathlib import Path
 from typing import Iterable
@@ -38,7 +38,13 @@ def _decode(value: str | None) -> str:
 
 
 def read_headers(raw_path: Path) -> HeaderInfo:
-    message = BytesParser(policy=policy.default).parsebytes(raw_path.read_bytes())
+    header_bytes = bytearray()
+    with raw_path.open("rb") as handle:
+        for line in handle:
+            header_bytes.extend(line)
+            if line in {b"\n", b"\r\n"} or len(header_bytes) >= 1024 * 1024:
+                break
+    message = BytesHeaderParser(policy=policy.default).parsebytes(bytes(header_bytes))
     addresses = getaddresses(message.get_all("From", []) or [])
     sender = addresses[0][1].strip().lower() if addresses else ""
     recipients = tuple(

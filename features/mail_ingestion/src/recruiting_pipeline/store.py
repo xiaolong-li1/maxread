@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import defaultdict
 from datetime import timedelta
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -124,6 +125,13 @@ class PipelineStore:
                 "SELECT id,source_uid,mailbox,subject,sender_name,sender_address,received_at,body_text,raw_path "
                 "FROM messages ORDER BY COALESCE(received_at,'') ASC, id ASC"
             ).fetchall()
+            attachment_rows = conn.execute(
+                "SELECT message_record_id,local_path FROM attachments "
+                "WHERE local_path IS NOT NULL ORDER BY message_record_id,id"
+            ).fetchall()
+            attachments_by_message: dict[int, list[Path]] = defaultdict(list)
+            for item in attachment_rows:
+                attachments_by_message[int(item["message_record_id"])].append(Path(str(item["local_path"])))
             result: list[StoredMessage] = []
             for row in rows:
                 source_uid = str(row["source_uid"])
@@ -140,14 +148,8 @@ class PipelineStore:
                     legacy = legacy_message_dir / "message.eml"
                     raw_path = relocated if relocated.exists() else legacy if legacy.exists() else raw_path
                 attachments = tuple(
-                    _relocated_attachment(
-                        _relocated_attachment(Path(str(item["local_path"])), message_dir),
-                        legacy_message_dir,
-                    )
-                    for item in conn.execute(
-                        "SELECT local_path FROM attachments WHERE message_record_id=? AND local_path IS NOT NULL ORDER BY id",
-                        (row["id"],),
-                    ).fetchall()
+                    _relocated_attachment(_relocated_attachment(path, message_dir), legacy_message_dir)
+                    for path in attachments_by_message.get(int(row["id"]), [])
                 )
                 result.append(
                     StoredMessage(
@@ -180,13 +182,19 @@ class PipelineStore:
             }
 
     def upsert_message(self, message_id: int, thread_key: str, direction: str, folder: str) -> None:
+        self.upsert_messages([(message_id, thread_key, direction, folder)])
+
+    def upsert_messages(self, rows: Iterable[tuple[int, str, str, str]]) -> None:
+        values = list(rows)
+        if not values:
+            return
         with self.connect() as conn:
-            conn.execute(
+            conn.executemany(
                 "INSERT INTO recruiting_messages(message_record_id,thread_key,direction,folder) VALUES (?,?,?,?) "
                 "ON CONFLICT(message_record_id) DO UPDATE SET "
                 "processed_at=CASE WHEN recruiting_messages.thread_key<>excluded.thread_key THEN NULL ELSE recruiting_messages.processed_at END,"
                 "thread_key=excluded.thread_key,direction=excluded.direction,folder=excluded.folder",
-                (message_id, thread_key, direction, folder),
+                values,
             )
 
     def mark_message_processed(self, message_id: int) -> None:

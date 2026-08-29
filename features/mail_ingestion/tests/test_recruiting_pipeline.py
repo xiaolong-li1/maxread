@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from mail_collector.parser import parse_message
 from recruiting_pipeline.config import PipelineSettings
@@ -21,11 +22,23 @@ from recruiting_pipeline.llm import _fields_from_json, _strip_json_fence
 from recruiting_pipeline.institution_tags import C9, PROJECT_985, classify_institution
 from recruiting_pipeline.models import CandidateFields
 from recruiting_pipeline.store import PipelineStore
-from recruiting_pipeline.threading import HeaderInfo, build_envelope, candidate_address, normalize_subject
+from recruiting_pipeline.threading import HeaderInfo, build_envelope, candidate_address, normalize_subject, read_headers
 from recruiting_pipeline.weekly_report import markdown_to_post, render_weekly_report
 
 
 class RecruitingPipelineTest(unittest.TestCase):
+    def test_read_headers_does_not_load_attachment_body(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "large.eml"
+            path.write_bytes(
+                b"From: candidate@example.com\r\nTo: lab@example.com\r\nMessage-ID: <m@example.com>\r\n\r\n"
+                + b"x" * (2 * 1024 * 1024)
+            )
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("full EML read")):
+                headers = read_headers(path)
+
+        self.assertEqual(headers.message_id, "<m@example.com>")
+
     def test_thread_latest_time_handles_mixed_timezone_dates(self) -> None:
         first = StoredMessage(1, "1", "INBOX", "s", "", "a@example.com", "2026-08-29T10:00:00", "", Path("/tmp/1"))
         second = StoredMessage(2, "2", "INBOX", "s", "", "a@example.com", "2026-08-29T19:00:00+08:00", "", Path("/tmp/2"))
@@ -134,6 +147,19 @@ class RecruitingPipelineTest(unittest.TestCase):
             row = store.get_thread("key")
             self.assertEqual(row["screening_status"], "面试资格")
             self.assertEqual(row["interview_assigned"], 1)
+
+    def test_pipeline_store_batches_message_thread_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "mail.sqlite3"
+            store = PipelineStore(path)
+            store.initialize()
+            with store.connect() as conn:
+                conn.execute("CREATE TABLE messages(id INTEGER PRIMARY KEY)")
+                conn.executemany("INSERT INTO messages(id) VALUES (?)", [(1,), (2,)])
+
+            store.upsert_messages([(1, "a", "incoming", "INBOX"), (2, "b", "outgoing", "Sent")])
+
+            self.assertEqual(store.message_thread_keys(), {1: "a", 2: "b"})
             store.upsert_message(1, "key-a", "incoming", "INBOX")
             store.mark_message_processed(1)
             store.upsert_message(1, "key-b", "outgoing", "INBOX")
