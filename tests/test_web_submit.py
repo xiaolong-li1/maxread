@@ -7,8 +7,10 @@ from maxread.web_submit import (
     claim_binding_code,
     issue_binding_code,
     new_web_identity,
+    retry_web_job,
     submit_web_papers,
 )
+from maxread.web_pet import WebPetAgent, persist_pet_exchange, progress_payload
 
 
 def test_web_identity_defaults_to_guest_and_is_stable(tmp_path):
@@ -78,6 +80,61 @@ def test_admin_overlay_submission_keeps_actor_audit(tmp_path):
     assert messages[0]["role"] == "user"
     assert messages[0]["actor_type"] == "admin"
     assert messages[0]["actor_id"] == "admin"
+    store.close()
+
+
+def test_progress_and_pet_agent_are_scoped_to_current_identity(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token_a, identity_a = new_web_identity(store)
+    _token_b, identity_b = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="")
+    submit_web_papers(settings, store, identity_a, "2608.25927")
+    submit_web_papers(settings, store, identity_b, "2608.27456")
+
+    progress = progress_payload(settings, store, identity_a)
+    answer, _ = WebPetAgent(settings, store, identity_a).reply("任务到哪了？")
+
+    assert [item["source_id"] for item in progress["recent"]] == ["2608.25927"]
+    assert progress["active"]["percent"] == 5
+    assert "2608.25927" in answer
+    assert "2608.27456" not in answer
+    store.close()
+
+
+def test_pet_exchange_is_persisted_in_main_conversation(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="")
+
+    result = persist_pet_exchange(settings, store, identity, "任务到哪了？")
+
+    assert result["ok"] is True
+    messages = store.list_web_messages(identity)
+    assert [item["kind"] for item in messages] == ["pet_user", "pet_reply"]
+    assert messages[-1]["channel"] == "pet"
+    store.close()
+
+
+def test_retry_button_api_resumes_published_visual_failure(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3)
+    queued = submit_web_papers(settings, store, identity, "2608.25927")["items"][0]
+    store.conn.execute(
+        "update queue_jobs set status='failed', workflow_state='quality_failed', stage='failed', "
+        "doc_url='https://tenant/doc', checkpoint_json='{}', error='visual-qa:remote-error: Feishu PDF export failed' where id=?",
+        (queued["job_id"],),
+    )
+    store.conn.commit()
+
+    result = retry_web_job(settings, store, identity, queued["job_id"])
+
+    assert result["ok"] is True
+    assert result["resume_published"] is True
+    job = next(item for item in store.list_queue_jobs() if item["id"] == queued["job_id"])
+    assert job["status"] == "queued"
+    assert job["rebuild_pipeline"] == 0
+    assert any(item["kind"] == "retry_request" for item in store.list_web_messages(identity))
     store.close()
 
 
@@ -164,10 +221,22 @@ def test_feishu_binding_command_claims_code_and_replies(tmp_path):
 
 
 def test_web_submit_page_is_compact_and_supports_binding():
-    assert "读一篇论文" in WEB_SUBMIT_HTML
-    assert "开始阅读" in WEB_SUBMIT_HTML
+    assert "论文会话" in WEB_SUBMIT_HTML
     assert "绑定飞书账号" in WEB_SUBMIT_HTML
     assert "/api/web/submit" in WEB_SUBMIT_HTML
+    assert "/api/web/retry" in WEB_SUBMIT_HTML
+    assert "/api/web/pet/chat" in WEB_SUBMIT_HTML
+    assert 'id="progress-track"' not in WEB_SUBMIT_HTML
+    assert 'class="progress-track"' in WEB_SUBMIT_HTML
+    assert 'class="retry-button"' in WEB_SUBMIT_HTML
+    assert WEB_SUBMIT_HTML.index('id="history"') < WEB_SUBMIT_HTML.index('id="message-input"')
+    assert "web-pet-sprite.png" in WEB_SUBMIT_HTML
+    assert "小绿" not in WEB_SUBMIT_HTML
+    assert "和 Max 聊聊" in WEB_SUBMIT_HTML
+    assert "maxreadOnboardingSeen" in WEB_SUBMIT_HTML
+    assert 'id="console-link"' in WEB_SUBMIT_HTML
+    assert "class=\"console-link hidden\"" in WEB_SUBMIT_HTML
+    assert "loadAdminContext()" in WEB_SUBMIT_HTML
     assert "maxread_web_session" not in WEB_SUBMIT_HTML
     assert "linear-gradient" not in WEB_SUBMIT_HTML
-    assert "font-size:30px" in WEB_SUBMIT_HTML
+    assert "font-size:28px" in WEB_SUBMIT_HTML

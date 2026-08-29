@@ -5,6 +5,7 @@ import subprocess
 from types import SimpleNamespace
 
 import maxread.visual_qa as visual_qa_module
+from deploy.visual_qa.maxread_pdf_qa import _doc_token, _export_ticket
 from maxread.visual_qa import (
     RemoteVisualResult,
     VisualFinding,
@@ -50,6 +51,13 @@ def test_visual_qa_concurrency_defaults_to_two_and_validates_env(monkeypatch):
     assert _visual_qa_concurrency() == 2
 
 
+def test_pdf_export_ticket_and_doc_token_are_recoverable_from_cli_output():
+    output = "Created export task: 7679279762142366688 Export task is still in progress. Continue with: lark-cli drive +task_result --scenario export --ticket 7679279762142366688"
+
+    assert _export_ticket(output) == "7679279762142366688"
+    assert _doc_token("https://tenant.feishu.cn/docx/MS1LdHHGUoXGvQxAeb7cidB4nVf") == "MS1LdHHGUoXGvQxAeb7cidB4nVf"
+
+
 class FakeVisualFeishu:
     def __init__(self, content: str):
         self.content = content
@@ -72,6 +80,21 @@ class StubVisualQA(VisualQAController):
     def inspect_remote(self, doc_url: str, source_id: str = "", **kwargs) -> RemoteVisualResult:
         self.calls.append(source_id)
         return self.results.pop(0)
+
+
+def test_export_pending_is_reported_as_infrastructure_not_visual_finding():
+    controller = StubVisualQA([
+        RemoteVisualResult(
+            status="infrastructure_pending",
+            error="Feishu PDF export is still processing; ticket=123",
+        )
+    ])
+
+    result = controller.run(FakeVisualFeishu("<title>T</title>"), "https://tenant/docx/doc", source_id="paper")
+
+    assert result.passed is False
+    assert result.remote.status == "infrastructure_pending"
+    assert any(item.startswith("visual-qa:infrastructure:export-pending:") for item in result.warnings)
 
 
 class FormulaRepairLLM:

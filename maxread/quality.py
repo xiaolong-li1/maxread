@@ -166,6 +166,9 @@ def blocking_quality_warnings(warnings: Iterable[str]) -> List[str]:
         if warning.startswith(("visual-qa:remote-error:", "visual-qa:recheck-error:")):
             blocking.append(warning)
             continue
+        if warning.startswith("visual-qa:infrastructure:"):
+            blocking.append(warning)
+            continue
         if warning.startswith((
             "image-anchor-lookup-failed:",
             "image-anchor-missing:",
@@ -253,6 +256,7 @@ def verify_published_docx(
     expected_latex_min: int = 0,
     expected_table_min: int = 0,
     attempts: int = 2,
+    retry_delay: float = 1.0,
 ) -> List[str]:
     last_error = ""
     for attempt in range(max(1, attempts)):
@@ -268,12 +272,27 @@ def verify_published_docx(
                 expected_table_min=expected_table_min,
             )
             warnings.extend(quality_warnings("", content))
-            return [f"post-publish:{warning}" for warning in _dedupe_strings(warnings)]
+            warnings = _dedupe_strings(warnings)
+            if attempt + 1 < max(1, attempts) and _retryable_roundtrip_warnings(warnings):
+                time.sleep(max(0.0, float(retry_delay)))
+                continue
+            return [f"post-publish:{warning}" for warning in warnings]
         except Exception as exc:
             last_error = str(exc)
             if attempt + 1 < max(1, attempts):
                 time.sleep(1.0)
     return [f"post-publish:fetch-failed:{_clip(last_error, 240)}"]
+
+
+def _retryable_roundtrip_warnings(warnings: Iterable[str]) -> bool:
+    markers = (
+        "html-tag-in-formula",
+        "nested-latex-tag",
+        "missing-latex:",
+        "missing-tables:",
+        "marker-left-after-publish",
+    )
+    return any(any(marker in str(warning) for marker in markers) for warning in warnings)
 
 
 def validate_fetched_docx_content(

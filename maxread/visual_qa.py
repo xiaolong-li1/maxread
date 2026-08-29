@@ -242,6 +242,11 @@ class VisualQAController:
                 error=remote.error,
             )
             result.rounds.append(audit_round)
+            if remote.status == "infrastructure_pending":
+                result.warnings.append(
+                    f"visual-qa:infrastructure:export-pending:{_clip(remote.error or 'Feishu PDF export is still processing')}"
+                )
+                break
             if remote.error:
                 result.warnings.append(f"visual-qa:remote-error:{_clip(remote.error)}")
                 break
@@ -500,6 +505,7 @@ class VisualQAController:
                 findings=findings,
                 screenshots=screenshots,
                 raw=payload,
+                error=str(payload.get("error") or ""),
             )
         return RemoteVisualResult(
             status="error",

@@ -620,9 +620,19 @@ class Store:
         conversation = self.ensure_web_conversation(identity)
         rows = self.conn.execute(
             """
-            select * from web_messages
-            where conversation_id = ? and id > ?
-            order by id asc
+            select m.*,
+                   coalesce(nullif(q.title, ''), nullif(p.title, ''), '') as job_title,
+                   coalesce(q.source_id, m.source_id) as job_source_id,
+                   coalesce(q.status, m.status) as job_status,
+                   coalesce(q.workflow_state, '') as job_workflow_state,
+                   coalesce(q.stage, '') as job_stage,
+                   coalesce(q.error, '') as job_error,
+                   coalesce(nullif(q.doc_url, ''), m.doc_url) as job_doc_url
+            from web_messages m
+            left join queue_jobs q on q.id = m.job_id and m.job_id != 0
+            left join papers p on q.source_kind = 'paper' and p.paper_id = q.source_id
+            where m.conversation_id = ? and m.id > ?
+            order by m.id asc
             limit ?
             """,
             (int(conversation["id"]), max(0, int(after_id)), max(1, min(200, int(limit)))),
@@ -648,6 +658,43 @@ class Store:
             if row["feishu_open_id"] in names:
                 row["display_name"] = names[row["feishu_open_id"]]
         return results
+
+    def list_web_identity_jobs(self, identity, limit: int = 8):
+        public_id = str(identity.get("public_id") or "")
+        open_id = str(identity.get("feishu_open_id") or "").strip()
+        clauses = ["(w.chat_type = 'web' and w.chat_id = ?)"]
+        params: list[object] = [f"web:{public_id}"]
+        if open_id:
+            clauses.append("w.sender_id = ?")
+            params.append(open_id)
+        rows = self.conn.execute(
+            f"""
+            select q.*, coalesce(nullif(q.title, ''), nullif(p.title, ''), '') as resolved_title
+            from queue_jobs q
+            left join papers p on q.source_kind = 'paper' and p.paper_id = q.source_id
+            where exists (
+                select 1 from job_watchers w
+                where w.job_id = q.id and ({' or '.join(clauses)})
+            )
+            order by case q.status when 'running' then 0 when 'queued' then 1 else 2 end,
+                     q.id desc
+            limit ?
+            """,
+            (*params, max(1, min(50, int(limit)))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_pet_message_count(self, identity, minutes: int = 10) -> int:
+        conversation = self.ensure_web_conversation(identity)
+        row = self.conn.execute(
+            """
+            select count(*) as n from web_messages
+            where conversation_id = ? and kind = 'pet_user'
+              and created_at >= datetime('now', ?)
+            """,
+            (int(conversation["id"]), f"-{max(1, int(minutes))} minutes"),
+        ).fetchone()
+        return int(row["n"] if row else 0)
 
     def _conversation_for_watcher(self, watcher):
         if str(watcher.get("chat_type") or "").lower() == "web":

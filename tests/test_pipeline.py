@@ -4,7 +4,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 from maxread.workflow import WorkflowEvent, WorkflowState
@@ -34,6 +34,19 @@ class FakeArxiv:
             source_captions=["An overview figure."],
             parse_warnings=[],
         )
+
+
+def test_post_publish_message_distinguishes_export_infrastructure_from_visual_failure():
+    infrastructure = _post_publish_failure_message([
+        "visual-qa:infrastructure:export-pending:ticket=123"
+    ])
+    quality = _post_publish_failure_message([
+        "visual-qa:high:invalid-formula:page 2"
+    ])
+
+    assert "飞书 PDF 导出仍在处理中" in infrastructure
+    assert "可恢复的基础设施状态" in infrastructure
+    assert "质检发现明确问题" in quality
 
 
 class FakeFeishu:
@@ -488,7 +501,7 @@ def test_pipeline_blocks_delivery_when_published_formula_is_invalid(tmp_path):
     result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
 
     assert result.doc_url == "https://tenant.feishu.cn/docx/doc123"
-    assert "发布后质检失败" in result.error
+    assert "发布后质检发现明确问题" in result.error
     record = store.get_paper("2604.12946")
     assert record.status == "quality_failed"
     assert "post-publish:quality:formula:xml:high:joined-spacing-command" in record.error

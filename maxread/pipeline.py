@@ -536,7 +536,7 @@ class MaxReadPipeline:
                 figure_warnings.extend(post_publish_warnings)
             post_publish_blocking = blocking_quality_warnings(figure_warnings)
             if post_publish_blocking:
-                message = "文档已生成，但发布后质检失败，暂不交付：" + "; ".join(post_publish_blocking)
+                message = _post_publish_failure_message(post_publish_blocking)
                 self._workflow(WorkflowEvent.QUALITY_REJECTED, message)
                 self.store.upsert_paper(
                     ref.paper_id,
@@ -609,7 +609,7 @@ class MaxReadPipeline:
                     )
             blocking = blocking_quality_warnings(warnings)
             if blocking:
-                message = "文档已生成，但发布后质检失败，暂不交付：" + "; ".join(blocking)
+                message = _post_publish_failure_message(blocking)
                 self._workflow(WorkflowEvent.QUALITY_REJECTED, message)
                 self.store.upsert_paper(
                     ref.paper_id,
@@ -1512,6 +1512,25 @@ def _source_required_message(paper_id: str, warnings) -> str:
         f"你可以在 arXiv 网页点 Download source 下载源码包，然后本地执行：\n"
         f"cd /Users/xiaolong/projects/maxread && python3 -m maxread.cli import-source {paper_id} /path/to/source.tar"
     )
+
+
+def _post_publish_failure_message(warnings) -> str:
+    items = [str(item) for item in warnings]
+    infrastructure = [item for item in items if item.startswith("visual-qa:infrastructure:")]
+    quality = [item for item in items if item not in infrastructure]
+    if infrastructure and not quality:
+        return (
+            "文档已生成，但飞书 PDF 导出仍在处理中，视觉验收尚未完成；"
+            "这是可恢复的基础设施状态，系统会继续重试：" + "; ".join(infrastructure)
+        )
+    if infrastructure:
+        return (
+            "文档已生成，但发布后验收尚未完成："
+            + "; ".join(quality)
+            + "；飞书导出仍在处理中："
+            + "; ".join(infrastructure)
+        )
+    return "文档已生成，但发布后质检发现明确问题，暂不交付：" + "; ".join(items)
 
 
 def _clip_reply(text: str, max_chars: int = 900) -> str:

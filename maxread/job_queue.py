@@ -440,6 +440,7 @@ def _is_auto_retryable_error(error: str) -> bool:
         "model-fetch",
         "model fetch",
         "remote-error",
+        "infrastructure:export-pending",
         "browser",
         "ssh",
         "invalid-json",

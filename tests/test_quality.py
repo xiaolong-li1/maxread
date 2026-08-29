@@ -272,6 +272,22 @@ def test_verify_published_docx_fetch_failure_is_soft_warning():
     assert warnings[0].startswith("post-publish:fetch-failed:")
 
 
+def test_verify_published_docx_retries_transient_roundtrip_formula_markup():
+    class Feishu:
+        calls = 0
+
+        def fetch_docx(self, *args, **kwargs):
+            self.calls += 1
+            content = "<title>T</title><p><latex>x<br/>y</latex></p>" if self.calls == 1 else "<title>T</title><p><latex>x+y</latex></p>"
+            return {"data": {"document": {"content": content}}}
+
+    feishu = Feishu()
+    warnings = verify_published_docx(feishu, "doc", expected_title="T", attempts=2, retry_delay=0)
+
+    assert warnings == []
+    assert feishu.calls == 2
+
+
 def test_historical_formula_failure_corpus_compiles_without_blockers():
     corpus = [
         "调用 <latex>apply_p_rope</latex> 完成旋转。",

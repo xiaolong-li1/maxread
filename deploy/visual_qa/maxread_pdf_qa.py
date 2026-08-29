@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -13,6 +14,10 @@ from PIL import Image
 
 
 INVALID_TEXTS = ("无效公式", "Invalid formula")
+
+
+class ExportPendingError(RuntimeError):
+    pass
 
 
 def main() -> int:
@@ -97,6 +102,11 @@ def main() -> int:
             "expected_table_min": max(0, args.expected_tables),
             "pdf_size_bytes": pdf_path.stat().st_size,
         }
+    except ExportPendingError as exc:
+        report["status"] = "infrastructure_pending"
+        report["error_type"] = "export_pending"
+        report["retryable"] = True
+        report["error"] = _clip(str(exc), 1000)
     except Exception as exc:
         report["status"] = "error"
         report["error"] = _clip(str(exc), 1000)
@@ -105,7 +115,7 @@ def main() -> int:
     temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(output_dir / "report.json")
     print(json.dumps(report, ensure_ascii=False, separators=(",", ":")), flush=True)
-    return 0 if report["status"] in {"ok", "issues"} else 2
+    return 0 if report["status"] in {"ok", "issues", "infrastructure_pending"} else 2
 
 
 def _fetch_docx_inventory(url: str) -> Dict[str, int]:
@@ -151,6 +161,22 @@ def _export_pdf(url: str, output_dir: Path) -> Path:
     lark_cli = os.environ.get("MAXREAD_LARK_CLI", "lark-cli")
     identity = os.environ.get("MAXREAD_FEISHU_AS", "bot")
     pdf_path = output_dir / "rendered.pdf"
+    source_token = _doc_token(url)
+    task_dir = output_dir.parent / ".export-tasks"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    task_path = task_dir / f"{source_token}.json"
+    if task_path.exists():
+        try:
+            state = json.loads(task_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        ticket = str(state.get("ticket") or "")
+        if ticket:
+            exported_token = _wait_export_ticket(ticket, source_token, identity, wait_seconds=65)
+            if exported_token:
+                _download_exported_pdf(exported_token, pdf_path, identity)
+                task_path.unlink(missing_ok=True)
+                return pdf_path
     completed = subprocess.run(
         [
             lark_cli,
@@ -178,8 +204,92 @@ def _export_pdf(url: str, output_dir: Path) -> Path:
     )
     if completed.returncode != 0 or not pdf_path.exists():
         detail = completed.stderr.strip() or completed.stdout.strip() or f"export exited {completed.returncode}"
+        ticket = _export_ticket(detail)
+        if ticket and source_token:
+            temporary = task_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"ticket": ticket, "source_token": source_token}), encoding="utf-8")
+            temporary.replace(task_path)
+            exported_token = _wait_export_ticket(ticket, source_token, identity, wait_seconds=65)
+            if exported_token:
+                _download_exported_pdf(exported_token, pdf_path, identity)
+                task_path.unlink(missing_ok=True)
+                return pdf_path
+            raise ExportPendingError(f"Feishu PDF export is still processing; ticket={ticket}")
         raise RuntimeError(f"Feishu PDF export failed: {_clip(detail, 900)}")
     return pdf_path
+
+
+def _wait_export_ticket(ticket: str, source_token: str, identity: str, wait_seconds: int) -> str:
+    lark_cli = os.environ.get("MAXREAD_LARK_CLI", "lark-cli")
+    deadline = time.monotonic() + max(1, int(wait_seconds))
+    last_status = "processing"
+    while time.monotonic() < deadline:
+        completed = subprocess.run(
+            [
+                lark_cli, "drive", "+task_result", "--scenario", "export",
+                "--ticket", ticket, "--file-token", source_token,
+                "--as", identity, "--format", "json",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        payload = _last_json(completed.stdout)
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        if data.get("failed") or str(data.get("job_status_label") or "").lower() == "failed":
+            raise RuntimeError(f"Feishu PDF export task failed: {_clip(data.get('job_error_msg'), 500)}")
+        exported_token = str(data.get("file_token") or "")
+        if data.get("ready") and exported_token:
+            return exported_token
+        last_status = str(data.get("job_status_label") or data.get("job_status") or "processing")
+        time.sleep(4)
+    raise ExportPendingError(f"Feishu PDF export is still processing; ticket={ticket}; status={last_status}")
+
+
+def _download_exported_pdf(file_token: str, pdf_path: Path, identity: str) -> None:
+    lark_cli = os.environ.get("MAXREAD_LARK_CLI", "lark-cli")
+    completed = subprocess.run(
+        [
+            lark_cli, "drive", "+download", "--file-token", file_token,
+            "--output", f"./{pdf_path.name}", "--overwrite", "--as", identity, "--format", "json",
+        ],
+        cwd=pdf_path.parent,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if completed.returncode != 0 or not pdf_path.exists() or pdf_path.stat().st_size < 1024:
+        preview = subprocess.run(
+            [
+                lark_cli, "drive", "+preview", "--file-token", file_token,
+                "--type", "source_file", "--output", f"./{pdf_path.name}",
+                "--if-exists", "overwrite", "--as", identity, "--format", "json",
+            ],
+            cwd=pdf_path.parent,
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        if preview.returncode != 0 or not pdf_path.exists() or pdf_path.stat().st_size < 1024:
+            detail = preview.stderr.strip() or preview.stdout.strip() or completed.stderr.strip() or completed.stdout.strip() or "download failed"
+            raise RuntimeError(f"Feishu exported PDF download failed: {_clip(detail, 700)}")
+
+
+def _doc_token(url: str) -> str:
+    match = re.search(r"/(?:docx|docs)/([A-Za-z0-9]+)", str(url or ""))
+    return match.group(1) if match else ""
+
+
+def _export_ticket(text: str) -> str:
+    patterns = [r"--ticket\s+([0-9]+)", r"Created export task:\s*([0-9]+)", r'"ticket"\s*:\s*"?([0-9]+)']
+    for pattern in patterns:
+        match = re.search(pattern, str(text or ""), flags=re.I)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def _render_pages(pdf_path: Path, output_dir: Path) -> List[Path]:

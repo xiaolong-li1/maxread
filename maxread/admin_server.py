@@ -26,9 +26,11 @@ from .web_submit import (
     WEB_SUBMIT_HTML,
     issue_binding_code,
     new_web_identity,
+    retry_web_job,
     submit_web_papers,
     web_identity_payload,
 )
+from .web_pet import persist_pet_exchange, progress_payload
 
 
 DEFAULT_LIMIT = 80
@@ -40,6 +42,7 @@ ADMIN_LOGIN_WINDOW_SECONDS = 10 * 60
 ADMIN_LOGIN_MAX_FAILURES = 5
 WEB_SUBMIT_WINDOW_SECONDS = 10 * 60
 WEB_SUBMIT_MAX_REQUESTS = 8
+WEB_PET_MAX_REQUESTS = 30
 
 
 class AdminServer(ThreadingHTTPServer):
@@ -49,6 +52,7 @@ class AdminServer(ThreadingHTTPServer):
         self.admin_sessions: dict[str, float] = {}
         self.admin_login_failures: dict[str, list[float]] = {}
         self.web_submit_requests: dict[str, list[float]] = {}
+        self.web_pet_requests: dict[str, list[float]] = {}
         self.admin_lock = threading.Lock()
 
     def create_admin_session(self, password: str, client_id: str) -> tuple[str, str]:
@@ -86,6 +90,20 @@ class AdminServer(ThreadingHTTPServer):
                 return False
             requests.append(now)
             self.web_submit_requests[client_id] = requests
+            return True
+
+    def allow_pet_chat(self, client_id: str) -> bool:
+        now = time.time()
+        with self.admin_lock:
+            requests = [
+                timestamp for timestamp in self.web_pet_requests.get(client_id, [])
+                if now - timestamp < WEB_SUBMIT_WINDOW_SECONDS
+            ]
+            if len(requests) >= WEB_PET_MAX_REQUESTS:
+                self.web_pet_requests[client_id] = requests
+                return False
+            requests.append(now)
+            self.web_pet_requests[client_id] = requests
             return True
 
     def is_admin_session(self, token: str) -> bool:
@@ -134,6 +152,9 @@ class AdminHandler(BaseHTTPRequestHandler):
         if parsed.path in {"/submit", "/submit/"}:
             self._html(WEB_SUBMIT_HTML)
             return
+        if parsed.path == "/assets/web-pet-sprite.png":
+            self._binary(Path(__file__).resolve().parent / "static" / "web-pet-sprite.png", "image/png")
+            return
         if parsed.path == "/api/web/me":
             self._web_json(lambda _store, identity: web_identity_payload(identity))
             return
@@ -150,6 +171,11 @@ class AdminHandler(BaseHTTPRequestHandler):
                 after_id = 0
             self._web_json(
                 lambda store, identity: store.list_web_messages(identity, after_id=after_id, limit=150)
+            )
+            return
+        if parsed.path == "/api/web/progress":
+            self._web_json(
+                lambda store, identity: progress_payload(self.server.settings, store, identity)
             )
             return
         if parsed.path == "/api/web/admin/accounts":
@@ -240,6 +266,31 @@ class AdminHandler(BaseHTTPRequestHandler):
                     lambda store, identity: issue_binding_code(store, identity)
                     if identity.get("_actor_type") != "admin"
                     else (_ for _ in ()).throw(ValueError("管理员代入态不能修改用户绑定"))
+                )
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/web/retry":
+            payload = self._read_json()
+            try:
+                self._web_json(
+                    lambda store, identity: retry_web_job(
+                        self.server.settings, store, identity, int(payload.get("job_id") or 0)
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/web/pet/chat":
+            if not self.server.allow_pet_chat(self._client_id()):
+                self._error(HTTPStatus.TOO_MANY_REQUESTS, "聊得有点快，稍后再试")
+                return
+            payload = self._read_json()
+            try:
+                self._web_json(
+                    lambda store, identity: persist_pet_exchange(
+                        self.server.settings, store, identity, payload.get("content", "")
+                    )
                 )
             except ValueError as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
@@ -405,6 +456,18 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("content-type", "text/html; charset=utf-8")
         self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self._write_body(data)
+
+    def _binary(self, path: Path, content_type: str) -> None:
+        if not path.is_file():
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+            return
+        data = path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(data)))
+        self.send_header("cache-control", "public, max-age=86400")
         self.end_headers()
         self._write_body(data)
 

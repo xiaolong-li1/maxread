@@ -226,7 +226,13 @@ def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
         connection.request("GET", "/submit")
         response = connection.getresponse()
         assert response.status == 200
-        assert "读一篇论文" in response.read().decode("utf-8")
+        assert "论文会话" in response.read().decode("utf-8")
+
+        connection.request("GET", "/assets/web-pet-sprite.png")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.getheader("content-type") == "image/png"
+        assert len(response.read()) > 100_000
 
         connection.request("GET", "/api/web/me")
         response = connection.getresponse()
@@ -251,6 +257,22 @@ def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
         rows = json.loads(response.read().decode("utf-8"))
         assert len(rows) == 1
         assert rows[0]["chat_type"] == "web"
+
+        connection.request("GET", "/api/web/progress", headers={"cookie": cookie})
+        response = connection.getresponse()
+        progress = json.loads(response.read().decode("utf-8"))
+        assert progress["active"]["source_id"] == "2608.25927"
+
+        connection.request(
+            "POST",
+            "/api/web/pet/chat",
+            body=json.dumps({"content": "任务到哪了？"}),
+            headers={"content-type": "application/json", "cookie": cookie},
+        )
+        response = connection.getresponse()
+        pet = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+        assert "2608.25927" in pet["message"]["content"]
     finally:
         connection.close()
         server.shutdown()

@@ -39,6 +39,15 @@ actual actor.
 - Web watchers update SQLite only; they never call a Feishu reply API with a
   synthetic message ID.
 
+The page renders queue acknowledgements and terminal results as structured task
+cards. Failed cards show a scoped Retry button and friendly error category;
+raw infrastructure output is collapsed under technical details. Text commands
+do not trigger retry.
+
+The composer sits below the conversation. Paper links use the deterministic
+submission path, while ordinary text is handled by the bounded companion agent
+described in [`web-pet-agent.md`](web-pet-agent.md).
+
 ## Administrator overlay
 
 An existing admin session may send `X-MaxRead-Act-As: <web public id>` from the
