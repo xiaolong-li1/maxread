@@ -845,6 +845,50 @@ def test_sectional_generation_runs_all_sections_concurrently_and_merges_unique_m
     assert "MaxReadTable" not in markdown
 
 
+def test_sectional_generation_retries_only_the_section_with_transient_model_error():
+    class FlakySectionLLM:
+        def __init__(self):
+            self.calls = {}
+
+        def responses_text(self, _system, user, **_kwargs):
+            if "文档开头与第 1-2 章" in user:
+                section = "front"
+                output = "# [2604.12946] 标题\n\n**TL;DR**：摘要。\n\n|维度|一句话|\n|---|---|\n|问题|问题|\n\n## 1. 这篇论文要解决什么问题\n\n" + ("背景。" * 180) + "\n\n## 2. 核心观察 / 关键直觉\n\n" + ("观察。" * 180)
+            elif "第 3 章方法框架" in user:
+                section = "method"
+                output = "## 3. 方法框架\n\n" + ("方法输入、计算、输出与边界。" * 150)
+            elif "第 4 章实验结果" in user:
+                section = "experiments"
+                output = "## 4. 实验结果\n\n" + ("实验设置与结果。" * 120)
+            elif "第 5 章消融" in user:
+                section = "ablation"
+                output = "## 5. 消融与补充分析\n\n" + ("控制变量与消融结果。" * 120)
+            else:
+                section = "closing"
+                output = "## 6. 局限性与开放问题\n\n" + ("局限。" * 100) + "\n\n## 7. 整体评价\n\n" + ("评价。" * 100)
+            self.calls[section] = self.calls.get(section, 0) + 1
+            if section == "method" and self.calls[section] == 1:
+                raise RuntimeError("transient 502")
+            return output
+
+    attempts = []
+    llm = FlakySectionLLM()
+    markdown = _generate_sectional_paper_markdown(
+        llm,
+        "COMMON PREFIX",
+        "2604.12946",
+        {key: [] for key in ("front", "method", "experiments", "ablation", "closing")},
+        {key: [] for key in ("front", "method", "experiments", "ablation", "closing")},
+        attempts=2,
+        workers=5,
+        artifact_writer=lambda section, attempt, raw, errors: attempts.append((section, attempt, raw, errors)),
+    )
+
+    assert "## 3. 方法框架" in markdown
+    assert llm.calls == {"front": 1, "method": 2, "experiments": 1, "ablation": 1, "closing": 1}
+    assert any(section == "method" and errors[0].startswith("model-call:") for section, _attempt, _raw, errors in attempts)
+
+
 def test_sectional_global_check_rejects_duplicate_table_content():
     markdown = """# T
 

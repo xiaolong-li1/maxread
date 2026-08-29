@@ -919,11 +919,24 @@ def _generate_sectional_paper_markdown(
         prompt = base_prompt
         last_errors: List[str] = []
         for attempt in range(1, max(1, int(attempts)) + 1):
-            raw = llm.responses_text(
-                FINAL_SYSTEM_PROMPT,
-                prompt,
-                reasoning_effort=None if section == "method" else "medium",
-            )
+            try:
+                raw = llm.responses_text(
+                    FINAL_SYSTEM_PROMPT,
+                    prompt,
+                    reasoning_effort=None if section == "method" else "medium",
+                )
+            except Exception as exc:
+                last_errors = [f"model-call:{str(exc)[:900]}"]
+                if artifact_writer:
+                    attempt_serials[section] += 1
+                    artifact_writer(section, attempt_serials[section], "", last_errors)
+                prompt = (
+                    base_prompt
+                    + "\n\n上一轮本章模型调用失败：\n"
+                    + f"- {last_errors[0]}\n"
+                    + "请重新生成本章完整 Markdown。"
+                )
+                continue
             markdown = _extract_section_output(_unwrap_outer_markdown_fence(raw), section)
             errors = _section_output_errors(
                 markdown,

@@ -211,9 +211,16 @@ class OpenAIClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
                 chunks: list[str] = []
                 completed = None
-                for raw_line in response:
-                    if time.monotonic() >= deadline:
+                stream = iter(response)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         raise TimeoutError(f"{path} stream exceeded total timeout of {self.timeout}s")
+                    _set_stream_read_timeout(response, remaining)
+                    try:
+                        raw_line = next(stream)
+                    except StopIteration:
+                        break
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -246,6 +253,23 @@ class OpenAIClient:
             body = exc.read().decode("utf-8", errors="replace")[:1000]
             raise OpenAIRequestError(path, exc.code, body) from exc
         raise RuntimeError(f"{path} stream had no output text")
+
+
+def _set_stream_read_timeout(response, remaining: float) -> None:
+    """Bound the next urllib socket read by the request's total deadline."""
+    candidates = [
+        getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+        getattr(getattr(response, "fp", None), "_sock", None),
+    ]
+    timeout = max(0.1, float(remaining))
+    for sock in candidates:
+        if sock is None:
+            continue
+        try:
+            sock.settimeout(timeout)
+            return
+        except (AttributeError, OSError):
+            continue
 
 
 def _extract_output_text(data: Dict[str, Any]) -> str:
