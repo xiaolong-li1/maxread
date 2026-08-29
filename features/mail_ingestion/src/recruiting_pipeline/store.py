@@ -127,14 +127,23 @@ class PipelineStore:
             result: list[StoredMessage] = []
             for row in rows:
                 source_uid = str(row["source_uid"])
-                message_dir = self.db_path.parent / "messages" / _safe_source_uid(source_uid)
+                stored_mailbox = str(row["mailbox"] or "")
+                if "::" in stored_mailbox:
+                    source_account, display_mailbox = stored_mailbox.split("::", 1)
+                else:
+                    source_account, display_mailbox = "", stored_mailbox
+                message_dir = self.db_path.parent / "messages" / _safe_source_uid(stored_mailbox) / _safe_source_uid(source_uid)
+                legacy_message_dir = self.db_path.parent / "messages" / _safe_source_uid(source_uid)
                 raw_path = Path(str(row["raw_path"]))
                 if not raw_path.exists():
                     relocated = message_dir / "message.eml"
-                    if relocated.exists():
-                        raw_path = relocated
+                    legacy = legacy_message_dir / "message.eml"
+                    raw_path = relocated if relocated.exists() else legacy if legacy.exists() else raw_path
                 attachments = tuple(
-                    _relocated_attachment(Path(str(item["local_path"])), message_dir)
+                    _relocated_attachment(
+                        _relocated_attachment(Path(str(item["local_path"])), message_dir),
+                        legacy_message_dir,
+                    )
                     for item in conn.execute(
                         "SELECT local_path FROM attachments WHERE message_record_id=? AND local_path IS NOT NULL ORDER BY id",
                         (row["id"],),
@@ -144,7 +153,7 @@ class PipelineStore:
                     StoredMessage(
                         id=int(row["id"]),
                         source_uid=source_uid,
-                        mailbox=str(row["mailbox"]),
+                        mailbox=display_mailbox,
                         subject=str(row["subject"]),
                         sender_name=str(row["sender_name"]),
                         sender_address=str(row["sender_address"]),
@@ -152,6 +161,7 @@ class PipelineStore:
                         body_text=str(row["body_text"]),
                         raw_path=raw_path,
                         attachments=attachments,
+                        source_account=source_account,
                     )
                 )
             return result

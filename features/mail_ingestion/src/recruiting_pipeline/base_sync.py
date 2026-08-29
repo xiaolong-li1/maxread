@@ -46,6 +46,8 @@ class BaseSync:
         has_replied: bool = False,
     ) -> BaseSyncResult:
         is_other = fields.mail_type == "other"
+        if not fields.source_accounts:
+            raise ValueError("source mailbox tag is required")
         payload = {
             "姓名": fields.name,
             "最新邮件时间": latest_time,
@@ -59,6 +61,7 @@ class BaseSync:
             "是否985": [fields.is_985],
             "是否C9": [fields.is_c9],
             "是否已回复": bool(has_replied),
+            "来源邮箱": fields.source_accounts,
             "申请目的 / 科研摘要": fields.purpose_summary,
             "材料文档": document_url,
             "筛选状态": [status],

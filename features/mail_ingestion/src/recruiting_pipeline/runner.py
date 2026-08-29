@@ -58,6 +58,7 @@ class RecruitingRunner:
         self.docs = None if no_docs else DocsSync(settings)
         self.dry_run = dry_run
         self._envelope_cache: dict[str, ThreadEnvelope] = {}
+        self._mailbox_addresses = settings.mailbox_addresses or (settings.mailbox_address,)
 
     def run_once(
         self,
@@ -115,18 +116,26 @@ class RecruitingRunner:
             raise
 
     def _scan_mailbox(self) -> None:
-        command = [
-            str(self.settings.root / "features/mail_ingestion/bin/mail-collector"),
-            "scan",
-            "--env-file",
-            str(self.settings.mailbox_env_file),
-            "--all-folders",
-            "--limit",
-            str(self.settings.scan_limit),
-        ]
-        completed = subprocess.run(command, cwd=self.settings.collector_root, capture_output=True, text=True, timeout=600)
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "mail scan failed")
+        account_envs = self.settings.mailbox_env_files or (self.settings.mailbox_env_file,)
+        for account_env in account_envs:
+            command = [
+                str(self.settings.root / "features/mail_ingestion/bin/mail-collector"),
+                "scan",
+                "--env-file",
+                str(account_env),
+                "--all-folders",
+                "--include-system-folders",
+                "--limit",
+                str(self.settings.scan_limit),
+            ]
+            for folder in ("arXiv", "Drafts", "Outbox", "Junk", "Deleted", "Trash", "Notes"):
+                command.extend(("--exclude-folder", folder))
+            completed = subprocess.run(command, cwd=self.settings.collector_root, capture_output=True, text=True, timeout=600)
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"mail scan failed for {account_env.name}: "
+                    + (completed.stderr.strip() or completed.stdout.strip() or "collector failed")
+                )
 
     def _load_threads(self) -> tuple[dict[str, ThreadEnvelope], set[str]]:
         messages = self.store.messages()
@@ -140,15 +149,19 @@ class RecruitingRunner:
             except (OSError, ValueError):
                 continue
             key = next(
-                (message_id_to_key[parent] for parent in (headers.in_reply_to, *headers.references) if parent in message_id_to_key),
-                thread_key(message, headers, self.settings.mailbox_address),
+                (
+                    message_id_to_key[parent]
+                    for parent in (headers.message_id, headers.in_reply_to, *headers.references)
+                    if parent in message_id_to_key
+                ),
+                thread_key(message, headers, self._mailbox_addresses),
             )
             # Preserve the canonical Message-ID mapping so a reply from a
             # group member's personal address is joined to the candidate's
             # thread instead of becoming a second candidate.
             if headers.message_id:
                 message_id_to_key[headers.message_id] = key
-            direction = "outgoing" if headers.sender != candidate_address(headers, self.settings.mailbox_address, message.body_text) else "incoming"
+            direction = "outgoing" if headers.sender != candidate_address(headers, self._mailbox_addresses, message.body_text) else "incoming"
             self.store.upsert_message(message.id, key, direction, message.mailbox)
             grouped.setdefault(key, []).append((message, headers))
             old = processing.get(message.id)
@@ -166,7 +179,7 @@ class RecruitingRunner:
                 and str(row["status"] or "") == "base_backfill_pending"
             ):
                 changed.add(key)
-        return {key: build_envelope(items, self.settings.mailbox_address, key=key) for key, items in grouped.items()}, changed
+        return {key: build_envelope(items, self._mailbox_addresses, key=key) for key, items in grouped.items()}, changed
 
     def _extract_changed(self, envelopes: dict[str, ThreadEnvelope], changed_keys: set[str]):
         candidates: list[ThreadEnvelope] = []
@@ -238,6 +251,7 @@ class RecruitingRunner:
                 fields.academic_display,
                 self._academic_material(envelope, pdf_texts),
             )
+        fields.source_accounts = sorted({_source_account_label(account) for account in envelope.source_accounts})
         folder_status = next((FOLDER_STATUS[name] for name in ("面试通过", "面试寄") if name in envelope.folders), None)
         assigned = self.settings.mark_interview_assigned if "面试寄" in envelope.folders else None
         if "面试通过" in envelope.folders:
@@ -426,14 +440,18 @@ class RecruitingRunner:
             except (OSError, ValueError):
                 continue
             resolved = next(
-                (message_id_to_key[parent] for parent in (headers.in_reply_to, *headers.references) if parent in message_id_to_key),
-                thread_key(message, headers, self.settings.mailbox_address),
+                (
+                    message_id_to_key[parent]
+                    for parent in (headers.message_id, headers.in_reply_to, *headers.references)
+                    if parent in message_id_to_key
+                ),
+                thread_key(message, headers, self._mailbox_addresses),
             )
             if headers.message_id:
                 message_id_to_key[headers.message_id] = resolved
             grouped.setdefault(resolved, []).append((message, headers))
         items = grouped.get(key, [])
-        return build_envelope(items, self.settings.mailbox_address, key=key)
+        return build_envelope(items, self._mailbox_addresses, key=key)
 
     def _pdf_texts(self, envelope: ThreadEnvelope) -> dict[str, str]:
         # Every local attachment is uploaded to the material document, but
@@ -522,6 +540,7 @@ class RecruitingRunner:
             f"- 学业表现：{fields.academic_display}",
             f"- 排名：{fields.rank}",
             f"- 院校标签：985={fields.is_985}；C9={fields.is_c9}",
+            f"- 来源邮箱：{'、'.join(fields.source_accounts)}",
             "- 申请目的 / 科研摘要：",
             fields.purpose_summary,
             f"- 最新邮件时间：{envelope.latest_time or 'unknown'}",
@@ -589,6 +608,15 @@ def _other_fields(envelope: ThreadEnvelope, summary: str | None = None) -> Candi
         academic_display="—",
         purpose_summary=(summary or title).strip()[:500],
     ).normalized()
+
+
+def _source_account_label(address: str) -> str:
+    normalized = str(address or "").strip().casefold()
+    if normalized == "bohan.zhuang@zju.edu.cn":
+        return "Bohan"
+    if normalized:
+        return "ZIP Lab"
+    raise ValueError("source mailbox is missing")
 
 
 def _within_days(value: str | None, days: int, now: datetime | None = None) -> bool:

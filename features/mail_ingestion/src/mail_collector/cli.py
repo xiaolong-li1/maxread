@@ -176,7 +176,8 @@ def command_scan(args: argparse.Namespace) -> int:
 
         for folder in folders:
             mailbox.select_folder(folder)
-            storage_folder = settings.mailbox if folder.casefold() == "inbox" else folder
+            display_folder = settings.mailbox if folder.casefold() == "inbox" else folder
+            storage_folder = f"{settings.username.casefold()}::{display_folder}"
             state = store.get_sync_state(storage_folder)
             uid_validity = mailbox.uid_validity_for(folder)
             last_uid = state.last_uid

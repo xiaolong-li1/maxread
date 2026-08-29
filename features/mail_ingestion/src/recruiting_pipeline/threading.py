@@ -8,6 +8,7 @@ from email.header import decode_header, make_header
 from email.parser import BytesParser
 from email.utils import getaddresses
 from pathlib import Path
+from typing import Iterable
 
 from .models import StoredMessage, ThreadEnvelope
 
@@ -65,21 +66,21 @@ def normalize_subject(subject: str) -> str:
     return value.casefold()
 
 
-def candidate_address(headers: HeaderInfo, mailbox_address: str, body_text: str = "") -> str:
-    mailbox = mailbox_address.strip().casefold()
-    if headers.sender and headers.sender != mailbox:
+def candidate_address(headers: HeaderInfo, mailbox_address: str | Iterable[str], body_text: str = "") -> str:
+    mailboxes = _mailbox_addresses(mailbox_address)
+    if headers.sender and headers.sender not in mailboxes:
         if _FORWARDED_MARKER.search(body_text) and headers.subject.casefold().startswith(("fwd", "fw", "转发")):
-            forwarded = next((item.casefold() for item in _FORWARDED_ADDRESS.findall(body_text) if item.casefold() not in {mailbox, headers.sender}), "")
+            forwarded = next((item.casefold() for item in _FORWARDED_ADDRESS.findall(body_text) if item.casefold() not in mailboxes | {headers.sender}), "")
             if forwarded:
                 return forwarded
         return headers.sender
     for recipient in headers.recipients:
-        if recipient != mailbox:
+        if recipient not in mailboxes:
             return recipient
     return headers.sender or "unknown"
 
 
-def thread_key(message: StoredMessage, headers: HeaderInfo, mailbox_address: str) -> str:
+def thread_key(message: StoredMessage, headers: HeaderInfo, mailbox_address: str | Iterable[str]) -> str:
     # The stable candidate address + normalized subject is deliberately used as
     # a fallback because Outlook folders sometimes omit References when a thread
     # is moved. Message-ID metadata is still recorded in the local audit table.
@@ -88,19 +89,28 @@ def thread_key(message: StoredMessage, headers: HeaderInfo, mailbox_address: str
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
 
 
-def build_envelope(messages: list[tuple[StoredMessage, HeaderInfo]], mailbox_address: str, key: str | None = None) -> ThreadEnvelope:
+def build_envelope(messages: list[tuple[StoredMessage, HeaderInfo]], mailbox_address: str | Iterable[str], key: str | None = None) -> ThreadEnvelope:
     if not messages:
         raise ValueError("cannot build an empty thread")
-    first_message, first_headers = messages[0]
+    source_accounts = frozenset(item.source_account for item, _headers in messages if item.source_account)
+    unique_messages: list[tuple[StoredMessage, HeaderInfo]] = []
+    seen: set[str] = set()
+    for item, headers in messages:
+        identity = headers.message_id.casefold() if headers.message_id else f"{item.source_account}|{item.mailbox}|{item.source_uid}"
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique_messages.append((item, headers))
+    first_message, first_headers = unique_messages[0]
     key = key or thread_key(first_message, first_headers, mailbox_address)
     candidate = candidate_address(first_headers, mailbox_address, first_message.body_text)
-    ordered = tuple(sorted((item[0] for item in messages), key=lambda item: item.received_at or ""))
+    ordered = tuple(sorted((item[0] for item in unique_messages), key=lambda item: item.received_at or ""))
     # A group member may reply directly from a personal address (e.g. Bohan)
     # while CC'ing the shared mailbox.  Treat only the candidate address as an
     # incoming sender; all other participants are our outgoing replies.
     incoming = tuple(
         item
-        for item, headers in messages
+        for item, headers in unique_messages
         if headers.sender == candidate
         or (
             headers.subject.casefold().startswith(("fwd", "fw", "转发"))
@@ -108,8 +118,8 @@ def build_envelope(messages: list[tuple[StoredMessage, HeaderInfo]], mailbox_add
             and candidate in item.body_text.casefold()
         )
     )
-    outgoing = tuple(item for item, headers in messages if headers.sender != candidate)
-    folders = frozenset(item.mailbox for item, _ in messages)
+    outgoing = tuple(item for item, headers in unique_messages if headers.sender != candidate)
+    folders = frozenset(item.mailbox for item, _ in unique_messages)
     return ThreadEnvelope(
         key=key,
         candidate_address=candidate,
@@ -118,4 +128,10 @@ def build_envelope(messages: list[tuple[StoredMessage, HeaderInfo]], mailbox_add
         incoming=incoming,
         outgoing=outgoing,
         folders=folders,
+        source_accounts=source_accounts,
     )
+
+
+def _mailbox_addresses(value: str | Iterable[str]) -> set[str]:
+    values = (value,) if isinstance(value, str) else value
+    return {str(item).strip().casefold() for item in values if str(item).strip()}

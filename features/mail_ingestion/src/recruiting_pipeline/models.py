@@ -19,6 +19,7 @@ class StoredMessage:
     body_text: str
     raw_path: Path
     attachments: tuple[Path, ...] = ()
+    source_account: str = ""
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class ThreadEnvelope:
     incoming: tuple[StoredMessage, ...]
     outgoing: tuple[StoredMessage, ...]
     folders: frozenset[str]
+    source_accounts: frozenset[str] = frozenset()
 
     @property
     def latest_time(self) -> str | None:
@@ -53,6 +55,7 @@ class CandidateFields:
     rank: str = "未提供"
     is_985: str = "未知"
     is_c9: str = "未知"
+    source_accounts: list[str] = field(default_factory=list)
     purpose_summary: str = "unknown"
     rejection_recommendation: str = "none"
 
@@ -87,6 +90,15 @@ class CandidateFields:
         self.is_985 = tags.is_985
         self.is_c9 = tags.is_c9
         self.rank = extract_rank_feature(self.academic_display, applicable=self.mail_type == "candidate")
+        normalized_sources: list[str] = []
+        for value in self.source_accounts:
+            raw = str(value).strip()
+            label = {"zip lab": "ZIP Lab", "bohan": "Bohan"}.get(raw.casefold())
+            if label:
+                normalized_sources.append(label)
+            elif "@" in raw:
+                normalized_sources.append(raw.casefold())
+        self.source_accounts = list(dict.fromkeys(normalized_sources))
         return self
 
     @property

@@ -25,6 +25,26 @@ from recruiting_pipeline.weekly_report import markdown_to_post, render_weekly_re
 
 
 class RecruitingPipelineTest(unittest.TestCase):
+    def test_pipeline_settings_load_multiple_mail_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary = root / "primary.env"
+            secondary = root / "secondary.env"
+            secondary.write_text("IMAP_USERNAME=bohan.zhuang@zju.edu.cn\n", encoding="utf-8")
+            primary.write_text(
+                "IMAP_USERNAME=zip.lab@zju.edu.cn\n"
+                "MAIL_READ_ONLY=1\n"
+                "RECRUITING_BASE_TOKEN=base\n"
+                "RECRUITING_TABLE_ID=table\n"
+                f"RECRUITING_MAIL_ACCOUNT_ENVS={secondary}\n",
+                encoding="utf-8",
+            )
+
+            settings = PipelineSettings.load(root, primary)
+
+            self.assertEqual(settings.mailbox_env_files, (primary, secondary))
+            self.assertEqual(settings.mailbox_addresses, ("zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"))
+
     def test_official_985_and_c9_lists_have_expected_membership(self) -> None:
         self.assertEqual(len(PROJECT_985), 39)
         self.assertEqual(len(C9), 9)
@@ -238,6 +258,7 @@ class RecruitingPipelineTest(unittest.TestCase):
             school="浙江大学",
             mail_type="candidate",
             academic_display="GPA 3.9 · 专业排名第 4/120（Top 3.33%）",
+            source_accounts=["ZIP Lab", "Bohan"],
         ).normalized()
 
         sync.upsert(
@@ -254,6 +275,7 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertEqual(payload["是否985"], ["是"])
         self.assertEqual(payload["是否C9"], ["是"])
         self.assertTrue(payload["是否已回复"])
+        self.assertEqual(payload["来源邮箱"], ["ZIP Lab", "Bohan"])
 
     def test_thread_window_filter(self) -> None:
         now = datetime(2026, 8, 28, tzinfo=timezone.utc)
@@ -314,6 +336,36 @@ class RecruitingPipelineTest(unittest.TestCase):
         envelope = build_envelope(headers, "zip.lab@example.com", key="k")
         self.assertEqual([item.sender_address for item in envelope.incoming], ["candidate@example.com"])
         self.assertEqual([item.sender_address for item in envelope.outgoing], ["bohan@example.com"])
+
+    def test_cc_duplicate_across_accounts_is_deduplicated_with_both_sources(self) -> None:
+        first = StoredMessage(1, "42", "INBOX", "申请", "", "candidate@example.com", "2026-08-01T10:00:00+08:00", "申请", Path("/tmp/1.eml"), source_account="zip.lab@zju.edu.cn")
+        second = StoredMessage(2, "99", "INBOX", "申请", "", "candidate@example.com", "2026-08-01T10:00:00+08:00", "申请", Path("/tmp/2.eml"), source_account="bohan.zhuang@zju.edu.cn")
+        headers = HeaderInfo("<same>", "", (), "申请", "candidate@example.com", ("zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"))
+
+        envelope = build_envelope(
+            [(first, headers), (second, headers)],
+            ("zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"),
+            key="same-thread",
+        )
+
+        self.assertEqual(len(envelope.messages), 1)
+        self.assertEqual(envelope.source_accounts, frozenset({"zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"}))
+
+    def test_reply_from_either_owned_mailbox_is_outgoing(self) -> None:
+        candidate = StoredMessage(1, "1", "INBOX", "咨询", "", "candidate@example.com", "2026-08-01T10:00:00+08:00", "申请", Path("/tmp/1.eml"), source_account="zip.lab@zju.edu.cn")
+        reply = StoredMessage(2, "2", "Sent", "Re: 咨询", "", "bohan.zhuang@zju.edu.cn", "2026-08-01T11:00:00+08:00", "欢迎交流", Path("/tmp/2.eml"), source_account="bohan.zhuang@zju.edu.cn")
+        envelope = build_envelope(
+            [
+                (candidate, HeaderInfo("<m1>", "", (), "咨询", "candidate@example.com", ("zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"))),
+                (reply, HeaderInfo("<m2>", "<m1>", ("<m1>",), "Re: 咨询", "bohan.zhuang@zju.edu.cn", ("candidate@example.com",))),
+            ],
+            ("zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"),
+            key="reply-thread",
+        )
+
+        self.assertEqual([item.sender_address for item in envelope.incoming], ["candidate@example.com"])
+        self.assertEqual([item.sender_address for item in envelope.outgoing], ["bohan.zhuang@zju.edu.cn"])
+        self.assertEqual(envelope.source_accounts, frozenset({"zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"}))
 
     def test_one_ai_future_failure_does_not_discard_other_prepared_threads(self) -> None:
         good_message = StoredMessage(1, "1", "INBOX", "申请", "", "good@example.com", "2026-08-01T10:00:00+08:00", "申请", Path("/tmp/1.eml"))

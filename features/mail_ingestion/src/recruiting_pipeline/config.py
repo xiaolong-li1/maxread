@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,6 +63,8 @@ class PipelineSettings:
     mark_interview_assigned: bool
     notify_enabled: bool
     notify_chat_id: str
+    mailbox_env_files: tuple[Path, ...] = ()
+    mailbox_addresses: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, root: Path, mailbox_env_file: str | Path) -> "PipelineSettings":
@@ -94,6 +97,22 @@ class PipelineSettings:
             raise ValueError("RECRUITING_BASE_TOKEN and RECRUITING_TABLE_ID are required")
         if value("MAIL_READ_ONLY", "1").lower() not in {"1", "true", "yes", "on"}:
             raise ValueError("MAIL_READ_ONLY must remain 1")
+        configured_envs = [mailbox_env]
+        for token in re.split(r"[,;\n]+", value("RECRUITING_MAIL_ACCOUNT_ENVS")):
+            if not token.strip():
+                continue
+            candidate = Path(token.strip()).expanduser()
+            if not candidate.is_absolute():
+                candidate = (root / candidate).resolve()
+            configured_envs.append(candidate)
+        account_envs = tuple(dict.fromkeys(configured_envs))
+        account_addresses = tuple(
+            dict.fromkeys(
+                values.get("IMAP_USERNAME", "").strip().casefold()
+                for values in (_read_env(path) for path in account_envs)
+                if values.get("IMAP_USERNAME", "").strip()
+            )
+        )
 
         return cls(
             root=root,
@@ -124,6 +143,8 @@ class PipelineSettings:
             mark_interview_assigned=boolean("RECRUITING_MARK_INTERVIEW_ASSIGNED", True),
             notify_enabled=boolean("RECRUITING_NOTIFY_ENABLED", False),
             notify_chat_id=value("RECRUITING_NOTIFY_CHAT_ID"),
+            mailbox_env_files=account_envs,
+            mailbox_addresses=account_addresses,
         )
 
     def command_env(self) -> dict[str, str]:
