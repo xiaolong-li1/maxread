@@ -7,13 +7,14 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
+from types import SimpleNamespace
 
 from mail_collector.parser import parse_message
 from recruiting_pipeline.academic import normalize_academic_display
 from recruiting_pipeline.config import PipelineSettings
 from recruiting_pipeline.cli import build_parser
 from recruiting_pipeline.base_sync import BaseSync
-from recruiting_pipeline.models import StoredMessage, ThreadEnvelope
+from recruiting_pipeline.models import ProcessedThread, StoredMessage, ThreadEnvelope
 from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _other_fields, _within_days
 from recruiting_pipeline.llm import _fields_from_json, _strip_json_fence
 from recruiting_pipeline.institution_tags import C9, PROJECT_985, classify_institution, extract_rank_feature
@@ -313,6 +314,27 @@ class RecruitingPipelineTest(unittest.TestCase):
         envelope = build_envelope(headers, "zip.lab@example.com", key="k")
         self.assertEqual([item.sender_address for item in envelope.incoming], ["candidate@example.com"])
         self.assertEqual([item.sender_address for item in envelope.outgoing], ["bohan@example.com"])
+
+    def test_one_ai_future_failure_does_not_discard_other_prepared_threads(self) -> None:
+        good_message = StoredMessage(1, "1", "INBOX", "申请", "", "good@example.com", "2026-08-01T10:00:00+08:00", "申请", Path("/tmp/1.eml"))
+        bad_message = StoredMessage(2, "2", "INBOX", "申请", "", "bad@example.com", "2026-08-01T11:00:00+08:00", "申请", Path("/tmp/2.eml"))
+        good = ThreadEnvelope("good", "good@example.com", "申请", (good_message,), (good_message,), (), frozenset({"INBOX"}))
+        bad = ThreadEnvelope("bad", "bad@example.com", "申请", (bad_message,), (bad_message,), (), frozenset({"INBOX"}))
+        runner = RecruitingRunner.__new__(RecruitingRunner)
+        runner.settings = SimpleNamespace(llm_concurrency=2)
+        runner.store = SimpleNamespace(get_thread=lambda _key: None)
+
+        def prepare(envelope):
+            if envelope.key == "bad":
+                raise RuntimeError("gateway 524")
+            return ProcessedThread(envelope.key, envelope.candidate_address, envelope.latest_time, CandidateFields(name="Good", mail_type="candidate").normalized(), None, None, None, None, True)
+
+        runner._prepare_thread = prepare
+        results = list(runner._extract_changed({"good": good, "bad": bad}, {"good", "bad"}))
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(sum(thread is not None for thread, _envelope, _error in results), 1)
+        self.assertEqual(sum(error is not None for _thread, _envelope, error in results), 1)
 
     def test_forwarded_mail_uses_original_candidate_address(self) -> None:
         message = StoredMessage(1, "1", "INBOX", "Fwd: 申请", "", "bohan@example.com", None, "Begin forwarded message:\nFrom: Candidate <candidate@example.com>\n申请材料", Path("/tmp/1.eml"))

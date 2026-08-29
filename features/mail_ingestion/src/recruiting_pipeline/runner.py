@@ -94,8 +94,11 @@ class RecruitingRunner:
             stats.new_threads = sum(1 for key in changed_keys if self.store.get_thread(key) is None)
             stats.updated_threads = len(changed_keys) - stats.new_threads
 
-            prepared = self._extract_changed(envelopes, changed_keys)
-            for thread in prepared:
+            for thread, envelope, preparation_error in self._extract_changed(envelopes, changed_keys):
+                if preparation_error is not None or thread is None:
+                    stats.failed_threads += 1
+                    self._record_preparation_failure(envelope, preparation_error or RuntimeError("thread preparation failed"))
+                    continue
                 try:
                     result = self._sync_thread(thread)
                     stats.documents_created += int(result.get("document_created", False))
@@ -165,7 +168,7 @@ class RecruitingRunner:
                 changed.add(key)
         return {key: build_envelope(items, self.settings.mailbox_address, key=key) for key, items in grouped.items()}, changed
 
-    def _extract_changed(self, envelopes: dict[str, ThreadEnvelope], changed_keys: set[str]) -> list[ProcessedThread]:
+    def _extract_changed(self, envelopes: dict[str, ThreadEnvelope], changed_keys: set[str]):
         candidates: list[ThreadEnvelope] = []
         for key in changed_keys:
             envelope = envelopes.get(key)
@@ -181,13 +184,39 @@ class RecruitingRunner:
                 continue
             candidates.append(envelope)
         if not candidates:
-            return []
-        results: list[ProcessedThread] = []
+            return
         with ThreadPoolExecutor(max_workers=self.settings.llm_concurrency) as executor:
-            futures = {executor.submit(self._prepare_thread, envelope): envelope.key for envelope in candidates}
+            futures = {executor.submit(self._prepare_thread, envelope): envelope for envelope in candidates}
             for future in as_completed(futures):
-                results.append(future.result())
-        return results
+                envelope = futures[future]
+                try:
+                    yield future.result(), envelope, None
+                except Exception as exc:
+                    yield None, envelope, exc
+
+    def _record_preparation_failure(self, envelope: ThreadEnvelope, error: BaseException) -> None:
+        row = self.store.get_thread(envelope.key)
+        previous = self.store.fields_from_row(row)
+        fields = previous or (
+            _other_fields(envelope)
+            if self._is_obvious_other(envelope)
+            else CandidateFields(
+                name=envelope.candidate_address,
+                mail_type="candidate",
+                purpose_summary=envelope.subject,
+            ).normalized()
+        )
+        attempts = int(row["attempt_count"] if row else 0) + 1
+        self.store.save_thread(
+            envelope.key,
+            envelope.candidate_address,
+            envelope.subject,
+            fields,
+            latest_time=_base_time(envelope.latest_time) or "",
+            status="extract_failed",
+            attempt_count=attempts,
+            last_error=str(error)[:1000],
+        )
 
     def _prepare_thread(self, envelope: ThreadEnvelope) -> ProcessedThread:
         previous_row = self.store.get_thread(envelope.key)
