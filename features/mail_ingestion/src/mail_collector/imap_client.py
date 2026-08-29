@@ -83,7 +83,7 @@ class ImapClient:
                 self.client.authenticate("XOAUTH2", lambda _: auth_string)
             else:
                 self.client.login(self.settings.username, self.settings.password or "")
-            status, _ = self.client.select(self.settings.mailbox, readonly=True)
+            status, _ = self.client.select(_mailbox_argument(self.settings.mailbox), readonly=True)
             if status != "OK":
                 raise RuntimeError(f"cannot select mailbox {self.settings.mailbox}")
         except imaplib.IMAP4.error as error:
@@ -102,7 +102,7 @@ class ImapClient:
 
     def uid_validity_for(self, folder: str) -> str | None:
         assert self.client is not None
-        status, data = self.client.status(encode_modified_utf7(folder), "(UIDVALIDITY)")
+        status, data = self.client.status(_mailbox_argument(folder), "(UIDVALIDITY)")
         if status != "OK" or not data or not data[0]:
             return None
         match = re.search(rb"UIDVALIDITY\s+(\d+)", data[0])
@@ -110,7 +110,7 @@ class ImapClient:
 
     def select_folder(self, folder: str) -> None:
         assert self.client is not None
-        status, _ = self.client.select(encode_modified_utf7(folder), readonly=True)
+        status, _ = self.client.select(_mailbox_argument(folder), readonly=True)
         if status != "OK":
             raise RuntimeError(f"cannot select mailbox folder {folder}")
 
@@ -159,3 +159,9 @@ def _folder_name_from_list_row(item: bytes) -> str:
     if len(raw_name) >= 2 and raw_name[:1] == raw_name[-1:] == b'"':
         raw_name = raw_name[1:-1]
     return decode_modified_utf7(raw_name.decode("ascii", errors="replace"))
+
+
+def _mailbox_argument(folder: str) -> str:
+    encoded = encode_modified_utf7(folder)
+    escaped = encoded.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'

@@ -13,7 +13,7 @@ from unittest.mock import patch
 from mail_collector.cli import command_configure
 from mail_collector.oauth import access_token
 from mail_collector.config import Settings
-from mail_collector.imap_client import ImapClient, _folder_name_from_list_row, decode_modified_utf7, encode_modified_utf7
+from mail_collector.imap_client import ImapClient, _folder_name_from_list_row, _mailbox_argument, decode_modified_utf7, encode_modified_utf7
 from mail_collector.parser import parse_message
 from mail_collector.store import Store
 
@@ -69,6 +69,10 @@ class ParserTest(unittest.TestCase):
     def test_imap_list_preserves_quoted_folder_names_with_spaces(self) -> None:
         self.assertEqual(_folder_name_from_list_row(b'(\\Sent) "/" "Sent Items"'), "Sent Items")
         self.assertEqual(_folder_name_from_list_row(b'(\\Junk) "/" "Junk E-mail"'), "Junk E-mail")
+
+    def test_imap_mailbox_arguments_are_quoted(self) -> None:
+        self.assertEqual(_mailbox_argument("Sent Items"), '"Sent Items"')
+        self.assertEqual(_mailbox_argument('A"B'), '"A\\"B"')
 
 
 class StoreTest(unittest.TestCase):
