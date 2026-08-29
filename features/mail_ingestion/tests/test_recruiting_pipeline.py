@@ -26,6 +26,13 @@ from recruiting_pipeline.weekly_report import markdown_to_post, render_weekly_re
 
 
 class RecruitingPipelineTest(unittest.TestCase):
+    def test_thread_latest_time_handles_mixed_timezone_dates(self) -> None:
+        first = StoredMessage(1, "1", "INBOX", "s", "", "a@example.com", "2026-08-29T10:00:00", "", Path("/tmp/1"))
+        second = StoredMessage(2, "2", "INBOX", "s", "", "a@example.com", "2026-08-29T19:00:00+08:00", "", Path("/tmp/2"))
+        envelope = ThreadEnvelope("k", "a@example.com", "s", (first, second), (first, second), (), frozenset({"INBOX"}))
+
+        self.assertEqual(envelope.latest_time, second.received_at)
+
     def test_docx_resume_text_reaches_evidence_pack(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "resume.docx"
