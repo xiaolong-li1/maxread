@@ -300,6 +300,7 @@ class RecruitingRunner:
             for future in as_completed(futures):
                 key, envelope, row, fields = futures[future]
                 completed += 1
+                error_message = ""
                 try:
                     refreshed = future.result()
                     before = {
@@ -316,22 +317,23 @@ class RecruitingRunner:
                     }
                     if before != after:
                         changes.append({"thread_key": key, "name": fields.name, "before": before, "after": after})
-                        if apply:
-                            self._sync_thread(
-                                ProcessedThread(
-                                    thread_key=key,
-                                    candidate_address=str(row["candidate_address"] or envelope.candidate_address),
-                                    latest_time=str(row["latest_time"] or _base_time(envelope.latest_time) or ""),
-                                    fields=refreshed,
-                                    folder_status=None,
-                                    interview_assigned=None,
-                                    document_id=str(row["doc_id"] or "") or None,
-                                    document_url=str(row["doc_url"] or "") or None,
-                                    changed=True,
-                                )
+                    if apply:
+                        self._sync_thread(
+                            ProcessedThread(
+                                thread_key=key,
+                                candidate_address=str(row["candidate_address"] or envelope.candidate_address),
+                                latest_time=str(row["latest_time"] or _base_time(envelope.latest_time) or ""),
+                                fields=refreshed,
+                                folder_status=None,
+                                interview_assigned=None,
+                                document_id=str(row["doc_id"] or "") or None,
+                                document_url=str(row["doc_url"] or "") or None,
+                                changed=True,
                             )
+                        )
                 except Exception as exc:
-                    failures.append({"thread_key": key, "name": fields.name, "error": str(exc)[:500]})
+                    error_message = str(exc)[:500]
+                    failures.append({"thread_key": key, "name": fields.name, "error": error_message})
                 print(json.dumps({
                     "event": "academic_reaudit_progress",
                     "completed": completed,
@@ -339,6 +341,7 @@ class RecruitingRunner:
                     "changed": len(changes),
                     "failed": len(failures),
                     "name": fields.name,
+                    "error": error_message[:200],
                 }, ensure_ascii=False), flush=True)
         return {
             "ok": not failures,
