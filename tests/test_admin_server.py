@@ -226,7 +226,7 @@ def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
         connection.request("GET", "/submit")
         response = connection.getresponse()
         assert response.status == 200
-        assert "论文会话" in response.read().decode("utf-8")
+        assert "我的论文项目" in response.read().decode("utf-8")
 
         connection.request("GET", "/assets/web-pet-sprite.png")
         response = connection.getresponse()
@@ -266,7 +266,7 @@ def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
         connection.request(
             "POST",
             "/api/web/pet/chat",
-            body=json.dumps({"content": "任务到哪了？"}),
+            body=json.dumps({"content": "任务到哪了？", "job_id": result["items"][0]["job_id"]}),
             headers={"content-type": "application/json", "cookie": cookie},
         )
         response = connection.getresponse()

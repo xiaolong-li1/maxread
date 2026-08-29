@@ -26,7 +26,7 @@ include = ["maxread*"]
 exclude = ["tests*", "deploy*"]
 
 [tool.setuptools.package-data]
-maxread = ["static/*.html"]
+maxread = ["static/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

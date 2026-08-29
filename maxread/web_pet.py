@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -43,9 +42,7 @@ STAGE_EXPLANATIONS = {
 }
 
 PET_TOOLS = {
-    "list_my_tasks": "列出当前账号自己的最近任务和准确状态。",
-    "get_my_task": "读取当前账号指定 job_id 的任务详情。",
-    "read_my_conversation": "读取当前账号最近的网页/飞书会话。",
+    "get_project": "读取当前项目的准确状态。",
     "explain_stage": "解释一个 MaxRead 工作流阶段。",
 }
 
@@ -73,17 +70,49 @@ class WebPetAgent:
             actor_type=str(identity.get("_actor_type") or "user"),
             actor_id=str(identity.get("_actor_id") or store.web_identity_sender(identity)),
         )
+        self.project: dict | None = None
 
-    def reply(self, text: str) -> tuple[str, dict]:
+    def reply(
+        self,
+        text: str,
+        job_id: int = 0,
+        source_id: str = "",
+        history: list[dict] | None = None,
+    ) -> tuple[str, dict]:
         progress = progress_payload(self.settings, self.store, self.identity)
+        target_id = int(job_id or 0)
+        target_source = str(source_id or "").strip()
+        self.project = next(
+            (
+                item for item in progress.get("recent", [])
+                if (target_id and int(item["job_id"]) == target_id)
+                or (target_source and item["source_id"] == target_source)
+            ),
+            None,
+        )
+        if (target_id or target_source) and self.project is None:
+            raise ValueError("项目不在当前账号范围")
+        scoped = {
+            **progress,
+            "active": self.project if self.project and self.project["status"] in {"queued", "running"} else None,
+            "recent": [self.project] if self.project else progress.get("recent", []),
+        }
         if re.search(r"进度|到哪|多久|状态|卡住|失败|完成|还要|排队|为什么", text, re.I):
-            return deterministic_status_answer(progress), progress
+            return deterministic_status_answer(scoped), scoped
         if not str(getattr(self.settings, "openai_api_key", "") or ""):
-            return "我在这儿陪你等。你可以问我当前任务、阶段含义或预计还要多久。", progress
-        return self._agent_loop(text, progress), progress
+            return "我在这儿陪你等。你可以问我这个项目的阶段含义或预计还要多久。", scoped
+        return self._agent_loop(text, scoped, history or []), scoped
 
-    def _agent_loop(self, text: str, progress: dict) -> str:
-        transcript = [{"role": "user", "content": text}]
+    def _agent_loop(self, text: str, progress: dict, history: list[dict]) -> str:
+        transcript = [
+            {
+                "role": str(item.get("role") or "user")[:16],
+                "content": str(item.get("content") or "")[:500],
+            }
+            for item in history[-8:]
+            if str(item.get("role") or "") in {"user", "assistant"}
+        ]
+        transcript.append({"role": "user", "content": text})
         for _step in range(self.MAX_STEPS):
             response = self._model_call(transcript)
             action = _parse_agent_action(response)
@@ -100,17 +129,8 @@ class WebPetAgent:
         return "我查了几步还没组织好答案。你可以换个更具体的问题，比如“当前任务到哪了”。"
 
     def _run_tool(self, tool: str, args: dict, progress: dict):
-        if tool == "list_my_tasks":
-            return progress.get("recent", [])[:8]
-        if tool == "get_my_task":
-            job_id = int(args.get("job_id") or 0)
-            return next((item for item in progress.get("recent", []) if item["job_id"] == job_id), {"error": "任务不在当前账号范围"})
-        if tool == "read_my_conversation":
-            messages = self.store.list_web_messages(self.identity, 0, 20)
-            return [
-                {"role": item["role"], "kind": item["kind"], "content": item["content"][:500]}
-                for item in messages[-12:]
-            ]
+        if tool == "get_project":
+            return self.project or {"error": "当前没有选中的项目"}
         if tool == "explain_stage":
             stage = str(args.get("stage") or "")
             return {"stage": stage, "explanation": STAGE_EXPLANATIONS.get(stage, "这是内部工作流阶段，当前没有更细说明。")}
@@ -119,10 +139,11 @@ class WebPetAgent:
     def _model_call(self, transcript: list[dict]) -> str:
         system = (
             "你叫 Max，是 MaxRead 网页里的绿色小狗任务伙伴，也是一个受限、只读、类似 Codex 的小型 agent。"
-            "你的职责是陪伴用户、解释论文任务状态、梳理当前账号的会话，并回答轻松的普通问题。"
-            "你只能使用四个工具：list_my_tasks、get_my_task、read_my_conversation、explain_stage。"
+            "你固定陪在一张论文项目卡旁，只讨论用户当前点开的这一篇论文项目，也可以回答轻松的普通问题。"
+            "你只能使用两个工具：get_project、explain_stage。"
             "你不能访问原始 SQL、文件系统、密钥、全局队列、其他用户、任意网络，也不能提交、重试、删除或修改任务。"
-            "管理员代入不会扩大数据范围。状态事实必须来自工具，不能猜百分比、失败原因或完成时间。"
+            "你的聊天是临时侧边对话，不属于正式项目记录。管理员代入不会扩大数据范围。"
+            "状态事实必须来自工具，不能猜百分比、失败原因或完成时间。"
             "每轮只输出一个 JSON：调用工具时为 {\"type\":\"tool\",\"tool\":\"工具名\",\"args\":{}}；"
             "回答时为 {\"type\":\"answer\",\"text\":\"自然简短的中文\"}。普通回复 2 到 4 句。"
         )
@@ -143,9 +164,43 @@ class WebPetAgent:
 
 
 def progress_payload(settings, store: Store, identity) -> dict:
-    jobs = store.list_web_identity_jobs(identity, 8)
+    jobs = store.list_web_identity_jobs(identity, 50)
     duration = max(60, int(store.recent_job_duration_seconds("paper") or 300))
-    payload = [_progress_row(store, job, duration, settings.queue_workers) for job in jobs]
+    latest_jobs: dict[str, dict] = {}
+    for job in jobs:
+        source_id = str(job.get("source_id") or "")
+        current = latest_jobs.get(source_id)
+        if source_id and (current is None or int(job.get("id") or 0) > int(current.get("id") or 0)):
+            latest_jobs[source_id] = job
+    payload = [
+        _progress_row(store, job, duration, settings.queue_workers)
+        for job in latest_jobs.values()
+    ]
+    known_sources = {item["source_id"] for item in payload}
+    for usage in store.list_web_identity_usage(identity, 80):
+        source_id = str(usage.get("source_id") or "")
+        if not source_id or source_id in known_sources:
+            continue
+        status = str(usage.get("status") or "")
+        payload.append({
+            "job_id": 0,
+            "source_id": source_id,
+            "title": str(usage.get("title") or ""),
+            "status": "done" if status == "done" else status,
+            "workflow_state": "completed" if status == "done" else status,
+            "stage": "completed" if status == "done" else status,
+            "label": "完成交付" if status == "done" else (status or "已记录"),
+            "percent": 100 if status == "done" else 5,
+            "remaining_seconds": 0,
+            "attempts": 0,
+            "doc_url": str(usage.get("doc_url") or ""),
+            "error": _friendly_error(str(usage.get("error") or "")),
+            "updated_at": str(usage.get("updated_at") or usage.get("created_at") or ""),
+        })
+        known_sources.add(source_id)
+    payload.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    payload.sort(key=lambda item: 0 if item["status"] == "running" else 1 if item["status"] == "queued" else 2)
+    payload = payload[:30]
     active = next((item for item in payload if item["status"] in {"queued", "running"}), None)
     return {"active": active, "recent": payload, "service": store.get_service_status()}
 
@@ -242,25 +297,29 @@ def _parse_agent_action(raw: str) -> dict:
     return {"type": "answer", "text": text}
 
 
-def persist_pet_exchange(settings, store: Store, identity, content: str) -> dict:
+def chat_with_project_pet(
+    settings,
+    store: Store,
+    identity,
+    content: str,
+    *,
+    job_id: int = 0,
+    source_id: str = "",
+    history: list[dict] | None = None,
+) -> dict:
     text = str(content or "").strip()
     if not text:
         raise ValueError("想问我什么？")
     if len(text) > 600:
         raise ValueError("这次先聊短一点吧")
-    if store.recent_pet_message_count(identity, 10) >= 20:
-        raise ValueError("我先歇一会儿，稍后再聊")
-    conversation = store.ensure_web_conversation(identity)
-    sender_id = store.web_identity_sender(identity)
-    store.append_web_message(
-        int(conversation["id"]), f"pet-user:{uuid.uuid4().hex}", "user", text,
-        kind="pet_user", channel="web",
-        actor_type=str(identity.get("_actor_type") or "user"),
-        actor_id=str(identity.get("_actor_id") or sender_id),
+    answer, progress = WebPetAgent(settings, store, identity).reply(
+        text,
+        job_id=int(job_id or 0),
+        source_id=str(source_id or ""),
+        history=history,
     )
-    answer, progress = WebPetAgent(settings, store, identity).reply(text)
-    message = store.append_web_message(
-        int(conversation["id"]), f"pet-reply:{uuid.uuid4().hex}", "assistant", answer,
-        kind="pet_reply", channel="pet", actor_type="system",
-    )
-    return {"ok": True, "message": message, "progress": progress}
+    return {
+        "ok": True,
+        "message": {"role": "assistant", "kind": "pet_reply", "content": answer},
+        "progress": progress,
+    }

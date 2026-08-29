@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from maxread.cli import _handle_web_binding_event
 from maxread.db import Store
 from maxread.web_submit import (
@@ -10,7 +12,7 @@ from maxread.web_submit import (
     retry_web_job,
     submit_web_papers,
 )
-from maxread.web_pet import WebPetAgent, persist_pet_exchange, progress_payload
+from maxread.web_pet import WebPetAgent, chat_with_project_pet, progress_payload
 
 
 def test_web_identity_defaults_to_guest_and_is_stable(tmp_path):
@@ -101,17 +103,43 @@ def test_progress_and_pet_agent_are_scoped_to_current_identity(tmp_path):
     store.close()
 
 
-def test_pet_exchange_is_persisted_in_main_conversation(tmp_path):
+def test_project_pet_rejects_another_identity_job(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token_a, identity_a = new_web_identity(store)
+    _token_b, identity_b = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="")
+    submit_web_papers(settings, store, identity_a, "2608.25927")
+    other = submit_web_papers(settings, store, identity_b, "2608.27456")["items"][0]
+
+    with pytest.raises(ValueError, match="项目不在当前账号范围"):
+        chat_with_project_pet(
+            settings,
+            store,
+            identity_a,
+            "进度到哪里了？",
+            job_id=other["job_id"],
+        )
+    store.close()
+
+
+def test_project_pet_chat_is_ephemeral_and_scoped(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     _token, identity = new_web_identity(store)
     settings = SimpleNamespace(queue_workers=3, openai_api_key="")
 
-    result = persist_pet_exchange(settings, store, identity, "任务到哪了？")
+    queued = submit_web_papers(settings, store, identity, "2608.25927")["items"][0]
+    before = store.list_web_messages(identity)
+    result = chat_with_project_pet(
+        settings,
+        store,
+        identity,
+        "任务到哪了？",
+        job_id=queued["job_id"],
+    )
 
     assert result["ok"] is True
-    messages = store.list_web_messages(identity)
-    assert [item["kind"] for item in messages] == ["pet_user", "pet_reply"]
-    assert messages[-1]["channel"] == "pet"
+    assert "2608.25927" in result["message"]["content"]
+    assert store.list_web_messages(identity) == before
     store.close()
 
 
@@ -134,7 +162,56 @@ def test_retry_button_api_resumes_published_visual_failure(tmp_path):
     job = next(item for item in store.list_queue_jobs() if item["id"] == queued["job_id"])
     assert job["status"] == "queued"
     assert job["rebuild_pipeline"] == 0
-    assert any(item["kind"] == "retry_request" for item in store.list_web_messages(identity))
+    task_messages = [item for item in store.list_web_messages(identity) if item["source_id"] == "2608.25927"]
+    assert len(task_messages) == 1
+    assert task_messages[0]["status"] == "queued"
+    assert not any(item["kind"] == "retry_request" for item in store.list_web_messages(identity))
+    store.close()
+
+
+def test_project_card_is_updated_in_place_across_lifecycle(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3)
+    queued = submit_web_papers(settings, store, identity, "2608.25927")["items"][0]
+    watcher = store.get_job_watchers(queued["job_id"])[0]
+
+    store.update_web_job_progress(watcher, queued["job_id"], "2608.25927", "正在内容审阅", "running")
+    store.append_web_job_result(
+        watcher,
+        queued["job_id"],
+        "2608.25927",
+        "完成交付",
+        doc_url="https://tenant/doc",
+        status="done",
+    )
+
+    cards = [item for item in store.list_web_messages(identity) if item["source_id"] == "2608.25927"]
+    assert len(cards) == 1
+    assert cards[0]["kind"] == "result"
+    assert cards[0]["status"] == "done"
+    assert cards[0]["doc_url"] == "https://tenant/doc"
+    store.close()
+
+
+def test_cached_document_appears_as_personal_project(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="")
+    store.upsert_paper(
+        "2608.25927",
+        "done",
+        title="Code World Model",
+        doc_url="https://tenant/doc",
+    )
+
+    submit_web_papers(settings, store, identity, "2608.25927")
+    projects = progress_payload(settings, store, identity)["recent"]
+
+    assert len(projects) == 1
+    assert projects[0]["source_id"] == "2608.25927"
+    assert projects[0]["status"] == "done"
+    assert projects[0]["doc_url"] == "https://tenant/doc"
     store.close()
 
 
@@ -221,22 +298,27 @@ def test_feishu_binding_command_claims_code_and_replies(tmp_path):
 
 
 def test_web_submit_page_is_compact_and_supports_binding():
-    assert "论文会话" in WEB_SUBMIT_HTML
+    assert "我的论文项目" in WEB_SUBMIT_HTML
     assert "绑定飞书账号" in WEB_SUBMIT_HTML
     assert "/api/web/submit" in WEB_SUBMIT_HTML
     assert "/api/web/retry" in WEB_SUBMIT_HTML
     assert "/api/web/pet/chat" in WEB_SUBMIT_HTML
-    assert 'id="progress-track"' not in WEB_SUBMIT_HTML
-    assert 'class="progress-track"' in WEB_SUBMIT_HTML
+    assert 'id="progress-panel"' not in WEB_SUBMIT_HTML
+    assert 'class="project-progress"' in WEB_SUBMIT_HTML
     assert 'class="retry-button"' in WEB_SUBMIT_HTML
-    assert WEB_SUBMIT_HTML.index('id="history"') < WEB_SUBMIT_HTML.index('id="message-input"')
+    assert 'id="history"' not in WEB_SUBMIT_HTML
+    assert 'id="message-input"' not in WEB_SUBMIT_HTML
+    assert 'id="projects"' in WEB_SUBMIT_HTML
+    assert 'id="paper-input"' in WEB_SUBMIT_HTML
+    assert "openPet(" in WEB_SUBMIT_HTML
+    assert "petChats" in WEB_SUBMIT_HTML
     assert "web-pet-sprite.png" in WEB_SUBMIT_HTML
     assert "小绿" not in WEB_SUBMIT_HTML
-    assert "和 Max 聊聊" in WEB_SUBMIT_HTML
-    assert "maxreadOnboardingSeen" in WEB_SUBMIT_HTML
+    assert "问 Max" in WEB_SUBMIT_HTML
+    assert "maxreadProjectOnboardingSeen" in WEB_SUBMIT_HTML
     assert 'id="console-link"' in WEB_SUBMIT_HTML
-    assert "class=\"console-link hidden\"" in WEB_SUBMIT_HTML
-    assert "loadAdminContext()" in WEB_SUBMIT_HTML
+    assert "class=\"console-link\"" in WEB_SUBMIT_HTML
+    assert 'href="./projects"' in WEB_SUBMIT_HTML
     assert "maxread_web_session" not in WEB_SUBMIT_HTML
     assert "linear-gradient" not in WEB_SUBMIT_HTML
-    assert "font-size:28px" in WEB_SUBMIT_HTML
+    assert "font-size: 28px" in WEB_SUBMIT_HTML

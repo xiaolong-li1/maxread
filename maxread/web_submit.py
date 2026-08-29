@@ -125,17 +125,14 @@ def submit_web_papers(settings, store: Store, identity, content: str) -> dict:
                 "doc_url": record.doc_url,
                 "title": record.title,
             })
-            store.append_web_message(
-                int(conversation["id"]),
-                f"web-result:cache:{usage_id}",
-                "assistant",
+            store.upsert_web_task(
+                identity,
+                0,
+                ref.paper_id,
                 f"这篇已有可用文档：{record.title or ref.paper_id}",
                 kind="result",
-                source_id=ref.paper_id,
                 doc_url=record.doc_url,
                 status="done",
-                channel="system",
-                actor_type="system",
             )
             continue
         queued = store.enqueue_job(
@@ -201,13 +198,6 @@ def retry_web_job(settings, store: Store, identity, job_id: int) -> dict:
     )
     actor_type = str(identity.get("_actor_type") or "user")
     actor_id = str(identity.get("_actor_id") or store.web_identity_sender(identity))
-    conversation = store.ensure_web_conversation(identity)
-    message_id = f"web-retry:{uuid.uuid4().hex}"
-    store.append_web_message(
-        int(conversation["id"]), message_id, "user", f"重试 arXiv {job['source_id']}",
-        kind="retry_request", source_id=str(job["source_id"]), job_id=target_id,
-        channel="web", actor_type=actor_type, actor_id=actor_id,
-    )
     ok = store.retry_queue_job(
         target_id,
         reason=f"web retry requested by {actor_type}:{actor_id}",
@@ -217,12 +207,12 @@ def retry_web_job(settings, store: Store, identity, job_id: int) -> dict:
     )
     if not ok:
         raise ValueError("任务状态已变化，请刷新后再试")
-    store.update_web_job_progress(
-        {"chat_type": "web", "message_id": message_id, "sender_id": store.web_identity_sender(identity)},
+    store.upsert_web_task(
+        identity,
         target_id,
         str(job["source_id"]),
         "已重新加入队列。" if not resume_published else "已从已发布文档继续视觉验收。",
-        "queued",
+        status="queued",
     )
     return {"ok": True, "job_id": target_id, "resume_published": resume_published}
 

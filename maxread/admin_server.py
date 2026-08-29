@@ -30,7 +30,7 @@ from .web_submit import (
     submit_web_papers,
     web_identity_payload,
 )
-from .web_pet import persist_pet_exchange, progress_payload
+from .web_pet import chat_with_project_pet, progress_payload
 
 
 DEFAULT_LIMIT = 80
@@ -149,7 +149,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._html(INDEX_HTML)
             return
-        if parsed.path in {"/submit", "/submit/"}:
+        if parsed.path in {"/submit", "/submit/", "/projects", "/projects/"}:
             self._html(WEB_SUBMIT_HTML)
             return
         if parsed.path == "/assets/web-pet-sprite.png":
@@ -288,8 +288,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             try:
                 self._web_json(
-                    lambda store, identity: persist_pet_exchange(
-                        self.server.settings, store, identity, payload.get("content", "")
+                    lambda store, identity: chat_with_project_pet(
+                        self.server.settings,
+                        store,
+                        identity,
+                        payload.get("content", ""),
+                        job_id=int(payload.get("job_id") or 0),
+                        source_id=str(payload.get("source_id") or ""),
+                        history=payload.get("history") if isinstance(payload.get("history"), list) else [],
                     )
                 )
             except ValueError as exc:
@@ -382,9 +388,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             payload = fn(store, identity)
         finally:
             store.close()
-        headers = {}
-        if not token or token != session_token:
-            headers["set-cookie"] = self._web_session_cookie(session_token)
+        # Refresh the one-year device session on every successful scoped API
+        # call so active users do not have to bind Feishu again annually.
+        headers = {"set-cookie": self._web_session_cookie(session_token)}
         self._json_response(payload, headers=headers)
 
     def _read_json(self) -> dict[str, Any]:

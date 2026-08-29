@@ -596,8 +596,10 @@ class Store:
                 job_id, doc_url, status, channel, actor_type, actor_id
             ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             on conflict(external_id) do update set
-                content=excluded.content, doc_url=excluded.doc_url,
-                status=excluded.status, updated_at=current_timestamp
+                role=excluded.role, kind=excluded.kind, content=excluded.content,
+                source_id=excluded.source_id, job_id=excluded.job_id,
+                doc_url=excluded.doc_url, status=excluded.status,
+                channel=excluded.channel, updated_at=current_timestamp
             """,
             (
                 int(conversation_id), str(external_id), str(role), str(kind),
@@ -684,6 +686,25 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_web_identity_usage(self, identity, limit: int = 50):
+        public_id = str(identity.get("public_id") or "")
+        open_id = str(identity.get("feishu_open_id") or "").strip()
+        clauses = ["(chat_type = 'web' and chat_id = ?)"]
+        params: list[object] = [f"web:{public_id}"]
+        if open_id:
+            clauses.append("sender_id = ?")
+            params.append(open_id)
+        rows = self.conn.execute(
+            f"""
+            select * from usage_events
+            where source_kind = 'paper' and ({' or '.join(clauses)})
+            order by id desc
+            limit ?
+            """,
+            (*params, max(1, min(200, int(limit)))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def recent_pet_message_count(self, identity, minutes: int = 10) -> int:
         conversation = self.ensure_web_conversation(identity)
         row = self.conn.execute(
@@ -718,6 +739,12 @@ class Store:
         conversation_id = self._conversation_for_watcher(watcher)
         if not conversation_id:
             return
+        if not str(source_id or "").strip():
+            row = self.conn.execute(
+                "select source_id from queue_jobs where id = ?",
+                (int(job_id),),
+            ).fetchone()
+            source_id = str(row["source_id"] if row else "")
         owner = self.conn.execute(
             "select owner_key from web_conversations where id = ?",
             (conversation_id,),
@@ -725,12 +752,40 @@ class Store:
         owner_key = str(owner["owner_key"] if owner else conversation_id)
         self.append_web_message(
             conversation_id,
-            f"web-progress:{int(job_id)}:{owner_key}",
+            f"web-task:{owner_key}:{source_id or int(job_id)}",
             "assistant",
             content,
             kind="queue_ack",
             source_id=source_id,
             job_id=job_id,
+            status=status,
+            channel="system",
+            actor_type="system",
+        )
+
+    def upsert_web_task(
+        self,
+        identity,
+        job_id: int,
+        source_id: str,
+        content: str,
+        *,
+        status: str,
+        doc_url: str = "",
+        kind: str = "queue_ack",
+    ) -> None:
+        """Update the identity's one durable project record for a paper."""
+        conversation = self.ensure_web_conversation(identity)
+        owner_key = str(conversation.get("owner_key") or conversation["id"])
+        self.append_web_message(
+            int(conversation["id"]),
+            f"web-task:{owner_key}:{source_id or int(job_id)}",
+            "assistant",
+            content,
+            kind=kind,
+            source_id=source_id,
+            job_id=job_id,
+            doc_url=doc_url,
             status=status,
             channel="system",
             actor_type="system",
@@ -756,7 +811,7 @@ class Store:
         owner_key = str(owner["owner_key"] if owner else conversation_id)
         self.append_web_message(
             conversation_id,
-            f"web-result:{int(job_id)}:{owner_key}:{status}",
+            f"web-task:{owner_key}:{source_id or int(job_id)}",
             "assistant",
             content,
             kind="result",

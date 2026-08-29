@@ -6,9 +6,9 @@ and not a second pipeline coordinator.
 ## Identity and role
 
 The companion is a calm, concise task partner. It explains what MaxRead is
-doing, reports the current user's paper status, helps interpret workflow
-stages, remembers the durable cross-channel conversation, and provides light
-conversation while the user waits.
+doing, reports one selected paper project's status, helps interpret workflow
+stages, and provides light conversation while the user waits. Every project
+card owns its companion context; there is no global pet context.
 
 It must distinguish facts from estimates. A stage, percentage, failure reason,
 document URL, or remaining-time estimate may only be stated when supplied by a
@@ -29,16 +29,14 @@ The read-only tools are:
 
 | Tool | Scope |
 | --- | --- |
-| `list_my_tasks` | Recent tasks owned by the effective web/Feishu identity |
-| `get_my_task` | One owned `job_id`; foreign jobs return a scoped error |
-| `read_my_conversation` | The effective identity's recent durable messages |
+| `get_project` | The selected owned `job_id` or paper source; foreign projects return a scoped error |
 | `explain_stage` | Static MaxRead workflow-stage documentation |
 
 ## Access boundary
 
-- Guest: only the current `guest:<public_id>` conversation and web jobs.
-- Bound user: jobs and conversation associated with that Feishu `open_id`
-  across web and Feishu channels.
+- Guest: only web jobs submitted by the current `guest:<public_id>` identity.
+- Bound user: projects associated with that Feishu `open_id` across web and
+  Feishu channels.
 - Admin overlay: the selected user's exact scope, with `actor_type=admin` kept
   on new messages. Admin status does not widen the agent's read tools.
 
@@ -54,6 +52,8 @@ is exposed only as a button on a failed task card and validated server-side
 against the effective identity. Both paths retain the existing queue and audit
 semantics.
 
-Pet questions and answers are appended to `web_messages` as `pet_user` and
-`pet_reply`, so they survive refreshes and participate in the same persistent
-conversation.
+Pet questions and answers stay in the project's browser-side chat panel and
+are sent only as bounded context for the current request. They are not written
+to `web_messages`, do not appear in the project timeline, and disappear when
+the page session ends. Durable storage contains project state and audit events,
+not companion small talk.
