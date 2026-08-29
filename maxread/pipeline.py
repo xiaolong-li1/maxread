@@ -607,7 +607,7 @@ class MaxReadPipeline:
         expected_title = checkpoint.expected_title or (record.title if record else "")
         try:
             self._workflow(WorkflowEvent.RESUME_PUBLISHED, doc_url)
-            warnings = list(
+            initial_warnings = list(
                 verify_published_docx(
                     self.feishu,
                     doc_url,
@@ -622,7 +622,7 @@ class MaxReadPipeline:
                 visual_result = self.visual_qa.run(
                     self.feishu,
                     doc_url,
-                    initial_warnings=warnings,
+                    initial_warnings=initial_warnings,
                     source_id=ref.paper_id,
                     expected_image_min=checkpoint.expected_image_min,
                     expected_formula_min=checkpoint.expected_latex_min,
@@ -630,8 +630,8 @@ class MaxReadPipeline:
                     previous_feedback=[record.error] if record and record.error else (),
                     on_workflow_event=self._workflow,
                 )
-                warnings.extend(visual_result.warnings)
                 if visual_result.changed:
+                    warnings = list(visual_result.warnings)
                     warnings.extend(
                         verify_published_docx(
                             self.feishu,
@@ -642,6 +642,10 @@ class MaxReadPipeline:
                             expected_table_min=checkpoint.expected_table_min,
                         )
                     )
+                else:
+                    warnings = initial_warnings + list(visual_result.warnings)
+            else:
+                warnings = initial_warnings
             blocking = blocking_quality_warnings(warnings)
             if blocking:
                 message = _post_publish_failure_message(blocking)

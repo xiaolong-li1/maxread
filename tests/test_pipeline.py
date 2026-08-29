@@ -620,6 +620,36 @@ def test_pipeline_discards_stale_warning_after_structural_repair(tmp_path):
     store.close()
 
 
+def test_pipeline_resume_discards_stale_warning_after_structural_repair(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    store.upsert_paper(
+        "2604.12946",
+        "quality_failed",
+        title="Fake Paper",
+        doc_url="https://tenant.feishu.cn/docx/existing",
+        doc_token="existing",
+        error="post-publish:quality:formula:xml:high:joined-spacing-command",
+    )
+    feishu = RepairablePublishedFormulaFeishu()
+    pipeline = MaxReadPipeline(
+        store,
+        ExplodingArxiv(),
+        feishu,
+        None,
+        require_source=True,
+        visual_qa=VisualQAController(enabled=False, max_repairs=2),
+    )
+
+    result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
+
+    assert result.error == ""
+    assert feishu.repaired is True
+    record = store.get_paper("2604.12946")
+    assert record.status == "done"
+    assert "joined-spacing-command" not in record.error
+    store.close()
+
+
 def test_pipeline_classifies_pre_publish_gate_as_quality_failure(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     feishu = FakeFeishu()

@@ -185,18 +185,23 @@ def submit_web_papers(settings, store: Store, identity, content: str) -> dict:
 
 def retry_web_job(settings, store: Store, identity, job_id: int) -> dict:
     target_id = int(job_id or 0)
-    job = next(
-        (item for item in store.list_web_identity_jobs(identity, 30) if int(item["id"]) == target_id),
-        None,
-    )
+    job = store.get_web_identity_job(identity, target_id)
     if job is None:
         raise ValueError("任务不在当前账号范围")
     if str(job.get("status") or "") != "failed":
         raise ValueError("只有失败任务可以重试")
     error = str(job.get("error") or "")
     has_publish_checkpoint = bool(str(job.get("checkpoint_json") or "") and str(job.get("doc_url") or ""))
-    resume_published = has_publish_checkpoint and (
-        "visual-qa:remote-error" in error or "Feishu PDF export failed" in error
+    resume_published = has_publish_checkpoint and any(
+        marker in error.lower()
+        for marker in (
+            "visual-qa:",
+            "post-publish",
+            "发布后质检",
+            "pdf export",
+            "table-overflow",
+            "table-clipped",
+        )
     )
     actor_type = str(identity.get("_actor_type") or "user")
     actor_id = str(identity.get("_actor_id") or store.web_identity_sender(identity))

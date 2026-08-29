@@ -912,6 +912,7 @@ def _structural_warning_is_repairable(warning: str) -> bool:
             "unsupported-tensor-macro",
             "unsupported-position-macro",
             "internal-display-delimiter",
+            "raw-table-math",
             "visual-qa:repairable-structural",
         )
     )

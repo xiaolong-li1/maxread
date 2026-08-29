@@ -179,7 +179,7 @@ def test_repair_structural_blocks_compiles_raw_uncertainty_inside_table():
     changed, warnings, blocks = repair_structural_blocks(
         feishu,
         "doc",
-        ["visual-qa:repairable-structural"],
+        ["post-publish:quality:format:xml:high:raw-table-math"],
     )
 
     assert changed is True

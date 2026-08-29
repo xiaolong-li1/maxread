@@ -248,6 +248,46 @@ def test_retry_button_api_resumes_published_visual_failure(tmp_path):
     store.close()
 
 
+def test_retry_old_owned_project_is_not_limited_by_recent_project_page(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=2)
+    target = submit_web_papers(settings, store, identity, "2212.02509")["items"][0]
+    store.conn.execute(
+        "update queue_jobs set status='failed', workflow_state='quality_failed', stage='failed', "
+        "doc_url='https://tenant/doc', checkpoint_json=?, error=? where id=?",
+        (
+            '{"doc_url":"https://tenant/doc"}',
+            "文档已生成，但发布后质检失败：visual-qa:high:table-overflow",
+            target["job_id"],
+        ),
+    )
+    store.conn.commit()
+
+    for index in range(35):
+        source_id = f"2608.{30000 + index}"
+        usage_id = store.add_usage_event(
+            f"evt-{index}", f"msg-{index}", f"web:{identity['public_id']}", "web",
+            store.web_identity_sender(identity), "paper", source_id, "url", status="queued",
+        )
+        store.enqueue_job(
+            "paper", source_id, "url", f"evt-{index}", f"msg-{index}",
+            f"web:{identity['public_id']}", "web", store.web_identity_sender(identity), usage_id,
+        )
+
+    assert all(int(item["id"]) != target["job_id"] for item in store.list_web_identity_jobs(identity, 30))
+
+    result = retry_web_job(settings, store, identity, target["job_id"])
+
+    assert result["ok"] is True
+    assert result["resume_published"] is True
+    row = store.get_queue_job(target["job_id"])
+    assert row["status"] == "queued"
+    assert row["checkpoint_json"] == '{"doc_url":"https://tenant/doc"}'
+    assert row["rebuild_pipeline"] == 0
+    store.close()
+
+
 def test_project_card_is_updated_in_place_across_lifecycle(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     _token, identity = new_web_identity(store)

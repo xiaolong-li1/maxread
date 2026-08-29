@@ -713,6 +713,31 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_web_identity_job(self, identity, job_id: int):
+        """Return one owned job without applying project-list pagination."""
+        public_id = str(identity.get("public_id") or "")
+        open_id = str(identity.get("feishu_open_id") or "").strip()
+        clauses = ["(w.chat_type = 'web' and w.chat_id = ?)"]
+        params: list[object] = [int(job_id), f"web:{public_id}"]
+        if open_id:
+            clauses.append("w.sender_id = ?")
+            params.append(open_id)
+        row = self.conn.execute(
+            f"""
+            select q.*, coalesce(nullif(q.title, ''), nullif(p.title, ''), '') as resolved_title,
+                   coalesce(p.project_summary, '') as project_summary
+            from queue_jobs q
+            left join papers p on q.source_kind = 'paper' and p.paper_id = q.source_id
+            where q.id = ? and exists (
+                select 1 from job_watchers w
+                where w.job_id = q.id and ({' or '.join(clauses)})
+            )
+            limit 1
+            """,
+            params,
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def list_web_identity_usage(self, identity, limit: int = 50):
         public_id = str(identity.get("public_id") or "")
         open_id = str(identity.get("feishu_open_id") or "").strip()
