@@ -357,10 +357,12 @@ class MaxReadPipeline:
                             f"- [{issue.category}:{issue.severity}] {issue.detail}"
                             for issue in validation.issues
                         ) or "- 方法一致性验收未通过，但未返回具体 finding"
+                        method_markdown = _paper_method_markdown(markdown)
+                        method_markers = [marker for marker in markers if marker in method_markdown]
                         method_repair = audit_method_consistency_with_report(
                             self.llm,
-                            markdown,
-                            markers,
+                            method_markdown,
+                            method_markers,
                             source_context=audit_source_context,
                             editorial_guidance=(
                                 str(editorial_guidance or "").strip()
@@ -370,7 +372,7 @@ class MaxReadPipeline:
                             reasoning_effort=self.review_reasoning_effort,
                         )
                         _write_paper_artifact(bundle, "04d-method-repair-response.txt", method_repair.raw)
-                        markdown = method_repair.markdown
+                        markdown = _replace_paper_method_markdown(markdown, method_repair.markdown)
                         _write_paper_artifact(bundle, "04e-method-repaired.md", markdown)
                         validation = validate_method_consistency(
                             self.llm,
@@ -1433,6 +1435,21 @@ def _paper_method_markdown(markdown: str) -> str:
         str(markdown or ""),
     )
     return match.group(0).strip() if match else str(markdown or "").strip()
+
+
+def _replace_paper_method_markdown(markdown: str, method_markdown: str) -> str:
+    """Replace only section 3 after a source-aware method repair."""
+    text = str(markdown or "")
+    replacement = str(method_markdown or "").strip()
+    if not re.match(r"^##\s+3(?:[.、]|\s)", replacement):
+        return text
+    match = re.search(
+        r"(?ms)^##\s+3(?:[.、]|\s).*?(?=^##\s+4(?:[.、]|\s)|\Z)",
+        text,
+    )
+    if not match:
+        return text
+    return (text[: match.start()] + replacement + "\n\n" + text[match.end() :].lstrip()).strip() + "\n"
 
 
 def _paper_method_source_context(bundle: PaperBundle, max_chars: int = 45000) -> str:

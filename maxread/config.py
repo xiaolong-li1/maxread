@@ -38,6 +38,7 @@ class Settings:
     arxiv_parallel_streams: int
     arxiv_parallel_min_bytes: int
     openai_timeout: int
+    openai_review_timeout: int
     openai_reasoning_effort: str
     openai_review_reasoning_effort: str
     generation_repair_rounds: int
@@ -100,6 +101,7 @@ class Settings:
             arxiv_parallel_streams=int(os.environ.get("MAXREAD_ARXIV_PARALLEL_STREAMS", "1")),
             arxiv_parallel_min_bytes=int(os.environ.get("MAXREAD_ARXIV_PARALLEL_MIN_BYTES", "1048576")),
             openai_timeout=int(os.environ.get("MAXREAD_OPENAI_TIMEOUT", "180")),
+            openai_review_timeout=max(30, int(os.environ.get("MAXREAD_OPENAI_REVIEW_TIMEOUT", "240"))),
             openai_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REASONING_EFFORT", "high"),
             openai_review_reasoning_effort=os.environ.get("MAXREAD_OPENAI_REVIEW_REASONING_EFFORT", "low"),
             generation_repair_rounds=max(0, int(os.environ.get("MAXREAD_GENERATION_REPAIR_ROUNDS", "1"))),

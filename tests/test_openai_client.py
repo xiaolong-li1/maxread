@@ -78,6 +78,20 @@ def test_responses_text_uses_separate_instructions_and_input():
     assert captured["payload"]["store"] is False
 
 
+def test_responses_text_forwards_per_request_timeout():
+    client = OpenAIClient("key", "model", timeout=600)
+    captured = {}
+
+    def fake_stream(path, payload, request_timeout=None):
+        captured.update(path=path, timeout=request_timeout)
+        return "ok"
+
+    client._post_stream_text = fake_stream
+
+    assert client.responses_text("system", "user", request_timeout=240) == "ok"
+    assert captured == {"path": "/responses", "timeout": 240}
+
+
 def test_responses_text_sanitizes_surrogates_before_json_transport():
     client = OpenAIClient("key", "model")
     captured = {}

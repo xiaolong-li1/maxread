@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 import threading
@@ -145,6 +146,10 @@ class QueueManager:
             self.llm_sem,
             lambda: progress(f"[在做了] 正在读{'论文' if source_kind == 'paper' else '文章'}：{source_id}", "reading", "job-reading"),
             lambda: progress(f"[审阅中] 正在审阅/修订：{source_id}", "reviewing", "job-reviewing"),
+            review_timeout=self.settings.openai_review_timeout,
+            on_timing=lambda event_type, detail: _record_llm_timing(
+                self.settings.db_path, job_id, event_type, detail
+            ),
         )
         title = ""
         store.add_job_event(job_id, "start", source_id)
@@ -357,27 +362,73 @@ class QueueManager:
 
 
 class _LimitedLLM:
-    def __init__(self, inner: OpenAIClient, sem: BoundedSemaphore, on_call=None, on_review=None):
+    def __init__(
+        self,
+        inner: OpenAIClient,
+        sem: BoundedSemaphore,
+        on_call=None,
+        on_review=None,
+        review_timeout: float = 0,
+        on_timing=None,
+    ):
         self.inner = inner
         self.sem = sem
         self.on_call = on_call
         self.on_review = on_review
+        self.review_timeout = max(0.0, float(review_timeout or 0))
+        self.on_timing = on_timing
         self._announced = False
         self._announced_review = False
         self._announcement_lock = threading.Lock()
 
     def responses_text(self, system: str, user: str, **kwargs) -> str:
         callback = None
+        review_call = _is_review_prompt(system)
         with self._announcement_lock:
-            if self.on_review and _is_review_prompt(system) and not self._announced_review:
+            if self.on_review and review_call and not self._announced_review:
                 self._announced_review = True
                 callback = self.on_review
             elif self.on_call and not self._announced:
                 self._announced = True
                 callback = self.on_call
         _run_progress_callback(callback)
+        if review_call and self.review_timeout and "request_timeout" not in kwargs:
+            kwargs["request_timeout"] = self.review_timeout
+        queued_at = time.monotonic()
         with self.sem:
-            return self.inner.responses_text(system, user, **kwargs)
+            started_at = time.monotonic()
+            prompt = _llm_prompt_name(system, user)
+            base_detail = {
+                "prompt": prompt,
+                "review": review_call,
+                "queue_wait_seconds": round(started_at - queued_at, 3),
+                "system_chars": len(str(system or "")),
+                "input_chars": len(str(user or "")),
+            }
+            _run_timing_callback(self.on_timing, "llm_call_started", base_detail)
+            try:
+                output = self.inner.responses_text(system, user, **kwargs)
+            except Exception as exc:
+                _run_timing_callback(
+                    self.on_timing,
+                    "llm_call_failed",
+                    {
+                        **base_detail,
+                        "request_seconds": round(time.monotonic() - started_at, 3),
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    },
+                )
+                raise
+            _run_timing_callback(
+                self.on_timing,
+                "llm_call_finished",
+                {
+                    **base_detail,
+                    "request_seconds": round(time.monotonic() - started_at, 3),
+                    "output_chars": len(str(output or "")),
+                },
+            )
+            return output
 
     def responses_image_text(self, system: str, user: str, image_path) -> str:
         callback = None
@@ -386,8 +437,40 @@ class _LimitedLLM:
                 self._announced = True
                 callback = self.on_call
         _run_progress_callback(callback)
+        queued_at = time.monotonic()
         with self.sem:
-            return self.inner.responses_image_text(system, user, image_path)
+            started_at = time.monotonic()
+            detail = {
+                "prompt": "figure-vision",
+                "review": False,
+                "queue_wait_seconds": round(started_at - queued_at, 3),
+                "system_chars": len(str(system or "")),
+                "input_chars": len(str(user or "")),
+            }
+            _run_timing_callback(self.on_timing, "llm_call_started", detail)
+            try:
+                output = self.inner.responses_image_text(system, user, image_path)
+            except Exception as exc:
+                _run_timing_callback(
+                    self.on_timing,
+                    "llm_call_failed",
+                    {
+                        **detail,
+                        "request_seconds": round(time.monotonic() - started_at, 3),
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    },
+                )
+                raise
+            _run_timing_callback(
+                self.on_timing,
+                "llm_call_finished",
+                {
+                    **detail,
+                    "request_seconds": round(time.monotonic() - started_at, 3),
+                    "output_chars": len(str(output or "")),
+                },
+            )
+            return output
 
 
 def _run_progress_callback(callback) -> None:
@@ -399,6 +482,50 @@ def _run_progress_callback(callback) -> None:
     except Exception:
         # A reaction or progress-row failure must never discard model output.
         return
+
+
+def _run_timing_callback(callback, event_type: str, detail: dict) -> None:
+    if callback is None:
+        return
+    try:
+        callback(event_type, detail)
+    except Exception:
+        return
+
+
+def _record_llm_timing(db_path, job_id: int, event_type: str, detail: dict) -> None:
+    store = Store(db_path, initialize=False)
+    try:
+        store.add_job_event(job_id, event_type, json.dumps(detail, ensure_ascii=False, sort_keys=True))
+    finally:
+        store.close()
+
+
+def _llm_prompt_name(system: str, user: str) -> str:
+    system_text = str(system or "")
+    user_text = str(user or "")
+    section_markers = (
+        ("文档开头与第 1-2 章", "section-front"),
+        ("第 3 章方法框架", "section-method"),
+        ("第 4 章实验结果", "section-experiments"),
+        ("第 5 章消融", "section-ablation"),
+        ("第 6-7 章", "section-closing"),
+    )
+    for marker, name in section_markers:
+        if marker in user_text:
+            return name
+    review_markers = (
+        ("方法事实一致性审阅员", "method-repair"),
+        ("方法一致性验收员", "method-validation"),
+        ("交付可读性验收员", "editorial-validation"),
+        ("发布前质量检查员", "quality-review"),
+        ("局部格式修复器", "format-repair"),
+        ("公式和格式字符修复器", "visual-formula-repair"),
+    )
+    for marker, name in review_markers:
+        if marker in system_text:
+            return name
+    return "generation"
 
 
 def _record_queue_progress(
@@ -430,7 +557,19 @@ def _record_queue_progress(
 
 
 def _is_review_prompt(system: str) -> bool:
-    return "发布前质量检查员" in str(system) or "待检查 Markdown" in str(system)
+    value = str(system or "")
+    return any(
+        marker in value
+        for marker in (
+            "发布前质量检查员",
+            "方法事实一致性审阅员",
+            "交付可读性验收员",
+            "方法一致性验收员",
+            "局部格式修复器",
+            "公式和格式字符修复器",
+            "待检查 Markdown",
+        )
+    )
 
 
 def _is_auto_retryable_error(error: str) -> bool:

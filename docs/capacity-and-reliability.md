@@ -9,14 +9,14 @@ RAM. These limits are an operational contract, not theoretical model limits.
 | Layer | Production limit | Reason |
 | --- | ---: | --- |
 | Concurrent documents | 2 | Two real papers completed together without memory pressure. |
-| Global text/vision model calls | 2 | Two identical 146k-character method prompts completed 2/2; three completed 0/3 within 300 seconds. |
-| Section workers per document | 2 | Preserves parallel generation without letting one paper saturate the provider. |
+| Global text/vision model calls | 5 | Revalidated after the 2026-08-30 host restart: five 122k-character requests completed 5/5 in 198 seconds. |
+| Section workers per document | 5 | All five logical sections may start together, while the global semaphore prevents two papers from exceeding five total calls. |
 | Feishu writes | 1 | Publishing is short relative to generation and serial writes avoid document races. |
 | PDF/visual QA | 1 | Real checks took 11 and 13 seconds; serialization costs little and avoids simultaneous export pressure. |
 
-Do not raise model concurrency because the queue looks long. Scale by adding a
-separately measured provider/key or worker host. The current gateway becomes
-less reliable before the model context limit is reached.
+Do not raise model concurrency above five because the queue looks long. Scale
+beyond five only after a fresh heavy-prompt benchmark or by adding a separately
+measured provider/key.
 
 ## Benchmark evidence
 
@@ -32,6 +32,12 @@ method-section contract.
 | 2 | 2/2 | 252.3 s | Production maximum |
 | 3 | 0/3 | 300.0 s timeout | Reject |
 | 5 | 0/5 first attempts in production | 502/524 | Reject |
+
+The 2026-08-30 post-restart recheck used the real Rope3D method prompt
+(122,602 characters) and medium reasoning. It completed 5/5 in 198.0 seconds;
+four calls finished in 42.1-57.2 seconds and one long-tail call took 198.0
+seconds. This supersedes the earlier transient 5-way failure for the current
+gateway state, but keeps five as the hard global ceiling.
 
 Reasoning remains `medium`. Text verbosity is `low` and Responses storage is
 disabled. A real 146k-character method prompt produced 3,694 characters in
@@ -50,8 +56,8 @@ The last seven days contained 33 completed jobs with a mean duration of about
 
 ## Generation policy
 
-1. A fresh paper uses sectional generation directly. Five logical sections
-   exist, but only two model calls may run at once.
+1. A fresh paper uses sectional generation directly. Its five logical sections
+   may run together, subject to a global five-call ceiling shared by all jobs.
 2. Each section owns its figure markers and tables. Successful sections remain
    valid when another section encounters a transient gateway error.
 3. Transport retries stay inside `OpenAIClient`; a section has one additional
@@ -73,6 +79,11 @@ The happy path contains one model review:
 3. deterministic Markdown and Docx XML quality checks;
 4. model repair only for concrete blocking findings;
 5. revalidate only the layer changed by repair.
+
+Review and repair calls use a separate 240-second request deadline. A method
+repair receives and returns section 3 only; the deterministic pipeline merges
+it back into the complete draft. Long generation calls keep their independent
+deadline.
 
 Do not add an unconditional second reviewer. Extra reviewers increase latency
 and can introduce formatting regressions. Store every finding and the previous
@@ -101,9 +112,10 @@ generic instruction.
 
 ```dotenv
 MAXREAD_QUEUE_WORKERS=2
-MAXREAD_LLM_CONCURRENCY=2
+MAXREAD_LLM_CONCURRENCY=5
+MAXREAD_OPENAI_REVIEW_TIMEOUT=240
 MAXREAD_SECTIONAL_GENERATION_ENABLED=true
-MAXREAD_SECTIONAL_GENERATION_WORKERS=2
+MAXREAD_SECTIONAL_GENERATION_WORKERS=5
 MAXREAD_FIGURE_VISION_WORKERS=2
 MAXREAD_GENERATION_REPAIR_ROUNDS=1
 MAXREAD_QUALITY_REPAIR_ROUNDS=2

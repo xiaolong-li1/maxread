@@ -42,9 +42,22 @@ class OpenAIClient:
         self.reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
         self.api_mode = _normalize_api_mode(api_mode)
 
-    def responses_text(self, system: str, user: str, reasoning_effort: str | None = None) -> str:
+    def responses_text(
+        self,
+        system: str,
+        user: str,
+        reasoning_effort: str | None = None,
+        request_timeout: float | None = None,
+    ) -> str:
         if self.api_mode == "chat":
-            return self.chat_completions_text(system, user, reasoning_effort=reasoning_effort)
+            if request_timeout is None:
+                return self.chat_completions_text(system, user, reasoning_effort=reasoning_effort)
+            return self.chat_completions_text(
+                system,
+                user,
+                reasoning_effort=reasoning_effort,
+                request_timeout=request_timeout,
+            )
         safe_system, _ = sanitize_unicode_text(system)
         safe_user, _ = sanitize_unicode_text(user)
         base_payload = {
@@ -63,11 +76,23 @@ class OpenAIClient:
             if current_effort:
                 payload["reasoning"] = {"effort": current_effort}
             try:
-                streamed_text = self._post_stream_text("/responses", payload)
+                if request_timeout is None:
+                    streamed_text = self._post_stream_text("/responses", payload)
+                else:
+                    streamed_text = self._post_stream_text(
+                        "/responses", payload, request_timeout=request_timeout
+                    )
                 break
             except OpenAIRequestError as exc:
                 if exc.status in {400, 404}:
-                    return self.chat_completions_text(system, user, reasoning_effort=current_effort)
+                    if request_timeout is None:
+                        return self.chat_completions_text(system, user, reasoning_effort=current_effort)
+                    return self.chat_completions_text(
+                        system,
+                        user,
+                        reasoning_effort=current_effort,
+                        request_timeout=request_timeout,
+                    )
                 if exc.status == 524 and current_effort != _reasoning_attempts(effort)[-1]:
                     continue
                 raise
@@ -117,6 +142,7 @@ class OpenAIClient:
         system: str,
         user: str,
         reasoning_effort: str | None = None,
+        request_timeout: float | None = None,
     ) -> str:
         safe_system, _ = sanitize_unicode_text(system)
         safe_user, _ = sanitize_unicode_text(user)
@@ -130,13 +156,21 @@ class OpenAIClient:
         effort = self.reasoning_effort if reasoning_effort is None else _normalize_reasoning_effort(reasoning_effort)
         if effort:
             payload["reasoning_effort"] = effort
-        data = self._post("/chat/completions", payload)
+        if request_timeout is None:
+            data = self._post("/chat/completions", payload)
+        else:
+            data = self._post("/chat/completions", payload, request_timeout=request_timeout)
         try:
             return data["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"Chat completions response had no message content: {data}") from exc
 
-    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(
+        self,
+        path: str,
+        payload: Dict[str, Any],
+        request_timeout: float | None = None,
+    ) -> Dict[str, Any]:
         payload, _ = sanitize_unicode_value(payload)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -151,10 +185,11 @@ class OpenAIClient:
             headers=headers,
             method="POST",
         )
+        timeout = self.timeout if request_timeout is None else max(1.0, float(request_timeout))
         last_error = None
         for attempt in range(1, 5):
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                with urllib.request.urlopen(req, timeout=timeout) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")[:1000]
@@ -168,11 +203,20 @@ class OpenAIClient:
             raise last_error
         raise RuntimeError(f"{path} failed")
 
-    def _post_stream_text(self, path: str, payload: Dict[str, Any]) -> str:
+    def _post_stream_text(
+        self,
+        path: str,
+        payload: Dict[str, Any],
+        request_timeout: float | None = None,
+    ) -> str:
         last_error = None
         for attempt in range(1, 4):
             try:
-                return self._post_stream_text_once(path, payload)
+                if request_timeout is None:
+                    return self._post_stream_text_once(path, payload)
+                return self._post_stream_text_once(
+                    path, payload, request_timeout=request_timeout
+                )
             except OpenAIRequestError as exc:
                 last_error = exc
                 if exc.status not in {429, 500, 502, 503, 504} or attempt >= 3:
@@ -192,7 +236,12 @@ class OpenAIClient:
             raise last_error
         raise RuntimeError(f"{path} stream failed")
 
-    def _post_stream_text_once(self, path: str, payload: Dict[str, Any]) -> str:
+    def _post_stream_text_once(
+        self,
+        path: str,
+        payload: Dict[str, Any],
+        request_timeout: float | None = None,
+    ) -> str:
         payload, _ = sanitize_unicode_value(payload)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -208,16 +257,17 @@ class OpenAIClient:
             headers=headers,
             method="POST",
         )
-        deadline = time.monotonic() + max(1, int(self.timeout))
+        timeout = self.timeout if request_timeout is None else max(1.0, float(request_timeout))
+        deadline = time.monotonic() + timeout
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
                 chunks: list[str] = []
                 completed = None
                 stream = iter(response)
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise TimeoutError(f"{path} stream exceeded total timeout of {self.timeout}s")
+                        raise TimeoutError(f"{path} stream exceeded total timeout of {timeout:g}s")
                     _set_stream_read_timeout(response, remaining)
                     try:
                         raw_line = next(stream)

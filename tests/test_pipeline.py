@@ -4,7 +4,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _replace_paper_method_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 from maxread.workflow import WorkflowEvent, WorkflowState
@@ -823,6 +823,18 @@ def test_method_validation_context_keeps_only_method_section_and_compact_source(
     context = _paper_method_source_context(bundle)
     assert "method evidence" in context
     assert "experiment evidence" not in context
+
+
+def test_replace_paper_method_markdown_keeps_other_sections_unchanged():
+    original = "# T\n\n## 2. O\n\nobs\n\n## 3. 方法框架\n\nold\n\n## 4. 实验结果\n\nresult\n"
+    repaired = "## 3. 方法框架\n\nnew method"
+
+    merged = _replace_paper_method_markdown(original, repaired)
+
+    assert "## 2. O\n\nobs" in merged
+    assert "## 3. 方法框架\n\nnew method" in merged
+    assert "## 4. 实验结果\n\nresult" in merged
+    assert "\nold\n" not in merged
 
 
 def test_deterministic_editorial_validation_rejects_duplicate_marker():

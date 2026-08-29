@@ -46,6 +46,34 @@ def test_limited_llm_announces_reading_then_reviewing():
     assert events == ["reading", "reviewing"]
 
 
+def test_limited_llm_applies_shorter_timeout_to_all_review_prompts():
+    inner = _DummyLLM()
+    llm = _LimitedLLM(inner, BoundedSemaphore(1), review_timeout=240)
+
+    assert llm.responses_text("你是 MaxRead 的方法一致性验收员。", "") == "ok"
+    assert llm.responses_text("普通分章生成", "") == "ok"
+
+    assert inner.calls[0][2]["request_timeout"] == 240
+    assert "request_timeout" not in inner.calls[1][2]
+
+
+def test_limited_llm_records_per_call_latency_without_prompt_content():
+    events = []
+    llm = _LimitedLLM(
+        _DummyLLM(),
+        BoundedSemaphore(1),
+        on_timing=lambda event_type, detail: events.append((event_type, detail)),
+    )
+
+    assert llm.responses_text("你是 MaxRead 的论文解读编辑。", "分章生成任务：第 3 章方法框架") == "ok"
+
+    assert [event for event, _detail in events] == ["llm_call_started", "llm_call_finished"]
+    assert events[0][1]["prompt"] == "section-method"
+    assert events[0][1]["input_chars"] > 0
+    assert events[1][1]["output_chars"] == 2
+    assert "分章生成任务" not in str(events)
+
+
 def test_limited_llm_proxies_image_text_under_semaphore():
     events = []
     inner = _DummyLLM()
