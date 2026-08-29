@@ -95,10 +95,24 @@ class RecruitingRunner:
             stats.new_threads = sum(1 for key in changed_keys if key not in known_threads)
             stats.updated_threads = len(changed_keys) - stats.new_threads
 
+            completed_threads = 0
             for thread, envelope, preparation_error in self._extract_changed(envelopes, changed_keys):
+                completed_threads += 1
+                progress_error = ""
                 if preparation_error is not None or thread is None:
                     stats.failed_threads += 1
-                    self._record_preparation_failure(envelope, preparation_error or RuntimeError("thread preparation failed"))
+                    error = preparation_error or RuntimeError("thread preparation failed")
+                    progress_error = str(error)[:200]
+                    self._record_preparation_failure(envelope, error)
+                    print(json.dumps({
+                        "event": "recruiting_thread_progress",
+                        "completed": completed_threads,
+                        "total": len(changed_keys),
+                        "failed": stats.failed_threads,
+                        "name": envelope.candidate_address,
+                        "mail_type": "unknown",
+                        "error": progress_error,
+                    }, ensure_ascii=False), flush=True)
                     continue
                 try:
                     result = self._sync_thread(thread)
@@ -106,7 +120,17 @@ class RecruitingRunner:
                     stats.documents_updated += int(result.get("document_updated", False))
                 except Exception as exc:  # one candidate must not block the batch
                     stats.failed_threads += 1
+                    progress_error = str(exc)[:200]
                     self._record_thread_failure(thread, exc)
+                print(json.dumps({
+                    "event": "recruiting_thread_progress",
+                    "completed": completed_threads,
+                    "total": len(changed_keys),
+                    "failed": stats.failed_threads,
+                    "name": thread.fields.name,
+                    "mail_type": thread.fields.mail_type,
+                    "error": progress_error,
+                }, ensure_ascii=False), flush=True)
             run_counts = {key: value for key, value in stats.as_dict().items() if key in {"scanned_messages", "new_threads", "updated_threads", "failed_threads"}}
             self.store.finish_run(run_id, "completed", **run_counts, error="")
             return {"ok": True, **stats.as_dict()}
