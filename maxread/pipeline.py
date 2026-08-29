@@ -174,19 +174,25 @@ class MaxReadPipeline:
                 selected_tables = select_key_source_tables(bundle.source_tables)
                 repository_url = find_repository_url(bundle)
                 generation_run = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                if self.sectional_generation_enabled and not retry_context.previous_markdown:
+
+                def generate_sectional() -> str:
                     evidence_prefix = build_paper_evidence_prefix(
                         bundle,
                         figure_inserts,
                         figure_visuals,
                         editorial_guidance=editorial_guidance,
                     )
+                    if retry_context.feedback:
+                        evidence_prefix += (
+                            "\n\n本次重试需避免的历史问题：\n"
+                            + "\n".join(f"- {item}" for item in retry_context.feedback[-12:])
+                        )
                     marker_assignments, table_assignments = _sectional_material_assignments(
                         figure_inserts,
                         figure_visuals,
                         selected_tables,
                     )
-                    markdown = _generate_sectional_paper_markdown(
+                    return _generate_sectional_paper_markdown(
                         self.llm,
                         evidence_prefix,
                         paper_id=bundle.metadata.paper_id,
@@ -199,6 +205,9 @@ class MaxReadPipeline:
                         ),
                         on_workflow_event=self._workflow,
                     )
+
+                if self.sectional_generation_enabled and not retry_context.previous_markdown:
+                    markdown = generate_sectional()
                 else:
                     generation_prompt = build_final_user_prompt(
                         bundle,
@@ -206,20 +215,35 @@ class MaxReadPipeline:
                         figure_visuals,
                         editorial_guidance=editorial_guidance,
                     )
-                    markdown = _generate_complete_paper_markdown(
-                        self.llm,
-                        generation_prompt,
-                        markers,
-                        attempts=self.generation_repair_rounds + 1,
-                        paper_id=bundle.metadata.paper_id,
-                        title=bundle.metadata.title,
-                        prior_feedback=retry_context.feedback,
-                        previous_markdown=retry_context.previous_markdown,
-                        attempt_writer=lambda attempt, raw, errors: _write_generation_attempt(
-                            bundle, generation_run, attempt, raw, errors
-                        ),
-                        on_workflow_event=self._workflow,
-                    )
+                    can_fallback = self.sectional_generation_enabled and bool(retry_context.previous_markdown)
+                    try:
+                        markdown = _generate_complete_paper_markdown(
+                            self.llm,
+                            generation_prompt,
+                            markers,
+                            attempts=1 if can_fallback else self.generation_repair_rounds + 1,
+                            paper_id=bundle.metadata.paper_id,
+                            title=bundle.metadata.title,
+                            prior_feedback=retry_context.feedback,
+                            previous_markdown=retry_context.previous_markdown,
+                            attempt_writer=lambda attempt, raw, errors: _write_generation_attempt(
+                                bundle, generation_run, attempt, raw, errors
+                            ),
+                            on_workflow_event=self._workflow,
+                        )
+                    except (RuntimeError, IncompleteGenerationError) as exc:
+                        if not can_fallback:
+                            raise
+                        _write_paper_artifact(
+                            bundle,
+                            f"01-{generation_run}-sectional-fallback.json",
+                            json.dumps(
+                                {"reason": str(exc)[:1200], "previous_draft": True},
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                        )
+                        markdown = generate_sectional()
                 self._workflow(WorkflowEvent.DRAFT_READY, ref.paper_id)
                 _write_paper_artifact(bundle, "01-generated.md", markdown)
                 markdown = _sanitize_repository_markdown(markdown, repository_url)

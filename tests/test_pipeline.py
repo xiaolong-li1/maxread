@@ -487,6 +487,63 @@ def test_retry_context_prefers_complete_polished_draft_over_one_section(tmp_path
     assert "Only one section" not in context.previous_markdown
 
 
+def test_failed_whole_draft_retry_falls_back_to_sectional_generation(tmp_path):
+    class DurableArxiv(FakeArxiv):
+        def fetch(self, paper_id):
+            bundle = super().fetch(paper_id)
+            bundle.pdf_path = tmp_path / "paper.pdf"
+            bundle.source_path = tmp_path / "paper.source"
+            bundle.pdf_path.write_bytes(b"pdf")
+            bundle.source_path.write_bytes(b"source")
+            return bundle
+
+    class FallbackLLM(FakeLLM):
+        def __init__(self):
+            self.whole_draft_calls = 0
+            self.section_calls = 0
+
+        def responses_text(self, system, user, **kwargs):
+            if "BEGIN PREVIOUS OUTPUT" in user:
+                self.whole_draft_calls += 1
+                raise RuntimeError("upstream 502")
+            if "分章生成任务：" not in user:
+                return super().responses_text(system, user, **kwargs)
+            self.section_calls += 1
+            if "文档开头与第 1-2 章" in user:
+                return "# [2604.12946] Fake Paper\n\n**TL;DR**：摘要。\n\n|维度|一句话|\n|---|---|\n|问题|问题|\n\n## 1. 这篇论文要解决什么问题\n\n" + ("背景。" * 180) + "\n\n## 2. 核心观察 / 关键直觉\n\n" + ("观察。" * 180)
+            if "第 3 章方法框架" in user:
+                return "## 3. 方法框架\n\n" + ("方法输入、计算、输出与边界。" * 150)
+            if "第 4 章实验结果" in user:
+                return "## 4. 实验结果\n\n" + ("实验设置与结果。" * 120)
+            if "第 5 章消融" in user:
+                return "## 5. 消融与补充分析\n\n" + ("控制变量与消融结果。" * 120)
+            return "## 6. 局限性与开放问题\n\n" + ("局限。" * 100) + "\n\n## 7. 整体评价\n\n" + ("评价。" * 100)
+
+    artifacts = tmp_path / "pipeline_artifacts"
+    artifacts.mkdir()
+    (artifacts / "02-polished.md").write_text("# Previous complete draft\n", encoding="utf-8")
+    store = Store(tmp_path / "maxread.sqlite3")
+    llm = FallbackLLM()
+    pipeline = MaxReadPipeline(
+        store,
+        DurableArxiv(),
+        FakeFeishu(),
+        llm,
+        sectional_generation_enabled=True,
+        sectional_generation_workers=5,
+        generation_repair_rounds=0,
+    )
+
+    result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
+
+    assert result.error == ""
+    assert result.doc_url
+    assert llm.whole_draft_calls == 1
+    assert llm.section_calls == 5
+    assert list(artifacts.glob("01-*-sectional-fallback.json"))
+    store.close()
+
+
 def test_generation_enters_incomplete_only_after_bounded_attempts_are_exhausted():
     llm = AlwaysInvalidGenerationLLM()
     events = []
