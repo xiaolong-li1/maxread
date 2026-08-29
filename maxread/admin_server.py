@@ -26,6 +26,7 @@ from .web_submit import (
     WEB_SUBMIT_HTML,
     issue_binding_code,
     new_web_identity,
+    organize_web_projects,
     retry_web_job,
     submit_web_papers,
     update_web_project,
@@ -337,6 +338,19 @@ class AdminHandler(BaseHTTPRequestHandler):
                         str(payload.get("source_id") or ""),
                         str(payload.get("action") or ""),
                         payload.get("value"),
+                    )
+                )
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/web/organize":
+            try:
+                self._web_json(
+                    lambda store, identity: organize_web_projects(
+                        self.server.settings,
+                        store,
+                        identity,
+                        progress_payload(self.server.settings, store, identity).get("recent", []),
                     )
                 )
             except ValueError as exc:

@@ -167,6 +167,7 @@ class Store:
                 source_id text not null,
                 favorite integer not null default 0,
                 category text not null default '',
+                category_source text not null default '',
                 deleted_at datetime,
                 updated_at datetime not null default current_timestamp,
                 primary key (owner_key, source_id)
@@ -334,6 +335,7 @@ class Store:
         self._ensure_column("queue_jobs", "auto_retry_count", "integer not null default 0")
         self._ensure_column("queue_jobs", "rebuild_pipeline", "integer not null default 0")
         self._ensure_column("papers", "project_summary", "text not null default ''")
+        self._ensure_column("web_project_preferences", "category_source", "text not null default ''")
         self._ensure_column("feedback", "feedback_source", "text not null default ''")
         self._ensure_column("feedback", "feedback_category", "text not null default ''")
         self._ensure_column("feedback", "feedback_confidence", "real not null default 0")
@@ -842,15 +844,46 @@ class Store:
         owner_key = self.web_conversation_owner(identity)
         self.conn.execute(
             """
-            insert into web_project_preferences (owner_key, source_id, category)
-            values (?, ?, ?)
+            insert into web_project_preferences (owner_key, source_id, category, category_source)
+            values (?, ?, ?, 'manual')
             on conflict(owner_key, source_id) do update set
-                category=excluded.category, updated_at=current_timestamp
+                category=excluded.category, category_source='manual', updated_at=current_timestamp
             """,
             (owner_key, clean_source, clean_category),
         )
         self.conn.commit()
         return {"source_id": clean_source, "category": clean_category}
+
+    def set_web_project_auto_categories(self, identity, assignments: dict[str, str]) -> int:
+        owner_key = self.web_conversation_owner(identity)
+        rows = []
+        for source_id, category in assignments.items():
+            clean_source = str(source_id or "").strip()
+            clean_category = str(category or "").strip()[:60]
+            if not clean_source or not clean_category:
+                continue
+            if not self._web_identity_owns_source(identity, clean_source):
+                continue
+            preference = self.conn.execute(
+                "select category, category_source from web_project_preferences where owner_key=? and source_id=?",
+                (owner_key, clean_source),
+            ).fetchone()
+            if preference is not None and str(preference["category"] or "").strip() and str(preference["category_source"] or "manual") != "ai":
+                continue
+            rows.append((owner_key, clean_source, clean_category))
+        if not rows:
+            return 0
+        self.conn.executemany(
+            """
+            insert into web_project_preferences (owner_key, source_id, category, category_source)
+            values (?, ?, ?, 'ai')
+            on conflict(owner_key, source_id) do update set
+                category=excluded.category, category_source='ai', updated_at=current_timestamp
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
 
     def delete_web_project(self, identity, source_id: str) -> dict:
         clean_source = str(source_id or "").strip()

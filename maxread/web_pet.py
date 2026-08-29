@@ -87,6 +87,8 @@ class WebPetAgent:
     ) -> tuple[str, dict]:
         progress = progress_payload(self.settings, self.store, self.identity)
         self.request_text = str(text or "")
+        if re.search(r"按钮|页面怎么用|项目台怎么用|一键整理|分类折叠", self.request_text, re.I):
+            return button_guide_answer(), progress
         target_id = int(job_id or 0)
         target_source = str(source_id or "").strip()
         self.project = next(
@@ -337,13 +339,16 @@ def progress_payload(settings, store: Store, identity) -> dict:
         preference = preferences.get(item["source_id"], {})
         if preference.get("deleted_at"):
             continue
-        manual_category = str(preference.get("category") or "").strip()
+        stored_category = str(preference.get("category") or "").strip()
+        stored_source = str(preference.get("category_source") or "").strip()
         item["favorite"] = bool(preference.get("favorite"))
-        item["category"] = manual_category or auto_project_category(
+        item["category"] = stored_category or auto_project_category(
             item.get("title", ""),
             item.get("summary", ""),
         )
-        item["category_source"] = "manual" if manual_category else "auto"
+        item["category_source"] = (
+            stored_source if stored_category and stored_source else "manual" if stored_category else "auto"
+        )
         visible.append(item)
     payload = visible
     payload.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
@@ -357,6 +362,14 @@ def progress_payload(settings, store: Store, identity) -> dict:
         "service": store.get_service_status(),
         "categories": list(PROJECT_CATEGORIES),
     }
+
+
+def button_guide_answer() -> str:
+    return (
+        "这个项目台的按钮这样用：一键整理会对你发过的论文统一聚类并归类，且保留人工分类；"
+        "分类标题可以折叠或展开类内项目；搜索框按标题或 arXiv ID 查找；分类下拉框可手动修正；"
+        "星标用于收藏；重试从失败检查点继续；垃圾桶只从你的项目台移除，不会删除飞书文档。"
+    )
 
 
 def _progress_row(store: Store, job: dict, duration: int, workers: int) -> dict:

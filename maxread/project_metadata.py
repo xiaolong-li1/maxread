@@ -16,13 +16,13 @@ PROJECT_CATEGORIES = (
 )
 
 _CATEGORY_KEYWORDS = (
-    ("机器人", ("robot", "robotics", "manipulation", "locomotion", "embodied", "navigation", "机器人", "具身", "导航", "操控")),
-    ("3D 与世界模型", ("world model", "3d", "three-dimensional", "nerf", "gaussian splat", "scene", "geometry", "世界模型", "三维", "场景", "几何")),
+    ("机器人", ("robot", "robotics", "manipulation", "locomotion", "embodied", "navigation", "motion planning", "机器人", "具身", "导航", "操控")),
+    ("3D 与世界模型", ("world model", "3d", "three-dimensional", "nerf", "gaussian splat", "point cloud", "monocular 3d", "scene reconstruction", "geometry", "世界模型", "三维", "点云", "场景", "几何")),
     ("Agent 与检索", ("agent", "agentic", "rag", "retrieval", "tool use", "reasoning agent", "智能体", "检索", "工具调用")),
     ("生成模型", ("diffusion", "flow matching", "video generation", "image generation", "autoregressive generation", "扩散模型", "流匹配", "视频生成", "图像生成")),
-    ("视觉与多模态", ("vision", "visual", "multimodal", "video", "image", "vlm", "视觉", "多模态", "视频", "图像")),
-    ("训练与优化", ("training", "optimizer", "optimization", "fine-tuning", "alignment", "distillation", "rlhf", "训练", "优化器", "微调", "对齐", "蒸馏")),
-    ("推理与系统", ("inference", "serving", "attention", "transformer", "kv cache", "compression", "routing", "moe", "推理", "系统", "注意力", "缓存", "压缩", "路由")),
+    ("视觉与多模态", ("vision", "visual", "multimodal", "video", "image", "vlm", "perception", "object detection", "segmentation", "视觉", "多模态", "视频", "图像", "感知", "检测", "分割")),
+    ("训练与优化", ("training", "optimizer", "optimization", "fine-tuning", "alignment", "distillation", "rlhf", "self-supervised", "representation learning", "训练", "优化器", "微调", "对齐", "蒸馏", "自监督")),
+    ("推理与系统", ("inference", "serving", "attention", "transformer", "language model", "llm", "neural network", "kv cache", "compression", "routing", "moe", "tensor", "推理", "系统", "注意力", "缓存", "压缩", "路由", "语言模型", "神经网络")),
 )
 
 
@@ -56,9 +56,13 @@ def extract_project_summary(markdown: str, fallback: str = "") -> str:
 
 def auto_project_category(title: str, summary: str = "") -> str:
     text = f"{title} {summary}".lower()
+    scores = []
     for category, keywords in _CATEGORY_KEYWORDS:
-        if any(keyword in text for keyword in keywords):
-            return category
+        score = sum(2 if " " in keyword else 1 for keyword in keywords if keyword in text)
+        scores.append((score, category))
+    best_score, best_category = max(scores, default=(0, "其他"), key=lambda item: item[0])
+    if best_score:
+        return best_category
     return "其他"
 
 

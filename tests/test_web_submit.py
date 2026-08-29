@@ -9,6 +9,7 @@ from maxread.web_submit import (
     claim_binding_code,
     issue_binding_code,
     new_web_identity,
+    organize_web_projects,
     retry_web_job,
     submit_web_papers,
     update_web_project,
@@ -369,6 +370,37 @@ def test_project_favorite_and_manual_category_are_identity_scoped(tmp_path):
     store.close()
 
 
+def test_one_click_organizer_requires_bound_identity(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+
+    with pytest.raises(ValueError, match="绑定飞书账号"):
+        organize_web_projects(SimpleNamespace(openai_api_key=""), store, identity, [])
+    store.close()
+
+
+def test_one_click_organizer_clusters_auto_projects_and_preserves_manual_category(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="", workdir=tmp_path / "work")
+    submit_web_papers(settings, store, guest, "2608.25927 2608.27456")
+    identity = claim_binding_code(store, issue_binding_code(store, guest)["code"], "ou_feishu_user")
+    store.upsert_paper("2608.25927", "done", title="Monocular 3D Object Detection with Point Clouds")
+    store.upsert_paper("2608.27456", "done", title="LLM Inference with KV Cache Compression")
+    update_web_project(store, identity, "2608.25927", "category", "机器人")
+
+    projects = progress_payload(settings, store, identity)["recent"]
+    result = organize_web_projects(settings, store, identity, projects)
+    organized = {item["source_id"]: item for item in progress_payload(settings, store, identity)["recent"]}
+
+    assert result == {"ok": True, "updated": 1, "used_ai": False}
+    assert organized["2608.25927"]["category"] == "机器人"
+    assert organized["2608.25927"]["category_source"] == "manual"
+    assert organized["2608.27456"]["category"] == "推理与系统"
+    assert organized["2608.27456"]["category_source"] == "ai"
+    store.close()
+
+
 def test_delete_cancels_only_an_exclusive_queued_web_project(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     _token, identity = new_web_identity(store)
@@ -565,6 +597,12 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "/api/web/retry" in WEB_SUBMIT_HTML
     assert "/api/web/pet/chat" in WEB_SUBMIT_HTML
     assert "/api/web/project-action" in WEB_SUBMIT_HTML
+    assert "/api/web/organize" in WEB_SUBMIT_HTML
+    assert "一键整理" in WEB_SUBMIT_HTML
+    assert "toggleCategory(" in WEB_SUBMIT_HTML
+    assert "这些按钮怎么用" in WEB_SUBMIT_HTML
+    assert "智能整理" in WEB_SUBMIT_HTML
+    assert ".category-list[hidden]" in WEB_SUBMIT_HTML
     assert 'id="progress-panel"' not in WEB_SUBMIT_HTML
     assert 'class="project-progress"' in WEB_SUBMIT_HTML
     assert 'class="retry-button"' in WEB_SUBMIT_HTML
