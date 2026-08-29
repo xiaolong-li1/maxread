@@ -780,7 +780,7 @@ class Store:
             select 1
             from queue_jobs q
             join job_watchers w on w.job_id = q.id
-            where q.source_kind = 'paper' and q.source_id = ?
+            where q.source_kind in ('paper', 'article') and q.source_id = ?
               and ({' or '.join(clauses)})
             limit 1
             """,
@@ -796,7 +796,7 @@ class Store:
         row = self.conn.execute(
             f"""
             select 1 from usage_events
-            where source_kind = 'paper' and source_id = ?
+            where source_kind in ('paper', 'article') and source_id = ?
               and ({' or '.join(usage_clauses)})
             limit 1
             """,
@@ -870,7 +870,7 @@ class Store:
         job = self.conn.execute(
             """
             select q.* from queue_jobs q
-            where q.source_kind = 'paper' and q.source_id = ?
+            where q.source_kind in ('paper', 'article') and q.source_id = ?
               and exists (
                 select 1 from job_watchers w
                 where w.job_id = q.id and w.chat_type = 'web' and w.chat_id = ?

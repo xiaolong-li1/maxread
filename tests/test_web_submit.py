@@ -403,6 +403,52 @@ def test_delete_does_not_cancel_a_project_watched_by_another_user(tmp_path):
     store.close()
 
 
+def test_bound_identity_can_delete_legacy_article_project(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    code = issue_binding_code(store, guest)["code"]
+    identity = claim_binding_code(store, code, "ou_feishu_user")
+    source_url = (
+        "https://login.feishu.cn/accounts/trap?app_id=2&query_scope=all&"
+        "redirect_uri=https%3A%2F%2Ftenant.feishu.cn%2Fdocx%2Flegacy"
+    )
+    usage_id = store.add_usage_event(
+        "evt-article",
+        "om-article",
+        "oc-p2p",
+        "p2p",
+        "ou_feishu_user",
+        "article",
+        source_url,
+        source_url,
+        status="failed",
+    )
+    queued = store.enqueue_job(
+        "article",
+        source_url,
+        source_url,
+        "evt-article",
+        "om-article",
+        "oc-p2p",
+        "p2p",
+        "ou_feishu_user",
+        usage_id,
+    )
+    store.conn.execute(
+        "update queue_jobs set status='failed', workflow_state='failed', stage='failed' where id=?",
+        (queued["job_id"],),
+    )
+    store.conn.commit()
+
+    result = update_web_project(store, identity, source_url, "delete", True)
+
+    assert result["ok"] is True
+    assert result["cancelled"] is False
+    preference = store.web_project_preferences(identity)[source_url]
+    assert preference["deleted_at"]
+    store.close()
+
+
 def test_auto_category_uses_title_and_generated_summary():
     assert auto_project_category("Sparse routing for language models", "") == "推理与系统"
     assert auto_project_category("A general framework", "通过视频扩散模型生成长序列") == "生成模型"
