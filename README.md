@@ -22,9 +22,9 @@ MAXREAD_OPENAI_API_MODE=responses
 MAXREAD_MODEL=gpt-5.5
 MAXREAD_FEISHU_AS=bot
 MAXREAD_LARK_CLI=lark-cli
-MAXREAD_QUEUE_WORKERS=5
-MAXREAD_LLM_CONCURRENCY=5
-MAXREAD_FEISHU_CONCURRENCY=3
+MAXREAD_QUEUE_WORKERS=2
+MAXREAD_LLM_CONCURRENCY=2
+MAXREAD_FEISHU_CONCURRENCY=1
 
 # Only needed when bootstrapping from the private GitHub repo over HTTPS.
 MAXREAD_GITHUB_TOKEN=<github-token-with-private-repo-read-access>
@@ -138,7 +138,7 @@ MaxRead has four distinct quality gates: (1) the generation contract checks that
 
 Before publishing, MaxRead sanitizes LaTeX/Markdown formatting, checks required paper sections and figure references, and blocks documents with high-severity formula or raw-formatting errors. A blocked document is sent back to the review model with the exact quality findings and re-rendered for at most `MAXREAD_QUALITY_REPAIR_ROUNDS` repair rounds (default `2`). A no-change repair stops immediately. Every Markdown, XML, quality report, and model response is saved under `pipeline_artifacts`.
 
-Paper generation is also a bounded state-machine loop: each output enters `generation_checking`, deterministic cleanup runs first, and a failed check enters `generation_repairing` with the previous output and exact errors included in the next model prompt. `MAXREAD_GENERATION_REPAIR_ROUNDS` controls model repair rounds (default `2`, three total generation opportunities). Exhausting the budget enters the retryable `generation_incomplete` terminal state without publishing.
+Paper generation is also a bounded state-machine loop: each output enters `generation_checking`, deterministic cleanup runs first, and a failed check enters `generation_repairing` with the previous output and exact errors included in the next model prompt. `MAXREAD_GENERATION_REPAIR_ROUNDS` controls model repair rounds (default `1`, two total generation opportunities). Exhausting the budget enters the retryable `generation_incomplete` terminal state without publishing.
 
 The durable state machine keeps those internal states for audit, but the architecture page projects them into ten business nodes: preparation, generation gate, editorial review, compile-quality gate, publishing, delivery gate, one recoverable-failure terminal, and completion. Check/repair/recheck is drawn as a self-loop on the relevant gate instead of three duplicate business nodes. A failed model, network, or browser attempt is automatically replayed once by default (`MAXREAD_AUTO_RETRY_ATTEMPTS=1`); deterministic source/quality failures still wait for an explicit retry, and partial Feishu writes are never blindly replayed without a publish checkpoint.
 

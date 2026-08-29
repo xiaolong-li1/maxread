@@ -298,25 +298,39 @@ class QueueManager:
         replay idempotent. Source absence and cancellation stay manual.
         """
         budget = max(0, int(getattr(self.settings, "auto_retry_attempts", 0)))
-        attempts = max(1, int(job.get("attempts") or 1))
-        if attempts > budget or not _is_auto_retryable_error(error):
+        current = store.get_queue_job(int(job["id"])) or dict(job)
+        auto_retries = max(0, int(current.get("auto_retry_count") or 0))
+        if auto_retries >= budget or not _is_auto_retryable_error(error):
             return False
         # A failed write may have already created a partial document. Only
         # replay it automatically after a durable publish checkpoint exists;
         # otherwise leave it visible for an operator to inspect.
-        if not str(job.get("checkpoint_json") or "").strip() and any(
+        checkpoint = str(current.get("checkpoint_json") or "").strip()
+        if not checkpoint and any(
             marker in str(error or "").lower()
             for marker in ("feishu", "create_docx", "overwrite_docx", "insert_image", "publish_docx")
         ):
             return False
         if not store.fail_queue_job(job["id"], error, worker_id=worker_id):
             return False
+        resume_published = bool(checkpoint) and any(
+            marker in str(error or "").lower()
+            for marker in (
+                "visual-qa",
+                "browser",
+                "export",
+                "pdf",
+                "post-publish",
+                "remote-error",
+                "infrastructure",
+            )
+        )
         return store.retry_queue_job(
             job["id"],
-            reason=f"automatic retry after attempt {attempts}: {str(error)[:700]}",
+            reason=f"automatic retry {auto_retries + 1}/{budget}: {str(error)[:700]}",
             event_type="auto_retry",
             suppress_progress_notifications=bool(job.get("suppress_progress_notifications")),
-            rebuild_pipeline=bool(job.get("rebuild_pipeline")),
+            rebuild_pipeline=False if resume_published else bool(current.get("rebuild_pipeline")),
         )
 
     def _start_job_heartbeat(self, job_id: int, worker_id: str):

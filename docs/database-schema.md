@@ -44,6 +44,7 @@ MaxRead 使用单个 SQLite 文件，由 `maxread/db.py` 在启动时创建和�
 | `last_event` | TEXT | 最近一次状态事件 |
 | `suppress_progress_notifications` | INTEGER | 是否静默进度反应 |
 | `recovery_reason`, `recovery_attempts` | TEXT/INTEGER | 故障恢复原因和次数 |
+| `auto_retry_count` | INTEGER | 当前人工尝试内已消耗的基础设施自动重试次数 |
 | `rebuild_pipeline` | INTEGER | 是否从历史资料重建 pipeline |
 
 ### `job_watchers`

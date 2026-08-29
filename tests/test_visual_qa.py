@@ -42,13 +42,13 @@ def test_successful_visual_run_cleanup_is_scoped_to_run_directory(tmp_path):
     assert outside_file.exists()
 
 
-def test_visual_qa_concurrency_defaults_to_two_and_validates_env(monkeypatch):
+def test_visual_qa_concurrency_defaults_to_one_and_validates_env(monkeypatch):
     monkeypatch.delenv("MAXREAD_VISUAL_QA_CONCURRENCY", raising=False)
-    assert _visual_qa_concurrency() == 2
+    assert _visual_qa_concurrency() == 1
     monkeypatch.setenv("MAXREAD_VISUAL_QA_CONCURRENCY", "3")
     assert _visual_qa_concurrency() == 3
     monkeypatch.setenv("MAXREAD_VISUAL_QA_CONCURRENCY", "invalid")
-    assert _visual_qa_concurrency() == 2
+    assert _visual_qa_concurrency() == 1
 
 
 def test_pdf_export_ticket_and_doc_token_are_recoverable_from_cli_output():

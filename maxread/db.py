@@ -241,6 +241,7 @@ class Store:
                 suppress_progress_notifications integer not null default 0,
                 recovery_reason text not null default '',
                 recovery_attempts integer not null default 0,
+                auto_retry_count integer not null default 0,
                 rebuild_pipeline integer not null default 0
             );
 
@@ -330,6 +331,7 @@ class Store:
         self._ensure_column("queue_jobs", "suppress_progress_notifications", "integer not null default 0")
         self._ensure_column("queue_jobs", "recovery_reason", "text not null default ''")
         self._ensure_column("queue_jobs", "recovery_attempts", "integer not null default 0")
+        self._ensure_column("queue_jobs", "auto_retry_count", "integer not null default 0")
         self._ensure_column("queue_jobs", "rebuild_pipeline", "integer not null default 0")
         self._ensure_column("papers", "project_summary", "text not null default ''")
         self._ensure_column("feedback", "feedback_source", "text not null default ''")
@@ -1974,6 +1976,13 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_queue_job(self, job_id: int):
+        row = self.conn.execute(
+            "select * from queue_jobs where id = ?",
+            (int(job_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
 
     def add_job_event(self, job_id: int, event_type: str, detail: str = "") -> int:
         cur = self.conn.execute(
@@ -2056,12 +2065,14 @@ class Store:
                     started_at = null, finished_at = null, heartbeat_at = null,
                     updated_at = current_timestamp, stage_updated_at = current_timestamp,
                     suppress_progress_notifications = ?, recovery_reason = '', recovery_attempts = 0,
+                    auto_retry_count = case when ? then auto_retry_count + 1 else 0 end,
                     checkpoint_json = case when ? then '' else checkpoint_json end,
                     rebuild_pipeline = ?
                 where id = ? and workflow_state = 'queued'
                 """,
                 (
                     1 if suppress_progress_notifications else 0,
+                    1 if str(event_type or "") == "auto_retry" else 0,
                     1 if rebuild_pipeline else 0,
                     1 if rebuild_pipeline else 0,
                     int(job_id),

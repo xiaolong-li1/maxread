@@ -322,5 +322,39 @@ def test_transient_failure_is_requeued_once_without_becoming_user_visible_failur
     assert row["status"] == "queued"
     assert row["workflow_state"] == "queued"
     assert row["suppress_progress_notifications"] == 1
+    assert row["auto_retry_count"] == 1
     assert any(event["event_type"] == "auto_retry" for event in store.list_job_events(queued["job_id"]))
+
+    second_attempt = store.claim_next_queue_job(worker_id="worker-b")
+    assert manager._auto_retry(store, second_attempt, "visual-qa:remote-error:browser timeout", "worker-b") is False
+    store.close()
+
+
+def test_visual_auto_retry_uses_latest_published_checkpoint_after_many_manual_attempts(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om_1", "oc", "group", "ou", "paper", "2604.12946", "url", status="queued")
+    queued = store.enqueue_job("paper", "2604.12946", "url", "evt", "om_1", "oc", "group", "ou", usage_id)
+    claimed = store.claim_next_queue_job(worker_id="worker-a")
+    store.conn.execute(
+        "update queue_jobs set attempts = 8, rebuild_pipeline = 1, checkpoint_json = ?, doc_url = ? where id = ?",
+        ('{"doc_url":"https://published-doc"}', "https://published-doc", queued["job_id"]),
+    )
+    store.conn.commit()
+    manager = object.__new__(QueueManager)
+    manager.settings = type("Settings", (), {"auto_retry_attempts": 1})()
+
+    assert manager._auto_retry(
+        store,
+        claimed,
+        "visual-qa:infrastructure:export-pending:ticket=123",
+        "worker-a",
+    ) is True
+
+    row = store.get_queue_job(queued["job_id"])
+    assert row["status"] == "queued"
+    assert row["attempts"] == 8
+    assert row["auto_retry_count"] == 1
+    assert row["checkpoint_json"] == '{"doc_url":"https://published-doc"}'
+    assert row["rebuild_pipeline"] == 0
+    assert "retry_mode=resume" in store.list_job_events(queued["job_id"])[0]["detail"]
     store.close()

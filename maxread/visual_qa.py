@@ -120,9 +120,9 @@ class VisualRepairRound:
 
 def _visual_qa_concurrency() -> int:
     try:
-        return max(1, int(os.environ.get("MAXREAD_VISUAL_QA_CONCURRENCY", "2")))
+        return max(1, int(os.environ.get("MAXREAD_VISUAL_QA_CONCURRENCY", "1")))
     except ValueError:
-        return 2
+        return 1
 
 
 _QA_LOCK = threading.BoundedSemaphore(_visual_qa_concurrency())
