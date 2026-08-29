@@ -294,6 +294,19 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertTrue(_within_days((now - timedelta(days=6)).isoformat(), 7, now))
         self.assertFalse(_within_days((now - timedelta(days=8)).isoformat(), 7, now))
 
+    def test_specialized_repairs_reuse_loaded_envelopes(self) -> None:
+        runner = RecruitingRunner.__new__(RecruitingRunner)
+        envelope = ThreadEnvelope("key", "a@example.com", "subject", (), (), (), frozenset())
+        runner._envelope_cache = {}
+        runner._load_threads = lambda: ({"key": envelope}, set())
+        runner.store = SimpleNamespace(get_thread=lambda _key: None, fields_from_row=lambda _row: None)
+        runner.llm = None
+
+        result = runner.sync_provenance(apply=False)
+
+        self.assertTrue(result["ok"])
+        self.assertIs(runner._envelope_cache["key"], envelope)
+
     def test_message_parser_stays_read_only(self) -> None:
         message = EmailMessage()
         message["Subject"] = "实习生申请"

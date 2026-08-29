@@ -270,6 +270,7 @@ class RecruitingRunner:
         """Re-extract academic fields with AI; never infer ranks from number patterns."""
 
         envelopes, _changed = self._load_threads()
+        self._envelope_cache = envelopes
         changes: list[dict[str, str]] = []
         failures: list[dict[str, str]] = []
         ordered = sorted(envelopes.items(), key=lambda item: item[1].latest_time or "", reverse=True)
@@ -329,6 +330,7 @@ class RecruitingRunner:
 
     def sync_provenance(self, *, apply: bool = False, since_days: int | None = None) -> dict[str, Any]:
         envelopes, _changed = self._load_threads()
+        self._envelope_cache = envelopes
         changes: list[dict[str, Any]] = []
         failures: list[dict[str, str]] = []
         for key, envelope in sorted(envelopes.items(), key=lambda item: item[1].latest_time or "", reverse=True):
