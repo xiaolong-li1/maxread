@@ -30,7 +30,10 @@ The read-only tools are:
 | Tool | Scope |
 | --- | --- |
 | `get_project` | The selected owned `job_id` or paper source; foreign projects return a scoped error |
+| `inspect_project` | Scoped job events, heartbeat age and compact quality/artifact diagnostics |
 | `explain_stage` | Static MaxRead workflow-stage documentation |
+| `retry_project` | Retry the selected failed project after an explicit user request |
+| `recover_stale_project` | Recover only the selected project after its heartbeat is proven stale |
 
 ## Access boundary
 
@@ -46,11 +49,13 @@ network requests.
 
 ## Write boundary
 
-The model has no state-changing tools. It cannot submit, retry, cancel, delete,
-or edit a task. Submission is handled by the deterministic link parser. Retry
-is exposed only as a button on a failed task card and validated server-side
-against the effective identity. Both paths retain the existing queue and audit
-semantics.
+The model cannot submit, cancel, delete, edit arbitrary data, restart services,
+or touch another project. Two narrowly scoped state-changing tools are
+available: retrying an owned failed project and recovering an owned running
+project whose heartbeat has already exceeded the configured stale threshold.
+Both require explicit repair intent in the current user message, revalidate
+ownership server-side, and write normal queue audit events. A healthy worker is
+never interrupted just because a stage has taken longer than usual.
 
 Pet questions and answers stay in the project's browser-side chat panel and
 are sent only as bounded context for the current request. They are not written

@@ -28,6 +28,7 @@ from .web_submit import (
     new_web_identity,
     retry_web_job,
     submit_web_papers,
+    update_web_project,
     web_identity_payload,
 )
 from .web_pet import chat_with_project_pet, progress_payload
@@ -147,6 +148,9 @@ class AdminHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
+            self._html(WEB_SUBMIT_HTML)
+            return
+        if parsed.path in {"/admin", "/admin/"}:
             self._html(INDEX_HTML)
             return
         if parsed.path in {"/submit", "/submit/", "/projects", "/projects/"}:
@@ -184,30 +188,44 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._json_response(self._with_store(lambda store: store.list_web_accounts()))
             return
         if parsed.path == "/architecture":
+            if not self._require_admin():
+                return
             self._html(architecture_html())
             return
         if parsed.path == "/api/workflow-spec":
+            if not self._require_admin():
+                return
             self._json_response(architecture_spec())
             return
         if parsed.path == "/api/summary":
+            if not self._require_admin():
+                return
             self._json_response(self._with_store(_admin_summary))
             return
         if parsed.path == "/api/service-status":
+            if not self._require_admin():
+                return
             self._json_response(self._with_store(lambda store: store.get_service_status()))
             return
         if parsed.path == "/api/admin/status":
             self._json_response({"authenticated": self._is_admin()})
             return
         if parsed.path == "/api/usage":
+            if not self._require_admin():
+                return
             since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
             self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_usage_events(limit, since, sender_id), store)))
             return
         if parsed.path == "/api/users":
+            if not self._require_admin():
+                return
             since, _sender_id = _record_filters(parsed.query)
             self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_usage_users(since), store)))
             return
         if parsed.path == "/api/feedback":
+            if not self._require_admin():
+                return
             query = parse_qs(parsed.query)
             since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
@@ -215,6 +233,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, visible_feedback_rows(store.list_feedback(limit, status, since, sender_id)), store)))
             return
         if parsed.path == "/api/jobs":
+            if not self._require_admin():
+                return
             query = parse_qs(parsed.query)
             since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
@@ -222,6 +242,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_queue_jobs(limit, status, since, sender_id), store)))
             return
         if parsed.path == "/api/job-events":
+            if not self._require_admin():
+                return
             query = parse_qs(parsed.query)
             since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
@@ -229,6 +251,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._json_response(self._with_store(lambda store: _attach_user_names(self.server.settings, store.list_job_events(job_id, limit, since, sender_id), store)))
             return
         if parsed.path == "/api/review-issues":
+            if not self._require_admin():
+                return
             query = parse_qs(parsed.query)
             since, sender_id = _record_filters(parsed.query)
             limit = _limit(parsed.query)
@@ -237,6 +261,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._json_response(self._with_store(lambda store: visible_review_issues(store.list_review_issues(limit, source_kind, source_id, since, sender_id))))
             return
         if parsed.path == "/api/review-stats":
+            if not self._require_admin():
+                return
             self._json_response(self._with_store(lambda store: store.review_issue_stats()))
             return
         self._error(HTTPStatus.NOT_FOUND, "not found")
@@ -296,6 +322,21 @@ class AdminHandler(BaseHTTPRequestHandler):
                         job_id=int(payload.get("job_id") or 0),
                         source_id=str(payload.get("source_id") or ""),
                         history=payload.get("history") if isinstance(payload.get("history"), list) else [],
+                    )
+                )
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/web/project-action":
+            payload = self._read_json()
+            try:
+                self._web_json(
+                    lambda store, identity: update_web_project(
+                        store,
+                        identity,
+                        str(payload.get("source_id") or ""),
+                        str(payload.get("action") or ""),
+                        payload.get("value"),
                     )
                 )
             except ValueError as exc:

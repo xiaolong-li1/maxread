@@ -4,7 +4,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 from maxread.workflow import WorkflowEvent, WorkflowState
@@ -34,6 +34,15 @@ class FakeArxiv:
             source_captions=["An overview figure."],
             parse_warnings=[],
         )
+
+
+def test_project_summary_prefers_generated_one_sentence_positioning():
+    markdown = """# [2608.00001] 中文标题：通过稀疏路由减少长视频生成成本
+
+**TL;DR**：这篇论文提出一个更长的说明。第二句话继续解释实验。
+"""
+
+    assert _extract_project_summary(markdown, "abstract fallback") == "通过稀疏路由减少长视频生成成本"
 
 
 def test_post_publish_message_distinguishes_export_infrastructure_from_visual_failure():
@@ -453,6 +462,29 @@ def test_retry_context_loads_previous_draft_and_all_quality_layers(tmp_path):
     assert any("missing-section-7" in item for item in context.feedback)
     assert any("html-tag-in-formula" in item for item in context.feedback)
     assert any("页面有无效公式" in item for item in context.feedback)
+
+
+def test_retry_context_prefers_complete_polished_draft_over_one_section(tmp_path):
+    bundle = FakeArxiv().fetch("2604.12946")
+    bundle.pdf_path = tmp_path / "paper.pdf"
+    bundle.pdf_path.write_bytes(b"pdf")
+    artifacts = tmp_path / "pipeline_artifacts"
+    artifacts.mkdir()
+    (artifacts / "01-20260829T010000Z-method-attempt-2.md").write_text(
+        "## 3. Only one section\n",
+        encoding="utf-8",
+    )
+    (artifacts / "01-20260829T010000Z-method-attempt-2.json").write_text(
+        json.dumps({"section": "method", "attempt": 2, "errors": []}),
+        encoding="utf-8",
+    )
+    (artifacts / "01-generated.md").write_text("# Complete generated draft\n", encoding="utf-8")
+    (artifacts / "02-polished.md").write_text("# Complete polished draft\n", encoding="utf-8")
+
+    context = _load_retry_context(bundle)
+
+    assert context.previous_markdown == "# Complete polished draft\n"
+    assert "Only one section" not in context.previous_markdown
 
 
 def test_generation_enters_incomplete_only_after_bounded_attempts_are_exhausted():

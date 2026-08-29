@@ -176,6 +176,10 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path):
         assert response.status == 200
         assert body == {"authenticated": False}
 
+        response, body = request("GET", "/api/summary")
+        assert response.status == 401
+        assert body["error"] == "需要管理员登录"
+
         response, body = request(
             "POST",
             "/api/service-status",
@@ -203,6 +207,10 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path):
         response, body = request("GET", "/api/admin/status", cookie=cookie)
         assert response.status == 200
         assert body == {"authenticated": True}
+
+        response, body = request("GET", "/api/summary", cookie=cookie)
+        assert response.status == 200
+        assert "jobs" in body
     finally:
         connection.close()
         server.shutdown()
@@ -223,6 +231,16 @@ def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
     connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
 
     try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert "我的论文项目" in response.read().decode("utf-8")
+
+        connection.request("GET", "/admin")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert "管理员登录" in response.read().decode("utf-8")
+
         connection.request("GET", "/submit")
         response = connection.getresponse()
         assert response.status == 200
@@ -265,6 +283,17 @@ def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
 
         connection.request(
             "POST",
+            "/api/web/project-action",
+            body=json.dumps({"source_id": "2608.25927", "action": "favorite", "value": True}),
+            headers={"content-type": "application/json", "cookie": cookie},
+        )
+        response = connection.getresponse()
+        project_action = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+        assert project_action["favorite"] is True
+
+        connection.request(
+            "POST",
             "/api/web/pet/chat",
             body=json.dumps({"content": "任务到哪了？", "job_id": result["items"][0]["job_id"]}),
             headers={"content-type": "application/json", "cookie": cookie},
@@ -272,7 +301,7 @@ def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
         response = connection.getresponse()
         pet = json.loads(response.read().decode("utf-8"))
         assert response.status == 200
-        assert "2608.25927" in pet["message"]["content"]
+        assert "等待调度" in pet["message"]["content"]
     finally:
         connection.close()
         server.shutdown()

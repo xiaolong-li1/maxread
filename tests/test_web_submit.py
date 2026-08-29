@@ -11,13 +11,9 @@ from maxread.web_submit import (
     new_web_identity,
     retry_web_job,
     submit_web_papers,
+    update_web_project,
 )
-from maxread.web_pet import (
-    WebPetAgent,
-    chat_with_project_pet,
-    deterministic_status_answer,
-    progress_payload,
-)
+from maxread.web_pet import WebPetAgent, auto_project_category, chat_with_project_pet, deterministic_status_answer, progress_payload
 
 
 def test_web_identity_defaults_to_guest_and_is_stable(tmp_path):
@@ -160,8 +156,69 @@ def test_project_pet_chat_is_ephemeral_and_scoped(tmp_path):
     )
 
     assert result["ok"] is True
-    assert "2608.25927" in result["message"]["content"]
+    assert "等待调度" in result["message"]["content"]
     assert store.list_web_messages(identity) == before
+    store.close()
+
+
+def test_project_pet_investigates_heartbeat_instead_of_guessing(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(
+        queue_workers=3,
+        queue_stale_minutes=10,
+        openai_api_key="",
+        workdir=tmp_path / "work",
+    )
+    queued = submit_web_papers(settings, store, identity, "2608.25927")["items"][0]
+    store.conn.execute(
+        "update queue_jobs set status='running', workflow_state='generating', stage='reading', "
+        "worker_id='host:1:worker', heartbeat_at=current_timestamp, stage_updated_at=datetime('now', '-4 minutes') where id=?",
+        (queued["job_id"],),
+    )
+    store.conn.commit()
+
+    result = chat_with_project_pet(
+        settings,
+        store,
+        identity,
+        "怎么一直卡在生成初稿？",
+        job_id=queued["job_id"],
+    )
+
+    assert "心跳" in result["message"]["content"]
+    assert "进程没有挂" in result["message"]["content"]
+    store.close()
+
+
+def test_project_pet_can_retry_owned_failed_project_on_explicit_request(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(
+        queue_workers=3,
+        queue_stale_minutes=10,
+        openai_api_key="",
+        workdir=tmp_path / "work",
+    )
+    queued = submit_web_papers(settings, store, identity, "2608.25927")["items"][0]
+    store.conn.execute(
+        "update queue_jobs set status='failed', workflow_state='quality_failed', stage='failed', error='invalid formula' where id=?",
+        (queued["job_id"],),
+    )
+    store.conn.commit()
+
+    result = chat_with_project_pet(
+        settings,
+        store,
+        identity,
+        "请调查并修复这个项目",
+        job_id=queued["job_id"],
+    )
+
+    assert "重新加入队列" in result["message"]["content"]
+    job = next(item for item in store.list_queue_jobs() if item["id"] == queued["job_id"])
+    assert job["status"] == "queued"
+    assert any(item["event_type"] == "project_agent_retry" for item in store.list_job_events(queued["job_id"], 20))
     store.close()
 
 
@@ -234,6 +291,83 @@ def test_cached_document_appears_as_personal_project(tmp_path):
     assert projects[0]["source_id"] == "2608.25927"
     assert projects[0]["status"] == "done"
     assert projects[0]["doc_url"] == "https://tenant/doc"
+    store.close()
+
+
+def test_project_favorite_and_manual_category_are_identity_scoped(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="")
+    submit_web_papers(settings, store, identity, "2608.25927")
+
+    update_web_project(store, identity, "2608.25927", "favorite", True)
+    update_web_project(store, identity, "2608.25927", "category", "机器人")
+    project = progress_payload(settings, store, identity)["recent"][0]
+
+    assert project["favorite"] is True
+    assert project["category"] == "机器人"
+    assert project["category_source"] == "manual"
+    store.close()
+
+
+def test_delete_cancels_only_an_exclusive_queued_web_project(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="")
+    queued = submit_web_papers(settings, store, identity, "2608.25927")["items"][0]
+
+    result = update_web_project(store, identity, "2608.25927", "delete", True)
+
+    assert result["cancelled"] is True
+    assert progress_payload(settings, store, identity)["recent"] == []
+    job = next(item for item in store.list_queue_jobs() if item["id"] == queued["job_id"])
+    assert job["workflow_state"] == "cancelled"
+    store.close()
+
+
+def test_delete_does_not_cancel_a_project_watched_by_another_user(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token_a, identity_a = new_web_identity(store)
+    _token_b, identity_b = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="")
+    first = submit_web_papers(settings, store, identity_a, "2608.25927")["items"][0]
+    second = submit_web_papers(settings, store, identity_b, "2608.25927")["items"][0]
+    assert first["job_id"] == second["job_id"]
+
+    result = update_web_project(store, identity_a, "2608.25927", "delete", True)
+
+    assert result["cancelled"] is False
+    assert progress_payload(settings, store, identity_a)["recent"] == []
+    assert progress_payload(settings, store, identity_b)["recent"][0]["source_id"] == "2608.25927"
+    job = next(item for item in store.list_queue_jobs() if item["id"] == first["job_id"])
+    assert job["status"] == "queued"
+    store.close()
+
+
+def test_auto_category_uses_title_and_generated_summary():
+    assert auto_project_category("Sparse routing for language models", "") == "推理与系统"
+    assert auto_project_category("A general framework", "通过视频扩散模型生成长序列") == "生成模型"
+
+
+def test_existing_project_summary_is_backfilled_from_pipeline_artifact(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    workdir = tmp_path / "work"
+    artifact_dir = workdir / "papers" / "2608.25927" / "pipeline_artifacts"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "05-final.md").write_text(
+        "# [2608.25927] 中文标题：通过视频扩散模型生成可控长序列\n\n**TL;DR**：备用摘要。\n",
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="", workdir=workdir)
+    store.upsert_paper("2608.25927", "done", title="A general framework", doc_url="https://tenant/doc")
+    submit_web_papers(settings, store, identity, "2608.25927")
+
+    project = progress_payload(settings, store, identity)["recent"][0]
+
+    assert project["summary"] == "通过视频扩散模型生成可控长序列"
+    assert project["category"] == "生成模型"
+    assert store.get_paper("2608.25927").project_summary == project["summary"]
     store.close()
 
 
@@ -325,6 +459,7 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "/api/web/submit" in WEB_SUBMIT_HTML
     assert "/api/web/retry" in WEB_SUBMIT_HTML
     assert "/api/web/pet/chat" in WEB_SUBMIT_HTML
+    assert "/api/web/project-action" in WEB_SUBMIT_HTML
     assert 'id="progress-panel"' not in WEB_SUBMIT_HTML
     assert 'class="project-progress"' in WEB_SUBMIT_HTML
     assert 'class="retry-button"' in WEB_SUBMIT_HTML
@@ -334,6 +469,10 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert 'id="paper-input"' in WEB_SUBMIT_HTML
     assert "openPet(" in WEB_SUBMIT_HTML
     assert "petChats" in WEB_SUBMIT_HTML
+    assert "Max 正在思考" in WEB_SUBMIT_HTML
+    assert "调整项目分类" in WEB_SUBMIT_HTML
+    assert "删除项目" in WEB_SUBMIT_HTML
+    assert "收藏" in WEB_SUBMIT_HTML
     assert "web-pet-sprite.png" in WEB_SUBMIT_HTML
     assert "小绿" not in WEB_SUBMIT_HTML
     assert "问 Max" in WEB_SUBMIT_HTML
@@ -341,6 +480,7 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert 'id="console-link"' in WEB_SUBMIT_HTML
     assert "class=\"console-link\"" in WEB_SUBMIT_HTML
     assert 'href="./projects"' in WEB_SUBMIT_HTML
+    assert 'href="./admin"' in WEB_SUBMIT_HTML
     assert "maxread_web_session" not in WEB_SUBMIT_HTML
     assert "linear-gradient" not in WEB_SUBMIT_HTML
     assert "font-size: 28px" in WEB_SUBMIT_HTML

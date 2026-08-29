@@ -17,6 +17,7 @@ from .feishu import FeishuClient, doc_token_from_url
 from .models import ArxivMetadata, FeishuEvent, PaperBundle, PaperRef
 from .openai_client import OpenAIClient
 from .prompts import FINAL_SYSTEM_PROMPT, SECTION_GENERATION_TASKS, build_final_user_prompt, build_paper_evidence_prefix, build_section_user_prompt, select_key_source_tables
+from .project_metadata import extract_project_summary as _extract_project_summary, one_sentence_summary as _one_sentence_summary
 from .publishing import publish_marker_image
 from .quality import PrePublishQualityError, blocking_quality_warnings, paper_markdown_completeness_errors, verify_published_docx
 from .quality_repair import QualityRepairResult, repair_until_quality_passes
@@ -122,6 +123,7 @@ class MaxReadPipeline:
                 ref.paper_id,
                 "summarizing",
                 title=bundle.metadata.title,
+                project_summary=_one_sentence_summary(bundle.metadata.summary),
                 authors=", ".join(bundle.metadata.authors),
                 arxiv_url=bundle.metadata.abs_url,
                 pdf_path=str(bundle.pdf_path or ""),
@@ -454,7 +456,12 @@ class MaxReadPipeline:
             except PrePublishQualityError as exc:
                 message = f"论文已读完，但发布前格式质检未通过，未发布文档：{exc}"
                 _write_paper_artifact(bundle, "08-failure.txt", message)
-                self.store.upsert_paper(ref.paper_id, "quality_failed", error=message)
+                self.store.upsert_paper(
+                    ref.paper_id,
+                    "quality_failed",
+                    project_summary=_extract_project_summary(markdown, bundle.metadata.summary),
+                    error=message,
+                )
                 if event and send_progress:
                     self._reply(event, f"这篇已读完，但发布前格式质检未通过：{ref.paper_id}\n原因：{message}", "quality-fail", ref.paper_id)
                 return ProcessResult(ref.paper_id, "", cached=False, error=message)
@@ -475,7 +482,11 @@ class MaxReadPipeline:
                     self._reply(event, f"这篇我没读成：{ref.paper_id}\n原因：{message}", "summary-fail", ref.paper_id)
                 return ProcessResult(ref.paper_id, "", cached=False, error=message)
 
-            self.store.upsert_paper(ref.paper_id, "writing_doc")
+            self.store.upsert_paper(
+                ref.paper_id,
+                "writing_doc",
+                project_summary=_extract_project_summary(markdown, bundle.metadata.summary),
+            )
             if event and send_progress:
                 self._reply(event, f"[敲键盘] 在写飞书文档：{ref.paper_id}", "writing", ref.paper_id)
             doc = self.feishu.create_docx(bundle.metadata.title or ref.paper_id)
@@ -761,6 +772,11 @@ def _load_retry_context(bundle: PaperBundle, max_feedback: int = 16) -> RetryCon
 
     preferred = [artifact_dir / "05-final.md"]
     preferred.extend(sorted(artifact_dir.glob("05-quality-round-*.md"), reverse=True))
+    # A worker can die after generation has produced a complete draft but
+    # before review or publication records a database checkpoint. Resume from
+    # the complete durable draft; an individual sectional attempt is not a
+    # valid whole-document retry input.
+    preferred.extend([artifact_dir / "02-polished.md", artifact_dir / "01-generated.md"])
     preferred.extend(reversed(markdown_candidates))
     previous_markdown = ""
     for candidate in preferred:

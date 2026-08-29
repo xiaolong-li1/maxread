@@ -67,7 +67,7 @@
     .brand strong { display: block; font-size: 17px; line-height: 1.3; }
     .brand span { display: block; color: var(--muted); font-size: 12px; }
     .header-actions { display: flex; align-items: center; gap: 8px; }
-    .console-link, .account {
+    .console-link, .admin-link, .account {
       height: 38px;
       display: inline-flex;
       align-items: center;
@@ -79,7 +79,7 @@
       border-radius: 7px;
       text-decoration: none;
     }
-    .console-link:hover, .account:hover { border-color: #b8c0b9; }
+    .console-link:hover, .admin-link:hover, .account:hover { border-color: #b8c0b9; }
     .account .dot { width: 7px; height: 7px; border-radius: 50%; background: #aeb5ae; }
     .account.bound .dot { background: var(--green); }
     main { padding-top: 34px; }
@@ -150,7 +150,11 @@
       border-bottom: 1px solid var(--line);
     }
     .projects-head h2 { margin: 0; font-size: 19px; }
-    .project-tools { display: flex; align-items: center; gap: 8px; }
+    .project-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .project-search { position: relative; }
+    .project-search .icon { position: absolute; left: 9px; top: 8px; color: var(--muted); pointer-events: none; }
+    .project-search input { width: 190px; height: 34px; padding: 0 10px 0 32px; color: var(--text); background: var(--paper); border: 1px solid var(--line); border-radius: 7px; outline: 0; }
+    .category-filter, .category-select { height: 34px; padding: 0 27px 0 9px; color: var(--text); background: var(--paper); border: 1px solid var(--line); border-radius: 7px; }
     .filters {
       display: inline-flex;
       padding: 3px;
@@ -177,7 +181,12 @@
       border: 1px solid var(--line);
       border-radius: 7px;
     }
-    .projects { display: grid; gap: 14px; }
+    .projects { display: grid; gap: 22px; }
+    .category-group { display: grid; gap: 10px; }
+    .category-heading { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--muted); font-size: 12px; font-weight: 620; }
+    .category-heading::after { content: ""; height: 1px; flex: 1; background: var(--line); }
+    .category-count { color: #9aa19a; font-variant-numeric: tabular-nums; }
+    .category-list { display: grid; gap: 12px; }
     .project-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 92px;
@@ -206,6 +215,7 @@
       white-space: nowrap;
     }
     .project-title span { color: var(--muted); font-size: 12px; }
+    .project-summary { margin: 8px 0 0; color: #566057; font-size: 13px; line-height: 1.5; }
     .project-state {
       display: inline-flex;
       align-items: center;
@@ -243,6 +253,11 @@
     }
     .project-updated { color: var(--muted); font-size: 11px; }
     .action-group { display: flex; align-items: center; gap: 7px; }
+    .project-organize { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .category-select { max-width: 145px; height: 32px; color: var(--muted); font-size: 12px; }
+    .project-icon-action { width: 34px; height: 34px; display: grid; place-items: center; color: var(--muted); background: #fff; border: 1px solid var(--line); border-radius: 7px; }
+    .project-icon-action.favorite { color: #a86123; background: var(--orange-soft); border-color: #ead4bd; }
+    .project-icon-action.delete:hover { color: var(--red); border-color: #e2c4c1; }
     .action-link, .retry-button {
       height: 34px;
       display: inline-flex;
@@ -285,8 +300,8 @@
       right: 22px;
       bottom: 22px;
       z-index: 20;
-      width: min(390px, calc(100vw - 28px));
-      height: min(590px, calc(100vh - 44px));
+      width: min(360px, calc(100vw - 28px));
+      height: min(520px, calc(100vh - 44px));
       display: grid;
       grid-template-rows: auto 1fr auto;
       background: var(--paper);
@@ -295,18 +310,23 @@
       box-shadow: 0 24px 72px rgba(28, 36, 30, 0.2);
       overflow: hidden;
     }
-    .pet-panel-head { display: grid; grid-template-columns: 52px minmax(0, 1fr) 32px; align-items: center; gap: 10px; padding: 12px 12px 11px; border-bottom: 1px solid var(--line-soft); }
-    .pet-panel-avatar { width: 45px; height: 60px; background: url("assets/web-pet-sprite.png") 0 0 / 400% 100% no-repeat; }
+    .pet-panel-head { display: grid; grid-template-columns: 42px minmax(0, 1fr) 32px; align-items: center; gap: 9px; padding: 10px 11px; border-bottom: 1px solid var(--line-soft); }
+    .pet-panel-avatar { width: 38px; height: 51px; background: url("assets/web-pet-sprite.png") 0 0 / 400% 100% no-repeat; }
     .pet-panel-title { min-width: 0; }
     .pet-panel-title strong { display: block; font-size: 14px; }
     .pet-panel-title span { display: block; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
     .pet-close { width: 32px; height: 32px; display: grid; place-items: center; color: var(--muted); background: transparent; border: 0; }
-    .pet-chat { min-height: 0; overflow-y: auto; padding: 14px 12px; background: #fafbf9; }
-    .pet-message { max-width: 88%; margin-bottom: 10px; }
+    .pet-chat { min-height: 0; overflow-y: auto; padding: 12px 11px; background: #fafbf9; }
+    .pet-message { max-width: 84%; margin-bottom: 8px; }
     .pet-message.user { margin-left: auto; }
-    .pet-bubble { padding: 9px 10px; background: #fff; border: 1px solid var(--line); border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+    .pet-bubble { padding: 8px 9px; background: #fff; border: 1px solid var(--line-soft); border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
     .pet-message.user .pet-bubble { background: var(--green-soft); border-color: #c9ddd4; }
-    .pet-quick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+    .pet-pending { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
+    .thinking-dots { display: inline-flex; gap: 3px; }
+    .thinking-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--green); animation: thinking 1s ease-in-out infinite; }
+    .thinking-dots i:nth-child(2) { animation-delay: .15s; }
+    .thinking-dots i:nth-child(3) { animation-delay: .3s; }
+    .pet-quick { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 8px 9px 0; }
     .pet-quick button { height: 30px; padding: 0 8px; color: var(--text); background: #fff; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
     .pet-composer { display: grid; grid-template-columns: minmax(0, 1fr) 38px; gap: 7px; padding: 9px; background: #fff; border-top: 1px solid var(--line-soft); }
     .pet-composer textarea { width: 100%; min-height: 38px; max-height: 100px; padding: 8px 9px; color: var(--text); background: #fafbf9; border: 1px solid var(--line); border-radius: 7px; outline: 0; resize: none; }
@@ -342,11 +362,12 @@
     @keyframes pet-bob { 0%, 100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-5px) rotate(1deg); } }
     @keyframes pet-work { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
     @keyframes pet-done { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(4deg) scale(1.04); } }
+    @keyframes thinking { 0%, 70%, 100% { opacity: .35; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
     @media (max-width: 680px) {
       .shell { width: calc(100% - 24px); padding-top: 18px; }
       header { padding-bottom: 17px; }
       .brand span { display: none; }
-      .console-link { width: 38px; padding: 0; justify-content: center; font-size: 0; }
+      .console-link, .admin-link { width: 38px; padding: 0; justify-content: center; font-size: 0; }
       .account { max-width: 39vw; overflow: hidden; }
       .account-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       main { padding-top: 26px; }
@@ -356,14 +377,17 @@
       .submit-box { grid-template-columns: 1fr; }
       .submit-button { justify-content: center; }
       .projects-head { align-items: flex-start; flex-direction: column; }
-      .project-tools { width: 100%; justify-content: space-between; }
+      .project-tools { width: 100%; justify-content: flex-start; }
+      .project-search { flex: 1; min-width: 150px; }
+      .project-search input { width: 100%; }
       .project-row { grid-template-columns: minmax(0, 1fr) 60px; gap: 2px; }
       .project-pet { width: 48px; height: 64px; }
       .pet-dock { min-height: 120px; }
       .pet-label { font-size: 10px; }
       .project-top { gap: 8px; }
       .project-title strong { white-space: normal; }
-      .project-actions { align-items: flex-start; flex-direction: column; }
+      .project-actions { align-items: stretch; flex-direction: column; }
+      .project-organize { justify-content: space-between; }
       .action-group { width: 100%; justify-content: flex-end; }
       .pet-panel { right: 8px; bottom: 8px; width: calc(100vw - 16px); height: min(620px, calc(100vh - 16px)); }
       .onboarding { grid-template-columns: 1fr; text-align: center; }
@@ -381,6 +405,7 @@
       </div>
       <div class="header-actions">
         <a class="console-link" id="console-link" href="./projects" title="返回个人控制台"><span class="icon"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/><path d="M9 12h10"/></svg></span>个人控制台</a>
+        <a class="admin-link hidden" id="admin-link" href="./admin" title="管理员控制台"><span class="icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg></span>管理员</a>
         <button class="account" id="account-button" onclick="openAccount()"><span class="dot"></span><span class="account-label">游客</span></button>
       </div>
     </header>
@@ -402,8 +427,11 @@
         <div class="projects-head">
           <h2>项目</h2>
           <div class="project-tools">
+            <div class="project-search"><span class="icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span><input id="project-search" type="search" placeholder="搜索标题或 arXiv ID" oninput="setSearch(this.value)" /></div>
+            <select class="category-filter" id="category-filter" aria-label="分类筛选" onchange="setCategoryFilter(this.value)"><option value="all">全部分类</option></select>
             <div class="filters" role="tablist" aria-label="项目筛选">
               <button class="active" data-filter="all" onclick="setFilter('all')">全部</button>
+              <button data-filter="favorite" onclick="setFilter('favorite')">收藏</button>
               <button data-filter="active" onclick="setFilter('active')">进行中</button>
               <button data-filter="done" onclick="setFilter('done')">已完成</button>
             </div>
@@ -441,11 +469,15 @@
       projects: [],
       service: null,
       filter: 'all',
+      category: 'all',
+      query: '',
+      categories: [],
       poll: null,
       adminAuthenticated: false,
       actAs: sessionStorage.getItem('maxreadActAs') || '',
       petProject: null,
       petChats: {},
+      petBusy: false,
       onboardingStep: 0,
     };
     const $ = id => document.getElementById(id);
@@ -466,6 +498,8 @@
         open: '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
         retry: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
         copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+        star: '<path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8-6.2-3.2L5.8 21 7 14.2l-5-4.9 6.9-1Z"/>',
+        trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v6M14 11v6"/>',
       };
       return `<span class="icon"><svg viewBox="0 0 24 24">${paths[name] || ''}</svg></span>`;
     }
@@ -505,6 +539,16 @@
       $('identity-note').textContent = state.me.acting_as ? `正在查看 ${state.me.display_name} 的项目` : `仅显示 ${state.me.display_name || '当前账号'} 的项目`;
     }
 
+    async function loadAdminContext() {
+      try {
+        const result = await api('/api/admin/status');
+        state.adminAuthenticated = Boolean(result.authenticated);
+      } catch (_error) {
+        state.adminAuthenticated = false;
+      }
+      $('admin-link').classList.toggle('hidden', !state.adminAuthenticated);
+    }
+
     function renderService() {
       const box = $('service-note');
       if (!state.service || state.service.mode === 'operational') {
@@ -516,9 +560,18 @@
     }
 
     function visibleProjects() {
-      if (state.filter === 'active') return state.projects.filter(item => ['queued', 'running'].includes(item.status));
-      if (state.filter === 'done') return state.projects.filter(item => item.status === 'done');
-      return state.projects;
+      let rows = state.projects;
+      if (state.filter === 'favorite') rows = rows.filter(item => item.favorite);
+      if (state.filter === 'active') rows = rows.filter(item => ['queued', 'running'].includes(item.status));
+      if (state.filter === 'done') rows = rows.filter(item => item.status === 'done');
+      if (state.category !== 'all') rows = rows.filter(item => item.category === state.category);
+      const query = state.query.trim().toLowerCase();
+      if (query) rows = rows.filter(item => `${item.title || ''} ${item.source_id || ''}`.toLowerCase().includes(query));
+      return rows;
+    }
+
+    function categoryOptions(selected) {
+      return state.categories.map(category => `<option value="${esc(category)}" ${category === selected ? 'selected' : ''}>${esc(category)}</option>`).join('');
     }
 
     function projectHtml(project) {
@@ -532,6 +585,8 @@
       const error = status === 'failed' ? `<div class="project-error">${esc(friendlyError(project))}</div>${project.error ? `<details class="technical"><summary>技术详情</summary><div>${esc(String(project.error).slice(0, 700))}</div></details>` : ''}` : '';
       const doc = project.doc_url ? `<a class="action-link" href="${esc(project.doc_url)}" target="_blank" rel="noopener">${icon('open')}打开文档</a>` : '';
       const retry = status === 'failed' && Number(project.job_id) > 0 ? `<button class="retry-button" onclick="retryProject(${Number(project.job_id)}, this)">${icon('retry')}重试</button>` : '';
+      const favorite = `<button class="project-icon-action ${project.favorite ? 'favorite' : ''}" aria-label="${project.favorite ? '取消收藏' : '收藏'}" title="${project.favorite ? '取消收藏' : '收藏'}" onclick="toggleFavorite('${esc(project.source_id)}', ${project.favorite ? 'false' : 'true'})">${icon('star')}</button>`;
+      const remove = `<button class="project-icon-action delete" aria-label="删除项目" title="从我的项目中删除" onclick="deleteProject('${esc(project.source_id)}')">${icon('trash')}</button>`;
       return `<article class="project-row" data-source="${esc(project.source_id)}">
         <div class="project-card ${esc(status)}">
           <div class="project-main">
@@ -539,13 +594,14 @@
               <div class="project-title"><strong>${esc(title)}</strong><span>arXiv ${esc(project.source_id)} · 第 ${Math.max(1, Number(project.attempts || 1))} 次尝试</span></div>
               <span class="project-state ${esc(status)}">${esc(stateLabel(status))}</span>
             </div>
+            ${project.summary ? `<p class="project-summary">${esc(project.summary)}</p>` : ''}
             <div class="project-progress">
               <div class="project-progress-head"><strong>${esc(project.label || '等待调度')}</strong><span>${percent}%${eta ? ` · ${esc(eta)}` : ''}</span></div>
               <div class="track"><div class="fill ${repair ? 'repair' : ''}" style="width:${percent}%"></div></div>
             </div>
             ${error}
           </div>
-          <div class="project-actions"><span class="project-updated">更新于 ${esc(project.updated_at || '')}</span><div class="action-group">${doc}${retry}</div></div>
+          <div class="project-actions"><div class="project-organize"><select class="category-select" aria-label="调整项目分类" onchange="changeCategory('${esc(project.source_id)}', this.value)">${categoryOptions(project.category)}</select><span class="project-updated">${project.category_source === 'manual' ? '人工分类' : '自动分类'}</span></div><div class="action-group">${favorite}${doc}${retry}${remove}</div></div>
         </div>
         <div class="pet-dock"><button class="project-pet" aria-label="询问 Max 当前项目" title="问 Max" onclick="openPet(${Number(project.job_id || 0)}, '${esc(project.source_id)}')"><div class="pet-sprite ${petFrame(project)}"></div></button><span class="pet-label">问 Max</span></div>
       </article>`;
@@ -553,7 +609,17 @@
 
     function renderProjects() {
       const rows = visibleProjects();
-      $('projects').innerHTML = rows.length ? rows.map(projectHtml).join('') : '<div class="empty">这个筛选下还没有项目。</div>';
+      if (!rows.length) {
+        $('projects').innerHTML = '<div class="empty">这个筛选下还没有项目。</div>';
+      } else {
+        const groups = new Map();
+        for (const project of rows) {
+          const category = project.category || '其他';
+          if (!groups.has(category)) groups.set(category, []);
+          groups.get(category).push(project);
+        }
+        $('projects').innerHTML = [...groups.entries()].map(([category, projects]) => `<section class="category-group"><h3 class="category-heading"><span>${esc(category)}</span><span class="category-count">${projects.length}</span></h3><div class="category-list">${projects.map(projectHtml).join('')}</div></section>`).join('');
+      }
       if (state.petProject) {
         const fresh = state.projects.find(item => item.source_id === state.petProject.source_id);
         if (fresh) state.petProject = fresh;
@@ -564,7 +630,12 @@
       try {
         const result = await api('/api/web/progress');
         state.projects = result.recent || [];
+        state.categories = result.categories || [];
         state.service = result.service || null;
+        const categoryFilter = $('category-filter');
+        const currentCategory = state.category;
+        categoryFilter.innerHTML = `<option value="all">全部分类</option>${state.categories.map(category => `<option value="${esc(category)}">${esc(category)}</option>`).join('')}`;
+        categoryFilter.value = state.categories.includes(currentCategory) ? currentCategory : 'all';
         renderService();
         renderProjects();
       } catch (_error) {
@@ -576,6 +647,37 @@
       state.filter = filter;
       document.querySelectorAll('.filters button').forEach(button => button.classList.toggle('active', button.dataset.filter === filter));
       renderProjects();
+    }
+
+    function setCategoryFilter(category) { state.category = category; renderProjects(); }
+    function setSearch(query) { state.query = query; renderProjects(); }
+
+    async function projectAction(sourceId, action, value) {
+      return api('/api/web/project-action', {method: 'POST', body: JSON.stringify({source_id: sourceId, action, value})});
+    }
+
+    async function toggleFavorite(sourceId, favorite) {
+      try {
+        await projectAction(sourceId, 'favorite', favorite);
+        await refreshProjects();
+      } catch (error) { toast(error.message); }
+    }
+
+    async function changeCategory(sourceId, category) {
+      try {
+        await projectAction(sourceId, 'category', category);
+        await refreshProjects();
+      } catch (error) { toast(error.message); }
+    }
+
+    async function deleteProject(sourceId) {
+      if (!window.confirm('从你的项目台删除这篇论文？如果它仍在独占排队，会同时安全取消。')) return;
+      try {
+        const result = await projectAction(sourceId, 'delete', true);
+        if (state.petProject?.source_id === sourceId) closePet();
+        toast(result.cancelled ? '项目已删除并取消排队' : '项目已从个人控制台删除');
+        await refreshProjects();
+      } catch (error) { toast(error.message); }
     }
 
     function updateSubmitMeta() {
@@ -621,13 +723,14 @@
     }
 
     function openPet(jobId, sourceId) {
+      if (state.petBusy) { toast('Max 还在回答当前项目'); return; }
       state.petProject = projectByRef(jobId, sourceId);
       if (!state.petProject) return;
       $('pet-project-title').textContent = `${state.petProject.source_id} · ${state.petProject.label || stateLabel(state.petProject.status)}`;
       $('pet-panel-avatar').style.backgroundPosition = state.petProject.status === 'done' ? '100% 0' : state.petProject.status === 'running' ? '33.333% 0' : state.petProject.status === 'queued' ? '66.666% 0' : '0 0';
       const key = state.petProject.source_id;
       if (!state.petChats[key]) {
-        state.petChats[key] = [{role: 'assistant', content: `${key} 现在在“${state.petProject.label || stateLabel(state.petProject.status)}”，我只看这一个项目。`}];
+        state.petChats[key] = [{role: 'assistant', content: `已连接到这个项目。当前阶段：${state.petProject.label || stateLabel(state.petProject.status)}。`}];
       }
       renderPetChat();
       $('pet-panel').classList.remove('hidden');
@@ -638,15 +741,20 @@
     function renderPetChat() {
       if (!state.petProject) return;
       const rows = state.petChats[state.petProject.source_id] || [];
-      $('pet-chat').innerHTML = rows.map(item => `<div class="pet-message ${esc(item.role)}"><div class="pet-bubble">${esc(item.content)}</div></div>`).join('');
+      $('pet-chat').innerHTML = rows.map(item => `<div class="pet-message ${esc(item.role)}"><div class="pet-bubble">${item.pending ? '<span class="pet-pending">Max 正在思考<span class="thinking-dots"><i></i><i></i><i></i></span></span>' : esc(item.content)}</div></div>`).join('');
       $('pet-chat').scrollTop = $('pet-chat').scrollHeight;
     }
 
     async function askPet(content) {
-      if (!state.petProject || !content.trim()) return;
+      if (!state.petProject || !content.trim() || state.petBusy) return;
       const key = state.petProject.source_id;
       const chat = state.petChats[key] || (state.petChats[key] = []);
       chat.push({role: 'user', content: content.trim()});
+      const pending = {role: 'assistant', content: '', pending: true};
+      chat.push(pending);
+      state.petBusy = true;
+      $('pet-panel-avatar').style.backgroundPosition = '66.666% 0';
+      document.querySelectorAll('#pet-quick button').forEach(button => { button.disabled = true; });
       renderPetChat();
       $('pet-send').disabled = true;
       try {
@@ -656,13 +764,17 @@
             content: content.trim(),
             job_id: Number(state.petProject.job_id || 0),
             source_id: state.petProject.source_id,
-            history: chat.slice(-8, -1),
+            history: chat.filter(item => !item.pending).slice(-8, -1),
           }),
         });
-        chat.push({role: 'assistant', content: result.message?.content || '我还在看这个项目。'});
+        Object.assign(pending, {content: result.message?.content || '我还在看这个项目。', pending: false});
       } catch (error) {
-        chat.push({role: 'assistant', content: error.message});
+        Object.assign(pending, {content: error.message, pending: false});
       } finally {
+        state.petBusy = false;
+        const frame = petFrame(state.petProject);
+        $('pet-panel-avatar').style.backgroundPosition = frame === 'done' ? '100% 0' : frame === 'working' ? '33.333% 0' : frame === 'thinking' ? '66.666% 0' : '0 0';
+        document.querySelectorAll('#pet-quick button').forEach(button => { button.disabled = false; });
         $('pet-send').disabled = false;
         renderPetChat();
       }
@@ -760,7 +872,7 @@
     $('pet-input').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendPetMessage(); } });
 
     async function boot() {
-      await loadMe();
+      await Promise.all([loadMe(), loadAdminContext()]);
       await refreshProjects();
       state.poll = setInterval(refreshProjects, 4000);
       maybeOnboard();

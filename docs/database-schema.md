@@ -12,6 +12,7 @@ MaxRead 使用单个 SQLite 文件，由 `maxread/db.py` 在启动时创建和�
 | --- | --- | --- |
 | `paper_id` | TEXT PK | arXiv ID |
 | `title`, `authors` | TEXT | 元数据 |
+| `project_summary` | TEXT | MaxRead 生成的一句话定位；项目自动分类输入 |
 | `arxiv_url` | TEXT | 原文入口 |
 | `pdf_path`, `source_path` | TEXT | 本地下载路径 |
 | `status` | TEXT | 资料/处理状态 |
@@ -76,6 +77,13 @@ MaxRead 使用单个 SQLite 文件，由 `maxread/db.py` 在启动时创建和�
 ### `users` 与 `user_identity_cache`
 
 `users` 保存首次介绍消息状态；`user_identity_cache` 保存 `sender_id -> display_name` 映射，避免管理台始终显示神秘 open_id。
+
+### `web_identities` 与 `web_project_preferences`
+
+`web_identities` 保存浏览器会话哈希和可选的飞书 `open_id` 绑定；原始
+HttpOnly Cookie 不入库。`web_project_preferences` 以 `owner_key + source_id`
+为主键，保存个人收藏、人工分类和软删除时间。自动分类不写死在表里，
+它由标题和 `papers.project_summary` 计算；人工分类优先。
 
 ### `service_status`
 

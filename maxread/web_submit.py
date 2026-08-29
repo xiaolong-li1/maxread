@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from .db import Store
+from .project_metadata import PROJECT_CATEGORIES
 from .sources import extract_supported_inputs
 
 
@@ -101,6 +102,7 @@ def submit_web_papers(settings, store: Store, identity, content: str) -> dict:
     event_id = f"web-event:{uuid.uuid4().hex}"
     items = []
     for ref in paper_refs:
+        store.restore_web_project(identity, ref.paper_id)
         message_id = user_message_id
         record = store.get_paper(ref.paper_id)
         usage_id = store.add_usage_event(
@@ -215,6 +217,21 @@ def retry_web_job(settings, store: Store, identity, job_id: int) -> dict:
         status="queued",
     )
     return {"ok": True, "job_id": target_id, "resume_published": resume_published}
+
+
+def update_web_project(store: Store, identity, source_id: str, action: str, value=None) -> dict:
+    clean_action = str(action or "").strip().lower()
+    if clean_action == "favorite":
+        favorite = value is True or str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+        return {"ok": True, **store.set_web_project_favorite(identity, source_id, favorite)}
+    if clean_action == "category":
+        category = str(value or "").strip()
+        if category not in PROJECT_CATEGORIES:
+            raise ValueError("不支持的项目分类")
+        return {"ok": True, **store.set_web_project_category(identity, source_id, category)}
+    if clean_action == "delete":
+        return {"ok": True, **store.delete_web_project(identity, source_id)}
+    raise ValueError("不支持的项目操作")
 
 
 WEB_SUBMIT_HTML = (Path(__file__).resolve().parent / "static" / "web_submit.html").read_text(encoding="utf-8")

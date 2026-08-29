@@ -210,6 +210,14 @@ python3 -m venv .venv
 
 If `pytest` is installed, `python3 -m pytest` also works.
 
+## Production handoff
+
+The current Aliyun topology, three business services, secret boundaries,
+ZeroTier status, arXiv egress, databases, deployment checklist and feature
+extension rules are documented in
+[`docs/aliyun-maintainer-handoff.md`](docs/aliyun-maintainer-handoff.md).
+Read it before operating production or handing the project to another agent.
+
 ## Usage Audit
 
 MaxRead stores private/group sender open_id, input link, status, generated doc URL, and timestamps in local SQLite. Recent records:

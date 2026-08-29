@@ -27,6 +27,7 @@ class PaperRecord:
     paper_id: str
     status: str
     title: str = ""
+    project_summary: str = ""
     doc_url: str = ""
     doc_token: str = ""
     error: str = ""
@@ -59,6 +60,7 @@ class Store:
             create table if not exists papers (
                 paper_id text primary key,
                 title text not null default '',
+                project_summary text not null default '',
                 authors text not null default '',
                 arxiv_url text not null default '',
                 pdf_path text not null default '',
@@ -159,6 +161,19 @@ class Store:
 
             create index if not exists web_messages_conversation_idx on web_messages(conversation_id, id);
             create index if not exists web_messages_job_idx on web_messages(job_id, conversation_id);
+
+            create table if not exists web_project_preferences (
+                owner_key text not null,
+                source_id text not null,
+                favorite integer not null default 0,
+                category text not null default '',
+                deleted_at datetime,
+                updated_at datetime not null default current_timestamp,
+                primary key (owner_key, source_id)
+            );
+
+            create index if not exists web_project_preferences_owner_idx
+                on web_project_preferences(owner_key, deleted_at, favorite, updated_at);
 
             create table if not exists service_status (
                 id integer primary key check (id = 1),
@@ -316,6 +331,7 @@ class Store:
         self._ensure_column("queue_jobs", "recovery_reason", "text not null default ''")
         self._ensure_column("queue_jobs", "recovery_attempts", "integer not null default 0")
         self._ensure_column("queue_jobs", "rebuild_pipeline", "integer not null default 0")
+        self._ensure_column("papers", "project_summary", "text not null default ''")
         self._ensure_column("feedback", "feedback_source", "text not null default ''")
         self._ensure_column("feedback", "feedback_category", "text not null default ''")
         self._ensure_column("feedback", "feedback_confidence", "real not null default 0")
@@ -343,6 +359,7 @@ class Store:
             paper_id=row["paper_id"],
             status=row["status"],
             title=row["title"],
+            project_summary=row["project_summary"],
             doc_url=row["doc_url"],
             doc_token=row["doc_token"],
             error=row["error"],
@@ -350,7 +367,7 @@ class Store:
 
     def upsert_paper(self, paper_id: str, status: str, **fields: str) -> None:
         existing = self.get_paper(paper_id)
-        names = {"title", "authors", "arxiv_url", "pdf_path", "source_path", "doc_url", "doc_token", "error"}
+        names = {"title", "project_summary", "authors", "arxiv_url", "pdf_path", "source_path", "doc_url", "doc_token", "error"}
         clean = {k: str(v) for k, v in fields.items() if k in names and v is not None}
         if existing is None:
             columns = ["paper_id", "status"] + list(clean.keys())
@@ -364,6 +381,13 @@ class Store:
             assignments = ["status = ?", "updated_at = current_timestamp"] + [f"{k} = ?" for k in clean]
             values = [status] + list(clean.values()) + [paper_id]
             self.conn.execute(f"update papers set {','.join(assignments)} where paper_id = ?", values)
+        self.conn.commit()
+
+    def set_paper_project_summary(self, paper_id: str, summary: str) -> None:
+        self.conn.execute(
+            "update papers set project_summary = ? where paper_id = ? and project_summary = ''",
+            (str(summary or "")[:500], str(paper_id)),
+        )
         self.conn.commit()
 
     def add_job(self, event_id: str, message_id: str, chat_id: str, paper_id: str, status: str) -> bool:
@@ -671,7 +695,8 @@ class Store:
             params.append(open_id)
         rows = self.conn.execute(
             f"""
-            select q.*, coalesce(nullif(q.title, ''), nullif(p.title, ''), '') as resolved_title
+            select q.*, coalesce(nullif(q.title, ''), nullif(p.title, ''), '') as resolved_title,
+                   coalesce(p.project_summary, '') as project_summary
             from queue_jobs q
             left join papers p on q.source_kind = 'paper' and p.paper_id = q.source_id
             where exists (
@@ -682,7 +707,7 @@ class Store:
                      q.id desc
             limit ?
             """,
-            (*params, max(1, min(50, int(limit)))),
+            (*params, max(1, min(200, int(limit)))),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -696,14 +721,180 @@ class Store:
             params.append(open_id)
         rows = self.conn.execute(
             f"""
-            select * from usage_events
-            where source_kind = 'paper' and ({' or '.join(clauses)})
-            order by id desc
+            select ue.*, coalesce(p.project_summary, '') as project_summary
+            from usage_events ue
+            left join papers p on p.paper_id = ue.source_id
+            where ue.source_kind = 'paper' and ({' or '.join(clauses)})
+            order by ue.id desc
             limit ?
             """,
             (*params, max(1, min(200, int(limit)))),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def web_project_preferences(self, identity) -> dict[str, dict]:
+        owner_key = self.web_conversation_owner(identity)
+        rows = self.conn.execute(
+            "select * from web_project_preferences where owner_key = ?",
+            (owner_key,),
+        ).fetchall()
+        return {str(row["source_id"]): dict(row) for row in rows}
+
+    def _web_identity_owns_source(self, identity, source_id: str) -> bool:
+        public_id = str(identity.get("public_id") or "")
+        open_id = str(identity.get("feishu_open_id") or "").strip()
+        clauses = ["(w.chat_type = 'web' and w.chat_id = ?)"]
+        params: list[object] = [str(source_id), f"web:{public_id}"]
+        if open_id:
+            clauses.append("w.sender_id = ?")
+            params.append(open_id)
+        row = self.conn.execute(
+            f"""
+            select 1
+            from queue_jobs q
+            join job_watchers w on w.job_id = q.id
+            where q.source_kind = 'paper' and q.source_id = ?
+              and ({' or '.join(clauses)})
+            limit 1
+            """,
+            params,
+        ).fetchone()
+        if row is not None:
+            return True
+        usage_clauses = ["(chat_type = 'web' and chat_id = ?)"]
+        usage_params: list[object] = [str(source_id), f"web:{public_id}"]
+        if open_id:
+            usage_clauses.append("sender_id = ?")
+            usage_params.append(open_id)
+        row = self.conn.execute(
+            f"""
+            select 1 from usage_events
+            where source_kind = 'paper' and source_id = ?
+              and ({' or '.join(usage_clauses)})
+            limit 1
+            """,
+            usage_params,
+        ).fetchone()
+        return row is not None
+
+    def restore_web_project(self, identity, source_id: str) -> None:
+        owner_key = self.web_conversation_owner(identity)
+        self.conn.execute(
+            """
+            insert into web_project_preferences (owner_key, source_id, deleted_at)
+            values (?, ?, null)
+            on conflict(owner_key, source_id) do update set
+                deleted_at=null, updated_at=current_timestamp
+            """,
+            (owner_key, str(source_id)),
+        )
+        self.conn.commit()
+
+    def set_web_project_favorite(self, identity, source_id: str, favorite: bool) -> dict:
+        clean_source = str(source_id or "").strip()
+        if not clean_source or not self._web_identity_owns_source(identity, clean_source):
+            raise ValueError("项目不在当前账号范围")
+        owner_key = self.web_conversation_owner(identity)
+        self.conn.execute(
+            """
+            insert into web_project_preferences (owner_key, source_id, favorite)
+            values (?, ?, ?)
+            on conflict(owner_key, source_id) do update set
+                favorite=excluded.favorite, updated_at=current_timestamp
+            """,
+            (owner_key, clean_source, 1 if favorite else 0),
+        )
+        self.conn.commit()
+        return {"source_id": clean_source, "favorite": bool(favorite)}
+
+    def set_web_project_category(self, identity, source_id: str, category: str) -> dict:
+        clean_source = str(source_id or "").strip()
+        clean_category = str(category or "").strip()[:60]
+        if not clean_source or not self._web_identity_owns_source(identity, clean_source):
+            raise ValueError("项目不在当前账号范围")
+        owner_key = self.web_conversation_owner(identity)
+        self.conn.execute(
+            """
+            insert into web_project_preferences (owner_key, source_id, category)
+            values (?, ?, ?)
+            on conflict(owner_key, source_id) do update set
+                category=excluded.category, updated_at=current_timestamp
+            """,
+            (owner_key, clean_source, clean_category),
+        )
+        self.conn.commit()
+        return {"source_id": clean_source, "category": clean_category}
+
+    def delete_web_project(self, identity, source_id: str) -> dict:
+        clean_source = str(source_id or "").strip()
+        if not clean_source or not self._web_identity_owns_source(identity, clean_source):
+            raise ValueError("项目不在当前账号范围")
+        owner_key = self.web_conversation_owner(identity)
+        public_chat = f"web:{str(identity.get('public_id') or '')}"
+        self.conn.execute(
+            """
+            insert into web_project_preferences (owner_key, source_id, deleted_at)
+            values (?, ?, current_timestamp)
+            on conflict(owner_key, source_id) do update set
+                deleted_at=current_timestamp, updated_at=current_timestamp
+            """,
+            (owner_key, clean_source),
+        )
+        job = self.conn.execute(
+            """
+            select q.* from queue_jobs q
+            where q.source_kind = 'paper' and q.source_id = ?
+              and exists (
+                select 1 from job_watchers w
+                where w.job_id = q.id and w.chat_type = 'web' and w.chat_id = ?
+              )
+            order by q.id desc limit 1
+            """,
+            (clean_source, public_chat),
+        ).fetchone()
+        cancelled = False
+        if job is not None:
+            watchers = self.conn.execute(
+                "select * from job_watchers where job_id = ? and notified = 0",
+                (int(job["id"]),),
+            ).fetchall()
+            exclusively_owned = bool(watchers) and all(
+                str(row["chat_type"] or "") == "web" and str(row["chat_id"] or "") == public_chat
+                for row in watchers
+            )
+            if str(job["status"] or "") == "queued" and exclusively_owned:
+                current = self._queue_workflow_state(job)
+                result = transition(current, WorkflowEvent.CANCEL)
+                self._update_queue_workflow_locked(
+                    int(job["id"]), result.to_state, WorkflowEvent.CANCEL,
+                    "cancelled after owner deleted accidental web submission",
+                    int(job["state_version"] or 0) + 1,
+                )
+                self._insert_transition_event(
+                    int(job["id"]), result,
+                    "cancelled after owner deleted accidental web submission",
+                )
+                cancelled = True
+            self.conn.execute(
+                "update job_watchers set notified = 1 where job_id = ? and chat_type = 'web' and chat_id = ?",
+                (int(job["id"]), public_chat),
+            )
+            self.conn.execute(
+                """
+                update usage_events set status = ?, updated_at = current_timestamp
+                where id in (
+                    select usage_event_id from job_watchers
+                    where job_id = ? and chat_type = 'web' and chat_id = ? and usage_event_id != 0
+                )
+                """,
+                ("cancelled" if cancelled else "hidden", int(job["id"]), public_chat),
+            )
+            self.conn.execute(
+                "insert into job_events (job_id, event_type, detail) values (?, 'web_project_deleted', ?)",
+                (int(job["id"]), owner_key),
+            )
+        self.conn.commit()
+        return {"source_id": clean_source, "deleted": True, "cancelled": cancelled}
 
     def recent_pet_message_count(self, identity, minutes: int = 10) -> int:
         conversation = self.ensure_web_conversation(identity)
@@ -1586,6 +1777,18 @@ class Store:
             (f"-{int(stale_minutes)} minutes",),
         ).fetchall()
         return self._recover_queue_job_rows(rows, "recover_stale", max_recovery_attempts)
+
+    def recover_stale_queue_job(self, job_id: int, stale_minutes: int, max_recovery_attempts: int = 3) -> bool:
+        rows = self.conn.execute(
+            """
+            select id, worker_id, stage, heartbeat_at, started_at, recovery_attempts
+            from queue_jobs
+            where id = ? and status = 'running'
+              and (heartbeat_at is null or heartbeat_at < datetime('now', ?))
+            """,
+            (int(job_id), f"-{int(stale_minutes)} minutes"),
+        ).fetchall()
+        return bool(self._recover_queue_job_rows(rows, "project_agent_recover_stale", max_recovery_attempts))
 
     def recover_dead_worker_queue_jobs(self, host: str, is_pid_alive, max_recovery_attempts: int = 3) -> int:
         rows = self.conn.execute(

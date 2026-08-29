@@ -1,8 +1,8 @@
 # Web submission and persistent identity
 
-MaxRead exposes a public paper submission surface at `/submit` on the admin
-HTTP service. In production Nginx publishes it as `/maxread/submit` while the
-control panel remains `/maxread/`.
+MaxRead exposes the identity-scoped project console at `/`, `/projects` and
+`/submit` on the HTTP service. Production publishes these under `/maxread/`.
+The global operator console is `/maxread/admin` and requires an admin session.
 
 ## Identity model
 
@@ -20,15 +20,16 @@ real Feishu sender `open_id`. Binding then:
 3. merges the guest conversation into the canonical
    `feishu:<open_id>` conversation;
 4. lets another browser bound to the same Feishu account see the same durable
-   conversation.
+   paper projects.
 
 Users never type or select an `ou_xxx` identifier in the public UI.
 
-## Conversation bridge
+## Project model
 
-`web_conversations` owns an ordered `web_messages` stream. Each message stores
-its role, channel, kind, source/job identifiers, status, document URL, and the
-actual actor.
+The UI does not render a chat timeline. It projects the effective identity's
+queue watchers and usage records into one card per paper source. Queue changes,
+retry and completion update that card in place. Old attempts remain in
+`queue_jobs` and `job_events` for audit but do not create duplicate cards.
 
 - A web submission writes the user message and queue acknowledgement.
 - Queue stage changes update the acknowledgement.
@@ -39,13 +40,15 @@ actual actor.
 - Web watchers update SQLite only; they never call a Feishu reply API with a
   synthetic message ID.
 
-The page renders queue acknowledgements and terminal results as structured task
-cards. Failed cards show a scoped Retry button and friendly error category;
-raw infrastructure output is collapsed under technical details. Text commands
-do not trigger retry.
+`web_project_preferences` stores per-identity favorite, manual category and
+deleted state. Automatic category uses title plus MaxRead's generated
+one-sentence summary. Manual category wins. Delete only removes that identity's
+project; a queued job is cancelled only when that web identity is the sole
+watcher. Resubmitting the source restores the project.
 
-The composer sits below the conversation. Paper links use the deterministic
-submission path, while ordinary text is handled by the bounded companion agent
+Each card owns a Max companion panel. Its chat is browser-local and never
+becomes a formal project message. Max receives the selected project ID, can
+diagnose its events/heartbeat/artifacts, and has only the bounded repair tools
 described in [`web-pet-agent.md`](web-pet-agent.md).
 
 ## Administrator overlay
@@ -58,8 +61,8 @@ This preserves both layers instead of silently impersonating the user.
 
 ## Public boundary
 
-- Public POST endpoints are limited to `/api/web/submit` and
-  `/api/web/binding-code`.
+- Public POST endpoints are limited to submission, binding, retry, project
+  actions and scoped project-agent chat.
 - Inputs are parsed by the existing canonical arXiv source parser and reuse the
   durable global queue and deduplication logic.
 - A session may submit at most ten papers per ten minutes; the HTTP server also
@@ -69,6 +72,6 @@ This preserves both layers instead of silently impersonating the user.
   session.
 - Session cookies are HttpOnly and become Secure behind HTTPS.
 
-When publishing behind the existing `/maxread/` Nginx prefix, explicitly allow
-POST for the two public endpoints; the general control-panel location remains
-GET-only.
+When publishing behind `/maxread/`, explicitly allow each public POST endpoint
+in Nginx; the general location remains GET-only. Global operator APIs require
+the server-side admin session even when called directly.

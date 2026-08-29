@@ -48,12 +48,12 @@
 
 ## 5. 模型路由
 
-默认复用 5090 现有 API：
+生产环境复用 Aliyun 私有配置中的 OpenAI-compatible API：
 
 ```dotenv
 RECRUITING_MODEL=gpt-5.6-sol
 RECRUITING_REASONING_EFFORT=medium
-RECRUITING_OPENAI_BASE_URL=<5090 现有网关>
+RECRUITING_OPENAI_BASE_URL=<private gateway>
 RECRUITING_OPENAI_API_MODE=responses
 ```
 
@@ -75,7 +75,9 @@ RECRUITING_OPENAI_API_MODE=responses
 ./bin/recruiting-pipeline status
 ```
 
-部署到 5090 后使用 `deploy/recruiting-pipeline.service`。第一轮建议 `scan-once`，检查新增线程、follow-up 合并、面试寄映射、云文档链接和失败重试统计，再启用常驻服务。
+生产部署位于 Aliyun `/opt/maxread/features/mail_ingestion`，使用系统级
+`recruiting-pipeline.service`。第一轮建议 `scan-once`，检查新增线程、
+follow-up 合并、面试寄映射、云文档链接和失败重试统计，再启用常驻服务。
 
 ## 8. 已发生问题与永久防护
 
