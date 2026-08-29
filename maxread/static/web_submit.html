@@ -405,7 +405,7 @@
       </div>
       <div class="header-actions">
         <a class="console-link" id="console-link" href="./projects" title="返回个人控制台"><span class="icon"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/><path d="M9 12h10"/></svg></span>个人控制台</a>
-        <a class="admin-link hidden" id="admin-link" href="./admin" title="管理员控制台"><span class="icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg></span>管理员</a>
+        <a class="admin-link" id="admin-link" href="./admin" title="管理员控制台"><span class="icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg></span>管理员</a>
         <button class="account" id="account-button" onclick="openAccount()"><span class="dot"></span><span class="account-label">游客</span></button>
       </div>
     </header>
@@ -546,7 +546,7 @@
       } catch (_error) {
         state.adminAuthenticated = false;
       }
-      $('admin-link').classList.toggle('hidden', !state.adminAuthenticated);
+      $('admin-link').title = state.adminAuthenticated ? '进入管理员控制台' : '管理员登录';
     }
 
     function renderService() {
