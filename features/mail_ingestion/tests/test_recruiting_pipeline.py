@@ -17,7 +17,7 @@ from recruiting_pipeline.cli import build_parser
 from recruiting_pipeline.base_sync import BaseSync
 from recruiting_pipeline.attachment_text import extract_attachment_text
 from recruiting_pipeline.models import ProcessedThread, StoredMessage, ThreadEnvelope
-from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _other_fields, _within_days
+from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _needs_material_document, _other_fields, _within_days
 from recruiting_pipeline.llm import _fields_from_json, _strip_json_fence
 from recruiting_pipeline.institution_tags import C9, PROJECT_985, classify_institution
 from recruiting_pipeline.models import CandidateFields
@@ -27,6 +27,10 @@ from recruiting_pipeline.weekly_report import markdown_to_post, render_weekly_re
 
 
 class RecruitingPipelineTest(unittest.TestCase):
+    def test_only_candidate_mail_materializes_full_document(self) -> None:
+        self.assertTrue(_needs_material_document(CandidateFields(mail_type="candidate").normalized()))
+        self.assertFalse(_needs_material_document(CandidateFields(mail_type="other").normalized()))
+
     def test_read_headers_does_not_load_attachment_body(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "large.eml"

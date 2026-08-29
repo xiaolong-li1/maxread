@@ -438,7 +438,7 @@ class RecruitingRunner:
         summary_changed = False
         processing_state = self.store.message_processing_state()
         pending_messages = [message for message in envelope.messages if not processing_state.get(message.id, ("", False))[1]]
-        if self.docs:
+        if self.docs and _needs_material_document(thread.fields):
             if thread.document_id:
                 self.docs.update_title(thread.document_id, f"{thread.fields.name}｜真实邮件材料")
                 summary_changed = bool(row and (previous_fields != thread.fields or str(row["latest_time"] or "") != str(thread.latest_time or "")))
@@ -691,6 +691,10 @@ def _other_fields(envelope: ThreadEnvelope, summary: str | None = None) -> Candi
         academic_display="—",
         purpose_summary=(summary or title).strip()[:500],
     ).normalized()
+
+
+def _needs_material_document(fields: CandidateFields) -> bool:
+    return fields.mail_type == "candidate"
 
 
 def _source_account_label(address: str) -> str:
