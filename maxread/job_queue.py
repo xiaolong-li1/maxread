@@ -541,6 +541,13 @@ def enqueue_event_items(
             store.update_usage_event(usage_id, "watching")
             lines.append(f"- {item.label}：已经在队列/处理中，完成后会通知你。")
     _reply(feishu, event.message_id, "\n".join(lines), f"queue:{event.event_id}")
+    store.mirror_feishu_message(
+        str(getattr(event, "sender_id", "") or ""),
+        f"feishu-ack:{getattr(event, 'event_id', '')}",
+        "assistant",
+        "\n".join(lines),
+        kind="queue_ack",
+    )
 
 
 def _queue_eta_text(position: int, workers: int, recent_duration_seconds: int = 300) -> str:
@@ -615,6 +622,9 @@ def _notify_watchers_progress(
         store.add_job_event(job_id, "progress_notifications_suppressed", event_type)
         return
     for watcher in watchers:
+        store.update_web_job_progress(watcher, job_id, "", text, event_type)
+        if _is_web_watcher(watcher):
+            continue
         try:
             _react(feishu, watcher["message_id"], event_type)
             store.add_job_event(job_id, f"react_{event_type}", str(watcher.get("usage_event_id", "")))
@@ -635,6 +645,15 @@ def _notify_watchers_started(
         usage_id = int(watcher.get("usage_event_id") or 0)
         if usage_id:
             store.update_usage_event(usage_id, "running")
+        store.update_web_job_progress(
+            watcher,
+            job_id,
+            source_id,
+            f"开始读取 arXiv {source_id}。",
+            "running",
+        )
+        if _is_web_watcher(watcher):
+            continue
         if suppress_progress_notifications:
             store.add_job_event(job_id, "progress_notifications_suppressed", "downloading")
             continue
@@ -677,6 +696,9 @@ def _notify_watchers(
             if recovery_reason:
                 text += f"\n说明：{recovery_reason}；任务已自动恢复并完成。"
             prefix = f"job-done:{job_id}:{watcher['id']}"
+            store.append_web_job_result(
+                watcher, job_id, source_id, text, doc_url=doc_url, status="done"
+            )
             if not notify_success:
                 store.mark_watcher_notified(int(watcher["id"]))
                 store.add_job_event(job_id, "notify_done_suppressed", str(watcher.get("usage_event_id", "")))
@@ -704,10 +726,22 @@ def _notify_watchers(
                     "需要再试时，直接在本话题回复「重试」；也可以回复「重试 + 论文 ID」。"
                 )
             prefix = f"job-fail:{job_id}:{watcher['id']}"
+            store.append_web_job_result(
+                watcher,
+                job_id,
+                source_id,
+                text,
+                doc_url=published_doc_url,
+                status="failed",
+            )
             if not notify_failure:
                 store.mark_watcher_notified(int(watcher["id"]))
                 store.add_job_event(job_id, "notify_failed_suppressed", str(watcher.get("usage_event_id", "")))
                 continue
+        if _is_web_watcher(watcher):
+            store.mark_watcher_notified(int(watcher["id"]))
+            store.add_job_event(job_id, "notify_web_poll", str(watcher.get("usage_event_id", "")))
+            continue
         try:
             _reply(feishu, watcher["message_id"], text, prefix)
             store.mark_watcher_notified(int(watcher["id"]))
@@ -725,6 +759,10 @@ def _notify_watchers(
 def _reply(feishu: FeishuClient, message_id: str, text: str, prefix: str) -> None:
     key = sha256(prefix.encode("utf-8")).hexdigest()[:32]
     feishu.reply_text(message_id, text[:900], idempotency_key=key)
+
+
+def _is_web_watcher(watcher) -> bool:
+    return str(watcher.get("chat_type") or "").lower() == "web"
 
 
 def _react(feishu: FeishuClient, message_id: str, stage: str) -> None:

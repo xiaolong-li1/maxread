@@ -107,6 +107,59 @@ class Store:
                 updated_at datetime not null default current_timestamp
             );
 
+            create table if not exists web_identities (
+                id integer primary key autoincrement,
+                public_id text not null unique,
+                session_hash text not null unique,
+                account_type text not null default 'guest',
+                feishu_open_id text not null default '',
+                display_name text not null default '游客',
+                created_at datetime not null default current_timestamp,
+                last_seen_at datetime not null default current_timestamp,
+                bound_at datetime
+            );
+
+            create table if not exists web_binding_codes (
+                code_hash text primary key,
+                web_identity_id integer not null,
+                expires_at datetime not null,
+                used_at datetime,
+                created_at datetime not null default current_timestamp,
+                foreign key (web_identity_id) references web_identities(id) on delete cascade
+            );
+
+            create index if not exists web_identity_feishu_idx on web_identities(feishu_open_id);
+            create index if not exists web_binding_identity_idx on web_binding_codes(web_identity_id, expires_at);
+
+            create table if not exists web_conversations (
+                id integer primary key autoincrement,
+                owner_key text not null unique,
+                created_at datetime not null default current_timestamp,
+                updated_at datetime not null default current_timestamp
+            );
+
+            create table if not exists web_messages (
+                id integer primary key autoincrement,
+                conversation_id integer not null,
+                external_id text not null unique,
+                role text not null,
+                kind text not null default 'message',
+                content text not null default '',
+                source_id text not null default '',
+                job_id integer not null default 0,
+                doc_url text not null default '',
+                status text not null default '',
+                channel text not null default 'web',
+                actor_type text not null default 'user',
+                actor_id text not null default '',
+                created_at datetime not null default current_timestamp,
+                updated_at datetime not null default current_timestamp,
+                foreign key (conversation_id) references web_conversations(id) on delete cascade
+            );
+
+            create index if not exists web_messages_conversation_idx on web_messages(conversation_id, id);
+            create index if not exists web_messages_job_idx on web_messages(job_id, conversation_id);
+
             create table if not exists service_status (
                 id integer primary key check (id = 1),
                 mode text not null default 'operational',
@@ -426,6 +479,396 @@ class Store:
             clean.items(),
         )
         self.conn.commit()
+
+    def get_or_create_web_identity(self, session_hash: str, public_id: str = ""):
+        clean_hash = str(session_hash or "").strip()
+        if not clean_hash:
+            raise ValueError("session_hash is required")
+        row = self.conn.execute(
+            "select * from web_identities where session_hash = ?",
+            (clean_hash,),
+        ).fetchone()
+        if row is None:
+            clean_public_id = str(public_id or "").strip()
+            if not clean_public_id:
+                raise ValueError("public_id is required for a new web identity")
+            self.conn.execute(
+                "insert into web_identities (public_id, session_hash) values (?, ?)",
+                (clean_public_id, clean_hash),
+            )
+            self.conn.execute(
+                "insert or ignore into user_identity_cache (sender_id, display_name) values (?, '游客')",
+                (f"guest:{clean_public_id}",),
+            )
+        else:
+            self.conn.execute(
+                "update web_identities set last_seen_at = current_timestamp where id = ?",
+                (int(row["id"]),),
+            )
+        self.conn.commit()
+        return self.get_web_identity(clean_hash)
+
+    def get_web_identity(self, session_hash: str):
+        row = self.conn.execute(
+            "select * from web_identities where session_hash = ?",
+            (str(session_hash or "").strip(),),
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        open_id = str(result.get("feishu_open_id") or "")
+        if open_id:
+            names = self.get_user_names([open_id])
+            if names.get(open_id):
+                result["display_name"] = names[open_id]
+        return result
+
+    def get_web_identity_by_public_id(self, public_id: str):
+        row = self.conn.execute(
+            "select * from web_identities where public_id = ?",
+            (str(public_id or "").strip(),),
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        open_id = str(result.get("feishu_open_id") or "")
+        if open_id:
+            result["display_name"] = self.get_user_names([open_id]).get(open_id, result["display_name"])
+        return result
+
+    def update_web_identity_display_name(self, feishu_open_id: str, display_name: str) -> None:
+        clean_name = str(display_name or "").strip()
+        clean_open_id = str(feishu_open_id or "").strip()
+        if not clean_name or not clean_open_id:
+            return
+        self.conn.execute(
+            """
+            update web_identities set display_name = ?, last_seen_at = current_timestamp
+            where feishu_open_id = ?
+            """,
+            (clean_name, clean_open_id),
+        )
+        self.conn.commit()
+
+    @staticmethod
+    def web_identity_sender(identity) -> str:
+        open_id = str(identity.get("feishu_open_id") or "").strip()
+        return open_id or f"guest:{identity['public_id']}"
+
+    @staticmethod
+    def web_conversation_owner(identity) -> str:
+        open_id = str(identity.get("feishu_open_id") or "").strip()
+        return f"feishu:{open_id}" if open_id else f"guest:{identity['public_id']}"
+
+    def ensure_web_conversation(self, identity):
+        owner_key = self.web_conversation_owner(identity)
+        self.conn.execute(
+            "insert or ignore into web_conversations (owner_key) values (?)",
+            (owner_key,),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "select * from web_conversations where owner_key = ?",
+            (owner_key,),
+        ).fetchone()
+        return dict(row)
+
+    def append_web_message(
+        self,
+        conversation_id: int,
+        external_id: str,
+        role: str,
+        content: str,
+        *,
+        kind: str = "message",
+        source_id: str = "",
+        job_id: int = 0,
+        doc_url: str = "",
+        status: str = "",
+        channel: str = "web",
+        actor_type: str = "user",
+        actor_id: str = "",
+    ):
+        self.conn.execute(
+            """
+            insert into web_messages (
+                conversation_id, external_id, role, kind, content, source_id,
+                job_id, doc_url, status, channel, actor_type, actor_id
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict(external_id) do update set
+                content=excluded.content, doc_url=excluded.doc_url,
+                status=excluded.status, updated_at=current_timestamp
+            """,
+            (
+                int(conversation_id), str(external_id), str(role), str(kind),
+                str(content)[:8000], str(source_id), int(job_id or 0), str(doc_url),
+                str(status), str(channel), str(actor_type), str(actor_id),
+            ),
+        )
+        self.conn.execute(
+            "update web_conversations set updated_at = current_timestamp where id = ?",
+            (int(conversation_id),),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "select * from web_messages where external_id = ?",
+            (str(external_id),),
+        ).fetchone()
+        return dict(row)
+
+    def list_web_messages(self, identity, after_id: int = 0, limit: int = 100):
+        conversation = self.ensure_web_conversation(identity)
+        rows = self.conn.execute(
+            """
+            select * from web_messages
+            where conversation_id = ? and id > ?
+            order by id asc
+            limit ?
+            """,
+            (int(conversation["id"]), max(0, int(after_id)), max(1, min(200, int(limit)))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_web_accounts(self, limit: int = 200):
+        rows = self.conn.execute(
+            """
+            select w.public_id, w.account_type, w.feishu_open_id, w.display_name,
+                   w.created_at, w.last_seen_at,
+                   (select count(*) from usage_events ue
+                    where ue.chat_type = 'web' and ue.chat_id = 'web:' || w.public_id) as submission_count
+            from web_identities w
+            order by w.last_seen_at desc, w.id desc
+            limit ?
+            """,
+            (max(1, min(500, int(limit))),),
+        ).fetchall()
+        results = [dict(row) for row in rows]
+        names = self.get_user_names([row["feishu_open_id"] for row in results if row["feishu_open_id"]])
+        for row in results:
+            if row["feishu_open_id"] in names:
+                row["display_name"] = names[row["feishu_open_id"]]
+        return results
+
+    def _conversation_for_watcher(self, watcher):
+        if str(watcher.get("chat_type") or "").lower() == "web":
+            row = self.conn.execute(
+                "select conversation_id from web_messages where external_id = ?",
+                (str(watcher.get("message_id") or ""),),
+            ).fetchone()
+            return int(row["conversation_id"]) if row else 0
+        sender_id = str(watcher.get("sender_id") or "").strip()
+        if not sender_id:
+            return 0
+        identity = self.conn.execute(
+            "select * from web_identities where feishu_open_id = ? order by bound_at asc, id asc limit 1",
+            (sender_id,),
+        ).fetchone()
+        if identity is None:
+            return 0
+        return int(self.ensure_web_conversation(dict(identity))["id"])
+
+    def update_web_job_progress(self, watcher, job_id: int, source_id: str, content: str, status: str) -> None:
+        conversation_id = self._conversation_for_watcher(watcher)
+        if not conversation_id:
+            return
+        owner = self.conn.execute(
+            "select owner_key from web_conversations where id = ?",
+            (conversation_id,),
+        ).fetchone()
+        owner_key = str(owner["owner_key"] if owner else conversation_id)
+        self.append_web_message(
+            conversation_id,
+            f"web-progress:{int(job_id)}:{owner_key}",
+            "assistant",
+            content,
+            kind="queue_ack",
+            source_id=source_id,
+            job_id=job_id,
+            status=status,
+            channel="system",
+            actor_type="system",
+        )
+
+    def append_web_job_result(
+        self,
+        watcher,
+        job_id: int,
+        source_id: str,
+        content: str,
+        *,
+        doc_url: str = "",
+        status: str,
+    ) -> None:
+        conversation_id = self._conversation_for_watcher(watcher)
+        if not conversation_id:
+            return
+        owner = self.conn.execute(
+            "select owner_key from web_conversations where id = ?",
+            (conversation_id,),
+        ).fetchone()
+        owner_key = str(owner["owner_key"] if owner else conversation_id)
+        self.append_web_message(
+            conversation_id,
+            f"web-result:{int(job_id)}:{owner_key}:{status}",
+            "assistant",
+            content,
+            kind="result",
+            source_id=source_id,
+            job_id=job_id,
+            doc_url=doc_url,
+            status=status,
+            channel="system",
+            actor_type="system",
+        )
+
+    def mirror_feishu_message(
+        self,
+        feishu_open_id: str,
+        external_id: str,
+        role: str,
+        content: str,
+        *,
+        kind: str = "message",
+    ) -> bool:
+        identity = self.conn.execute(
+            "select * from web_identities where feishu_open_id = ? order by bound_at asc, id asc limit 1",
+            (str(feishu_open_id or "").strip(),),
+        ).fetchone()
+        if identity is None:
+            return False
+        conversation = self.ensure_web_conversation(dict(identity))
+        self.append_web_message(
+            int(conversation["id"]), external_id, role, content,
+            kind=kind, channel="feishu", actor_type="user" if role == "user" else "system",
+            actor_id=str(feishu_open_id or ""),
+        )
+        return True
+
+    def issue_web_binding_code(self, web_identity_id: int, code_hash: str, ttl_minutes: int = 10) -> None:
+        self.conn.execute("begin immediate")
+        try:
+            self.conn.execute(
+                "delete from web_binding_codes where web_identity_id = ? or expires_at <= current_timestamp or used_at is not null",
+                (int(web_identity_id),),
+            )
+            self.conn.execute(
+                """
+                insert into web_binding_codes (code_hash, web_identity_id, expires_at)
+                values (?, ?, datetime('now', ?))
+                """,
+                (str(code_hash), int(web_identity_id), f"+{max(1, int(ttl_minutes))} minutes"),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def claim_web_binding_code(self, code_hash: str, feishu_open_id: str):
+        clean_open_id = str(feishu_open_id or "").strip()
+        if not clean_open_id:
+            return None
+        self.conn.execute("begin immediate")
+        try:
+            row = self.conn.execute(
+                """
+                select b.web_identity_id, w.public_id
+                from web_binding_codes b
+                join web_identities w on w.id = b.web_identity_id
+                where b.code_hash = ? and b.used_at is null and b.expires_at > current_timestamp
+                """,
+                (str(code_hash),),
+            ).fetchone()
+            if row is None:
+                self.conn.commit()
+                return None
+            identity_id = int(row["web_identity_id"])
+            guest_sender = f"guest:{row['public_id']}"
+            guest_owner = f"guest:{row['public_id']}"
+            feishu_owner = f"feishu:{clean_open_id}"
+            cached_name = self.conn.execute(
+                "select display_name from user_identity_cache where sender_id = ?",
+                (clean_open_id,),
+            ).fetchone()
+            display_name = str(cached_name["display_name"] if cached_name else "").strip() or "飞书用户"
+            self.conn.execute(
+                """
+                update web_identities
+                set account_type = 'feishu', feishu_open_id = ?, display_name = ?,
+                    bound_at = current_timestamp, last_seen_at = current_timestamp
+                where id = ?
+                """,
+                (clean_open_id, display_name, identity_id),
+            )
+            self.conn.execute(
+                "update usage_events set sender_id = ? where sender_id = ? and chat_type = 'web'",
+                (clean_open_id, guest_sender),
+            )
+            self.conn.execute(
+                "update job_watchers set sender_id = ? where sender_id = ? and chat_type = 'web'",
+                (clean_open_id, guest_sender),
+            )
+            self.conn.execute(
+                "update web_binding_codes set used_at = current_timestamp where code_hash = ?",
+                (str(code_hash),),
+            )
+            guest_conversation = self.conn.execute(
+                "select id from web_conversations where owner_key = ?",
+                (guest_owner,),
+            ).fetchone()
+            feishu_conversation = self.conn.execute(
+                "select id from web_conversations where owner_key = ?",
+                (feishu_owner,),
+            ).fetchone()
+            if guest_conversation and feishu_conversation:
+                self.conn.execute(
+                    "update web_messages set conversation_id = ? where conversation_id = ?",
+                    (int(feishu_conversation["id"]), int(guest_conversation["id"])),
+                )
+                self.conn.execute(
+                    "delete from web_conversations where id = ?",
+                    (int(guest_conversation["id"]),),
+                )
+            elif guest_conversation:
+                self.conn.execute(
+                    "update web_conversations set owner_key = ?, updated_at = current_timestamp where id = ?",
+                    (feishu_owner, int(guest_conversation["id"])),
+                )
+            elif not feishu_conversation:
+                self.conn.execute(
+                    "insert into web_conversations (owner_key) values (?)",
+                    (feishu_owner,),
+                )
+            self.conn.commit()
+            result = self.conn.execute("select * from web_identities where id = ?", (identity_id,)).fetchone()
+            return dict(result) if result else None
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def list_web_submissions(self, public_id: str, limit: int = 30):
+        rows = self.conn.execute(
+            """
+            select ue.*, q.id as job_id, q.status as job_status, q.stage, q.workflow_state
+            from usage_events ue
+            left join job_watchers w on w.usage_event_id = ue.id
+            left join queue_jobs q on q.id = w.job_id
+            where ue.chat_type = 'web' and ue.chat_id = ?
+            order by ue.id desc
+            limit ?
+            """,
+            (f"web:{str(public_id)}", max(1, min(100, int(limit)))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_web_submission_count(self, public_id: str, minutes: int = 10) -> int:
+        row = self.conn.execute(
+            """
+            select count(*) as n from usage_events
+            where chat_type = 'web' and chat_id = ? and created_at >= datetime('now', ?)
+            """,
+            (f"web:{str(public_id)}", f"-{max(1, int(minutes))} minutes"),
+        ).fetchone()
+        return int(row["n"] if row else 0)
 
     def add_feedback(
         self,

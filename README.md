@@ -123,6 +123,15 @@ python3 -m maxread.cli listen
 
 The listener ignores ordinary messages with no supported input. It replies with a short intro/help message when users send help keywords such as `帮助`, `怎么用`, `你是谁`, `读不动了`, or `MaxRead`. Configure `MAXREAD_FEEDBACK_URL` to include a Feishu feedback doc link in that intro.
 
+## Web Submission
+
+The admin HTTP service also serves a compact paper submission and persistent
+conversation page at `/submit`. Visitors start as durable guests and can bind
+their real Feishu account with a one-time private-chat code; bound web and
+Feishu submissions share identity, queue results, and conversation history.
+See [`docs/web-submit.md`](docs/web-submit.md) for the data model, administrator
+overlay, rate limits, and Nginx boundary.
+
 ## Quality Gates and Visual QA
 
 MaxRead has four distinct quality gates: (1) the generation contract checks that the model returned a complete document; (2) one editorial review checks facts, context, method completeness, and figure meaning; (3) the compile gate checks Markdown and Docx XML formulas, tables, and formatting; (4) the delivery gate checks the fetched Feishu document and the real browser-rendered page. The gates do not repeat each other's work: the editor does not act as a compiler, and visual QA does not re-generate the paper.

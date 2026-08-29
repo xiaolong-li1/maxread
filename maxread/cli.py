@@ -25,6 +25,7 @@ from .sources import WebRef, extract_supported_inputs, is_supported_web_article_
 from .web_article import WebArticleClient
 from .visual_qa import VisualQAController
 from .duty import run_duty_command
+from .web_submit import claim_binding_code
 
 
 def main(argv: List[str] | None = None) -> int:
@@ -282,6 +283,9 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
     if not _should_accept_event(event):
         return
 
+    if _handle_web_binding_event(settings, store, article_pipeline.feishu, event):
+        return
+
     retry_requested = _is_retry_command(event.content)
     if retry_requested and _handle_retry_event(settings, store, article_pipeline.feishu, event):
         return
@@ -303,6 +307,13 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
         elif getattr(event, "mentioned_bot", False):
             _reply_group_intro(article_pipeline.feishu, event)
         return
+    store.mirror_feishu_message(
+        str(getattr(event, "sender_id", "") or ""),
+        f"feishu-user:{getattr(event, 'message_id', '')}",
+        "user",
+        plain_message_text(str(getattr(event, "content", "") or "")),
+        kind="submission",
+    )
     enqueue_event_items(
         settings,
         store,
@@ -460,6 +471,29 @@ def _should_accept_event(event) -> bool:
 
 def _is_private_chat(event) -> bool:
     return str(getattr(event, "chat_type", "")).lower() in {"p2p", "private"}
+
+
+def _handle_web_binding_event(settings: Settings, store: Store, feishu: FeishuClient, event) -> bool:
+    if not _is_private_chat(event):
+        return False
+    text = plain_message_text(str(getattr(event, "content", "") or "")).strip()
+    match = re.fullmatch(r"绑定\s*[:：]?\s*(\d{6})", text)
+    if not match:
+        return False
+    identity = claim_binding_code(store, match.group(1), str(getattr(event, "sender_id", "") or ""))
+    if identity:
+        rows = _attach_user_names(settings, [{"sender_id": str(getattr(event, "sender_id", "") or "")}])
+        display_name = str(rows[0].get("sender_name") or "").strip()
+        if display_name:
+            store.save_user_names({str(event.sender_id): display_name})
+            store.update_web_identity_display_name(str(event.sender_id), display_name)
+    key = sha256(f"web-bind:{event.event_id}:{event.message_id}".encode("utf-8")).hexdigest()[:32]
+    message = "网页账号已绑定，之后的网页提交会计入你的飞书账号。" if identity else "绑定码无效或已过期，请回网页重新生成。"
+    try:
+        feishu.reply_text(event.message_id, message, idempotency_key=key, reply_in_thread=False)
+    except Exception:
+        pass
+    return True
 
 
 def _is_retry_command(content: str) -> bool:

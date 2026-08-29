@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import BoundedSemaphore
 
 from maxread.db import Store
+from maxread.web_submit import claim_binding_code, issue_binding_code, new_web_identity
 
 from maxread.job_queue import (
     _LimitedLLM,
@@ -111,6 +112,60 @@ def test_notify_watchers_progress_uses_reactions_not_text(tmp_path):
     assert feishu.replies == []
     events = store.list_job_events(queued["job_id"], 10)
     assert any(event["event_type"] == "react_writing" for event in events)
+    store.close()
+
+
+def test_web_watcher_updates_usage_without_feishu_side_effects(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    identity = store.get_or_create_web_identity("session-hash", "web_123")
+    conversation = store.ensure_web_conversation(identity)
+    store.append_web_message(conversation["id"], "web-message:1", "user", "2604.12946")
+    usage_id = store.add_usage_event(
+        "web-event", "web-message:1", "web:web_123", "web", "guest:web_123",
+        "paper", "2604.12946", "https://arxiv.org/abs/2604.12946", status="queued",
+    )
+    queued = store.enqueue_job(
+        "paper", "2604.12946", "https://arxiv.org/abs/2604.12946",
+        "web-event", "web-message:1", "web:web_123", "web", "guest:web_123", usage_id,
+    )
+    feishu = _ReactionFeishu()
+
+    _notify_watchers_started(store, feishu, queued["job_id"], "2604.12946")
+    _notify_watchers_progress(store, feishu, queued["job_id"], "reading", "reading", "web")
+    _notify_watchers(store, feishu, queued["job_id"], "2604.12946", "https://tenant/doc", "Paper", "")
+
+    assert feishu.reactions == []
+    assert feishu.replies == []
+    row = store.list_web_submissions("web_123")[0]
+    assert row["status"] == "done"
+    assert row["doc_url"] == "https://tenant/doc"
+    assert store.get_job_watchers(queued["job_id"]) == []
+    messages = store.list_web_messages(identity)
+    assert messages[-1]["kind"] == "result"
+    assert messages[-1]["doc_url"] == "https://tenant/doc"
+    store.close()
+
+
+def test_bound_feishu_watcher_is_replied_and_mirrored_to_web(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    binding = issue_binding_code(store, identity)
+    bound = claim_binding_code(store, binding["code"], "ou_bound")
+    usage_id = store.add_usage_event(
+        "evt", "om_1", "oc", "p2p", "ou_bound", "paper", "2604.12946", "url", status="queued",
+    )
+    queued = store.enqueue_job(
+        "paper", "2604.12946", "url", "evt", "om_1", "oc", "p2p", "ou_bound", usage_id,
+    )
+    feishu = _ReactionFeishu()
+
+    _notify_watchers(store, feishu, queued["job_id"], "2604.12946", "https://tenant/doc", "Paper", "")
+
+    assert len(feishu.replies) == 1
+    messages = store.list_web_messages(bound)
+    assert messages[-1]["kind"] == "result"
+    assert messages[-1]["channel"] == "system"
+    assert messages[-1]["doc_url"] == "https://tenant/doc"
     store.close()
 
 

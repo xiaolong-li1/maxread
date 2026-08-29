@@ -27,6 +27,7 @@ MODULES = [
     "tests.test_render",
     "tests.test_sources",
     "tests.test_web_article",
+    "tests.test_web_submit",
     "tests.test_visual_qa",
     "tests.test_workflow",
 ]

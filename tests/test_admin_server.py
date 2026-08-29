@@ -37,6 +37,16 @@ def test_admin_limit_is_bounded():
     assert _limit("limit=bad") == 80
 
 
+def test_web_submit_ip_rate_limit_is_independent_of_cookie():
+    server = AdminServer.__new__(AdminServer)
+    server.admin_lock = threading.Lock()
+    server.web_submit_requests = {}
+
+    assert all(server.allow_web_submission("203.0.113.5") for _ in range(8))
+    assert server.allow_web_submission("203.0.113.5") is False
+    assert server.allow_web_submission("203.0.113.6") is True
+
+
 def test_admin_record_filters_default_to_three_days_and_accept_user():
     since, sender_id = _record_filters("sender_id=ou_1")
     assert since
@@ -193,6 +203,113 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path):
         response, body = request("GET", "/api/admin/status", cookie=cookie)
         assert response.status == 200
         assert body == {"authenticated": True}
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
+    settings = SimpleNamespace(
+        db_path=tmp_path / "maxread.sqlite3",
+        admin_password_hash="",
+        lark_cli="lark-cli",
+        queue_workers=3,
+    )
+    server = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+
+    try:
+        connection.request("GET", "/submit")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert "读一篇论文" in response.read().decode("utf-8")
+
+        connection.request("GET", "/api/web/me")
+        response = connection.getresponse()
+        me = json.loads(response.read().decode("utf-8"))
+        assert me["account_type"] == "guest"
+        cookie = response.getheader("set-cookie").split(";", 1)[0]
+        assert cookie.startswith("maxread_web_session=")
+
+        connection.request(
+            "POST",
+            "/api/web/submit",
+            body=json.dumps({"content": "https://arxiv.org/abs/2608.25927"}),
+            headers={"content-type": "application/json", "cookie": cookie},
+        )
+        response = connection.getresponse()
+        result = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+        assert result["items"][0]["paper_id"] == "2608.25927"
+
+        connection.request("GET", "/api/web/submissions", headers={"cookie": cookie})
+        response = connection.getresponse()
+        rows = json.loads(response.read().decode("utf-8"))
+        assert len(rows) == 1
+        assert rows[0]["chat_type"] == "web"
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_admin_session_can_overlay_web_identity_without_replacing_own_cookie(tmp_path):
+    password = "admin-pass"
+    settings = SimpleNamespace(
+        db_path=tmp_path / "maxread.sqlite3",
+        admin_password_hash=hashlib.sha256(password.encode()).hexdigest(),
+        lark_cli="lark-cli",
+        queue_workers=3,
+    )
+    server = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+
+    def json_request(method, path, payload=None, cookie="", headers=None):
+        all_headers = {"content-type": "application/json", **(headers or {})}
+        if cookie:
+            all_headers["cookie"] = cookie
+        connection.request(method, path, body=json.dumps(payload or {}), headers=all_headers)
+        response = connection.getresponse()
+        return response, json.loads(response.read().decode())
+
+    try:
+        response, target = json_request("GET", "/api/web/me")
+        target_cookie = response.getheader("set-cookie").split(";", 1)[0]
+        response, admin = json_request("GET", "/api/web/me")
+        admin_cookie = response.getheader("set-cookie").split(";", 1)[0]
+        response, _body = json_request("POST", "/api/admin/login", {"password": password}, admin_cookie)
+        auth_cookie = response.getheader("set-cookie").split(";", 1)[0]
+        combined_cookie = f"{admin_cookie}; {auth_cookie}"
+
+        response, accounts = json_request("GET", "/api/web/admin/accounts", cookie=combined_cookie)
+        assert response.status == 200
+        assert any(item["public_id"] == target["public_id"] for item in accounts)
+
+        response, overlaid = json_request(
+            "GET",
+            "/api/web/me",
+            cookie=combined_cookie,
+            headers={"x-maxread-act-as": target["public_id"]},
+        )
+        assert response.status == 200
+        assert overlaid["acting_as"] is True
+        assert overlaid["public_id"] == target["public_id"]
+
+        response, denied = json_request(
+            "GET",
+            "/api/web/me",
+            cookie=target_cookie,
+            headers={"x-maxread-act-as": target["public_id"]},
+        )
+        assert response.status == 401
+        assert "管理员" in denied["error"]
     finally:
         connection.close()
         server.shutdown()

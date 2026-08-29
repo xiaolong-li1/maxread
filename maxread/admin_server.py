@@ -21,6 +21,14 @@ from .config import Settings
 from .db import Store
 from .feedback import count_feedback_by_status, visible_feedback_rows
 from .review import visible_review_issues
+from .web_submit import (
+    WEB_SESSION_COOKIE,
+    WEB_SUBMIT_HTML,
+    issue_binding_code,
+    new_web_identity,
+    submit_web_papers,
+    web_identity_payload,
+)
 
 
 DEFAULT_LIMIT = 80
@@ -30,6 +38,8 @@ ADMIN_SESSION_COOKIE = "maxread_admin_session"
 ADMIN_SESSION_SECONDS = 8 * 60 * 60
 ADMIN_LOGIN_WINDOW_SECONDS = 10 * 60
 ADMIN_LOGIN_MAX_FAILURES = 5
+WEB_SUBMIT_WINDOW_SECONDS = 10 * 60
+WEB_SUBMIT_MAX_REQUESTS = 8
 
 
 class AdminServer(ThreadingHTTPServer):
@@ -38,6 +48,7 @@ class AdminServer(ThreadingHTTPServer):
         self.settings = settings
         self.admin_sessions: dict[str, float] = {}
         self.admin_login_failures: dict[str, list[float]] = {}
+        self.web_submit_requests: dict[str, list[float]] = {}
         self.admin_lock = threading.Lock()
 
     def create_admin_session(self, password: str, client_id: str) -> tuple[str, str]:
@@ -62,6 +73,20 @@ class AdminServer(ThreadingHTTPServer):
             self.admin_sessions[token] = now + ADMIN_SESSION_SECONDS
             self._discard_expired_sessions(now)
             return token, ""
+
+    def allow_web_submission(self, client_id: str) -> bool:
+        now = time.time()
+        with self.admin_lock:
+            requests = [
+                timestamp for timestamp in self.web_submit_requests.get(client_id, [])
+                if now - timestamp < WEB_SUBMIT_WINDOW_SECONDS
+            ]
+            if len(requests) >= WEB_SUBMIT_MAX_REQUESTS:
+                self.web_submit_requests[client_id] = requests
+                return False
+            requests.append(now)
+            self.web_submit_requests[client_id] = requests
+            return True
 
     def is_admin_session(self, token: str) -> bool:
         if not token:
@@ -105,6 +130,32 @@ class AdminHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._html(INDEX_HTML)
+            return
+        if parsed.path in {"/submit", "/submit/"}:
+            self._html(WEB_SUBMIT_HTML)
+            return
+        if parsed.path == "/api/web/me":
+            self._web_json(lambda _store, identity: web_identity_payload(identity))
+            return
+        if parsed.path == "/api/web/submissions":
+            self._web_json(
+                lambda store, identity: store.list_web_submissions(identity["public_id"], 30)
+            )
+            return
+        if parsed.path == "/api/web/messages":
+            query = parse_qs(parsed.query)
+            try:
+                after_id = max(0, int(query.get("after_id", ["0"])[0] or 0))
+            except ValueError:
+                after_id = 0
+            self._web_json(
+                lambda store, identity: store.list_web_messages(identity, after_id=after_id, limit=150)
+            )
+            return
+        if parsed.path == "/api/web/admin/accounts":
+            if not self._require_admin():
+                return
+            self._json_response(self._with_store(lambda store: store.list_web_accounts()))
             return
         if parsed.path == "/architecture":
             self._html(architecture_html())
@@ -166,6 +217,33 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/web/submit":
+            if not self.server.allow_web_submission(self._client_id()):
+                self._error(HTTPStatus.TOO_MANY_REQUESTS, "提交过于频繁，请稍后再试")
+                return
+            payload = self._read_json()
+            try:
+                self._web_json(
+                    lambda store, identity: submit_web_papers(
+                        self.server.settings,
+                        store,
+                        identity,
+                        payload.get("content", ""),
+                    )
+                )
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/web/binding-code":
+            try:
+                self._web_json(
+                    lambda store, identity: issue_binding_code(store, identity)
+                    if identity.get("_actor_type") != "admin"
+                    else (_ for _ in ()).throw(ValueError("管理员代入态不能修改用户绑定"))
+                )
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
         if parsed.path == "/api/admin/login":
             payload = self._read_json()
             token, error = self.server.create_admin_session(
@@ -233,6 +311,31 @@ class AdminHandler(BaseHTTPRequestHandler):
         finally:
             store.close()
 
+    def _web_json(self, fn) -> None:
+        token = self._web_token()
+        store = Store(self.server.settings.db_path)
+        try:
+            session_token, identity = new_web_identity(store, token)
+            act_as = str(self.headers.get("x-maxread-act-as", "") or "").strip()
+            if act_as:
+                if not self._is_admin():
+                    self._error(HTTPStatus.UNAUTHORIZED, "管理员代入态需要登录")
+                    return
+                target = store.get_web_identity_by_public_id(act_as)
+                if target is None:
+                    self._error(HTTPStatus.NOT_FOUND, "用户不存在")
+                    return
+                identity = target
+                identity["_actor_type"] = "admin"
+                identity["_actor_id"] = "admin"
+            payload = fn(store, identity)
+        finally:
+            store.close()
+        headers = {}
+        if not token or token != session_token:
+            headers["set-cookie"] = self._web_session_cookie(session_token)
+        self._json_response(payload, headers=headers)
+
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("content-length") or 0)
         if not length:
@@ -246,6 +349,18 @@ class AdminHandler(BaseHTTPRequestHandler):
         try:
             cookie = SimpleCookie(self.headers.get("cookie", ""))
             morsel = cookie.get(ADMIN_SESSION_COOKIE)
+            return morsel.value if morsel else ""
+        except Exception:
+            return ""
+
+    def _client_id(self) -> str:
+        forwarded = str(self.headers.get("x-real-ip", "") or "").strip()
+        return forwarded[:128] or str(self.client_address[0] if self.client_address else "unknown")
+
+    def _web_token(self) -> str:
+        try:
+            cookie = SimpleCookie(self.headers.get("cookie", ""))
+            morsel = cookie.get(WEB_SESSION_COOKIE)
             return morsel.value if morsel else ""
         except Exception:
             return ""
@@ -267,6 +382,19 @@ class AdminHandler(BaseHTTPRequestHandler):
             "HttpOnly",
             "SameSite=Strict",
             f"Max-Age={max(0, int(max_age))}",
+        ]
+        if secure:
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def _web_session_cookie(self, token: str) -> str:
+        secure = self.headers.get("x-forwarded-proto", "").lower() == "https"
+        parts = [
+            f"{WEB_SESSION_COOKIE}={token}",
+            "Path=/",
+            "HttpOnly",
+            "SameSite=Lax",
+            f"Max-Age={365 * 24 * 60 * 60}",
         ]
         if secure:
             parts.append("Secure")
@@ -339,7 +467,10 @@ def _attach_user_names(settings: Settings, rows, store=None):
     if not sender_ids:
         return rows
     names = store.get_user_names(sender_ids) if store else {}
-    unresolved_ids = [sender_id for sender_id in sender_ids if sender_id not in names]
+    unresolved_ids = [
+        sender_id for sender_id in sender_ids
+        if sender_id not in names and not sender_id.startswith("guest:")
+    ]
     if not unresolved_ids:
         for row in rows:
             row["sender_name"] = names.get(row.get("sender_id", ""), "")
@@ -524,6 +655,7 @@ INDEX_HTML = r'''
         <div class="sub">查看使用记录、反馈、队列和 AI review 问题。数据从 5090 实时读取。</div>
       </div>
       <div class="actions">
+        <a class="architecture-link" href="submit"><svg viewBox="0 0 24 24"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="M12 13 19 5"/></svg>提交论文</a>
         <a class="architecture-link" href="architecture"><svg viewBox="0 0 24 24"><path d="M4 6h6v6H4zM14 3h6v6h-6zM14 15h6v6h-6zM10 9l4-3M10 11l4 6"/></svg>Pipeline 架构</a>
         <button id="admin-auth-button" onclick="toggleAdminSession()">管理员登录</button>
         <button class="primary" onclick="refreshAll()">刷新</button>
