@@ -274,6 +274,7 @@ class RecruitingRunner:
         changes: list[dict[str, str]] = []
         failures: list[dict[str, str]] = []
         ordered = sorted(envelopes.items(), key=lambda item: item[1].latest_time or "", reverse=True)
+        targets: list[tuple[str, ThreadEnvelope, Any, CandidateFields]] = []
         for key, envelope in ordered:
             if since_days is not None and not _within_days(envelope.latest_time, since_days):
                 continue
@@ -281,44 +282,64 @@ class RecruitingRunner:
             fields = self.store.fields_from_row(row)
             if row is None or fields is None or fields.mail_type != "candidate":
                 continue
-            try:
-                if self.llm is None:
-                    raise RuntimeError("AI is required for academic repair")
-                attachment_texts = self._attachment_texts(envelope)
-                refreshed = self.llm.extract(envelope, attachment_texts, previous=fields)
-                refreshed.source_accounts = sorted({_source_account_label(account) for account in envelope.source_accounts})
-                before = {
-                    "school": fields.school,
-                    "academic_display": fields.academic_display,
-                    "rank": fields.rank,
-                    "rank_evidence": fields.rank_evidence,
-                }
-                after = {
-                    "school": refreshed.school,
-                    "academic_display": refreshed.academic_display,
-                    "rank": refreshed.rank,
-                    "rank_evidence": refreshed.rank_evidence,
-                }
-                if before == after:
-                    continue
-                changes.append({"thread_key": key, "name": fields.name, "before": before, "after": after})
-                if not apply:
-                    continue
-                self._sync_thread(
-                    ProcessedThread(
-                        thread_key=key,
-                        candidate_address=str(row["candidate_address"] or envelope.candidate_address),
-                        latest_time=str(row["latest_time"] or _base_time(envelope.latest_time) or ""),
-                        fields=refreshed,
-                        folder_status=None,
-                        interview_assigned=None,
-                        document_id=str(row["doc_id"] or "") or None,
-                        document_url=str(row["doc_url"] or "") or None,
-                        changed=True,
-                    )
-                )
-            except Exception as exc:
-                failures.append({"thread_key": key, "name": fields.name, "error": str(exc)[:500]})
+            targets.append((key, envelope, row, fields))
+
+        if self.llm is None:
+            raise RuntimeError("AI is required for academic repair")
+
+        def extract(target: tuple[str, ThreadEnvelope, Any, CandidateFields]) -> CandidateFields:
+            _key, envelope, _row, fields = target
+            attachment_texts = self._attachment_texts(envelope)
+            refreshed = self.llm.extract(envelope, attachment_texts, previous=fields)
+            refreshed.source_accounts = sorted({_source_account_label(account) for account in envelope.source_accounts})
+            return refreshed
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max(1, self.settings.llm_concurrency)) as executor:
+            futures = {executor.submit(extract, target): target for target in targets}
+            for future in as_completed(futures):
+                key, envelope, row, fields = futures[future]
+                completed += 1
+                try:
+                    refreshed = future.result()
+                    before = {
+                        "school": fields.school,
+                        "academic_display": fields.academic_display,
+                        "rank": fields.rank,
+                        "rank_evidence": fields.rank_evidence,
+                    }
+                    after = {
+                        "school": refreshed.school,
+                        "academic_display": refreshed.academic_display,
+                        "rank": refreshed.rank,
+                        "rank_evidence": refreshed.rank_evidence,
+                    }
+                    if before != after:
+                        changes.append({"thread_key": key, "name": fields.name, "before": before, "after": after})
+                        if apply:
+                            self._sync_thread(
+                                ProcessedThread(
+                                    thread_key=key,
+                                    candidate_address=str(row["candidate_address"] or envelope.candidate_address),
+                                    latest_time=str(row["latest_time"] or _base_time(envelope.latest_time) or ""),
+                                    fields=refreshed,
+                                    folder_status=None,
+                                    interview_assigned=None,
+                                    document_id=str(row["doc_id"] or "") or None,
+                                    document_url=str(row["doc_url"] or "") or None,
+                                    changed=True,
+                                )
+                            )
+                except Exception as exc:
+                    failures.append({"thread_key": key, "name": fields.name, "error": str(exc)[:500]})
+                print(json.dumps({
+                    "event": "academic_reaudit_progress",
+                    "completed": completed,
+                    "total": len(targets),
+                    "changed": len(changes),
+                    "failed": len(failures),
+                    "name": fields.name,
+                }, ensure_ascii=False), flush=True)
         return {
             "ok": not failures,
             "dry_run": not apply,
