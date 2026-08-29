@@ -57,6 +57,7 @@ class RecruitingRunner:
         self.base = BaseSync(settings)
         self.docs = None if no_docs else DocsSync(settings)
         self.dry_run = dry_run
+        self._envelope_cache: dict[str, ThreadEnvelope] = {}
 
     def run_once(
         self,
@@ -75,6 +76,7 @@ class RecruitingRunner:
             if not skip_scan:
                 self._scan_mailbox()
             envelopes, changed_keys = self._load_threads()
+            self._envelope_cache = envelopes
             if reprocess:
                 changed_keys = set(envelopes)
             if only_candidates:
@@ -281,7 +283,7 @@ class RecruitingRunner:
         )
 
     def _sync_thread(self, thread: ProcessedThread) -> dict[str, bool]:
-        envelope = self._load_envelope(thread.thread_key)
+        envelope = self._envelope_cache.get(thread.thread_key) or self._load_envelope(thread.thread_key)
         self._download_external(envelope)
         row = self.store.get_thread(thread.thread_key)
         previous_fields = self.store.fields_from_row(row)
