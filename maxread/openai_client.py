@@ -51,8 +51,9 @@ class OpenAIClient:
             "model": self.model,
             "instructions": safe_system.strip(),
             "input": safe_user.strip(),
-            "text": {"verbosity": "medium"},
+            "text": {"verbosity": "low"},
             "stream": True,
+            "store": False,
         }
         effort = self.reasoning_effort if reasoning_effort is None else _normalize_reasoning_effort(reasoning_effort)
         data = None
@@ -103,6 +104,7 @@ class OpenAIClient:
                 },
             ],
             "reasoning": {"effort": effort} if effort else {},
+            "store": False,
         }
         data = self._post("/responses", payload)
         text = _extract_output_text(data)

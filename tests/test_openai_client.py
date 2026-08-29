@@ -74,6 +74,8 @@ def test_responses_text_uses_separate_instructions_and_input():
     assert captured["path"] == "/responses"
     assert captured["payload"]["instructions"] == "system"
     assert captured["payload"]["input"] == "user"
+    assert captured["payload"]["text"] == {"verbosity": "low"}
+    assert captured["payload"]["store"] is False
 
 
 def test_responses_text_sanitizes_surrogates_before_json_transport():
@@ -101,6 +103,7 @@ def test_responses_image_text_can_override_reasoning_effort(tmp_path):
 
     assert client.responses_image_text("system", "user", image, reasoning_effort="low") == "ok"
     assert captured["payload"]["reasoning"] == {"effort": "low"}
+    assert captured["payload"]["store"] is False
 
 
 def test_stream_retries_transient_url_error(monkeypatch):
