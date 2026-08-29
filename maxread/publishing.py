@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Protocol
@@ -164,6 +165,13 @@ def image_display_size(image_path: Path | str) -> tuple[int, int]:
     else:
         width = 640
     height = max(1, round(width * source_height / source_width))
+    try:
+        max_height = max(320, int(os.environ.get("MAXREAD_MAX_IMAGE_DISPLAY_HEIGHT", "560")))
+    except ValueError:
+        max_height = 560
+    if height > max_height:
+        width = max(1, round(width * max_height / height))
+        height = max_height
     return width, height
 
 

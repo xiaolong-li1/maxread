@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from maxread.publishing import image_display_width, prepare_feishu_image, publish_marker_image
+from maxread.publishing import image_display_size, image_display_width, prepare_feishu_image, publish_marker_image
 
 
 class FlakyFeishu:
@@ -179,6 +179,18 @@ def test_image_display_width_scales_wide_and_square_images(tmp_path):
 
     assert image_display_width(wide) == 720
     assert image_display_width(square) == 560
+
+
+def test_image_display_size_caps_tall_composite_without_cropping(tmp_path):
+    from PIL import Image
+
+    composite = tmp_path / "densification.png"
+    Image.new("RGB", (1037, 1246), "white").save(composite)
+
+    width, height = image_display_size(composite)
+
+    assert (width, height) == (466, 560)
+    assert abs(width / height - 1037 / 1246) < 0.01
 
 
 def test_prepare_feishu_image_keeps_normal_chart_margins(tmp_path):
