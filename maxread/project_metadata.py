@@ -16,6 +16,22 @@ PROJECT_CATEGORIES = (
 )
 UNCLASSIFIED_CATEGORY = "已完成未分类"
 
+
+def is_placeholder_project_title(title: str, source_id: str = "") -> bool:
+    value = re.sub(r"\s+", " ", str(title or "")).strip()
+    paper_id = str(source_id or "").strip()
+    if not value:
+        return True
+    if "标题尚未取得" in value or "title unavailable" in value.lower():
+        return True
+    if paper_id and value.lower() in {
+        paper_id.lower(),
+        f"arxiv {paper_id}".lower(),
+        f"arxiv: {paper_id}".lower(),
+    }:
+        return True
+    return bool(re.fullmatch(r"(?i)arxiv\s+\d{4}\.\d{4,5}", value))
+
 _CATEGORY_KEYWORDS = (
     ("机器人", ("robot", "robotics", "manipulation", "locomotion", "embodied", "navigation", "motion planning", "机器人", "具身", "导航", "操控")),
     ("3D 与世界模型", ("world model", "3d", "three-dimensional", "nerf", "gaussian splat", "point cloud", "monocular 3d", "scene reconstruction", "geometry", "世界模型", "三维", "点云", "场景", "几何")),

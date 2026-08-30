@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .db import Store
 from .openai_client import OpenAIClient
-from .project_metadata import PROJECT_CATEGORIES, UNCLASSIFIED_CATEGORY, auto_project_category, load_generated_project_summary
+from .project_metadata import PROJECT_CATEGORIES, UNCLASSIFIED_CATEGORY, auto_project_category, is_placeholder_project_title, load_generated_project_summary
 
 
 PROGRESS_STATES = {
@@ -335,10 +335,11 @@ def progress_payload(settings, store: Store, identity) -> dict:
         if not source_id or source_id in known_sources:
             continue
         status = str(usage.get("status") or "")
+        usage_title = str(usage.get("title") or "")
         payload.append({
             "job_id": 0,
             "source_id": source_id,
-            "title": str(usage.get("title") or ""),
+            "title": "" if is_placeholder_project_title(usage_title, source_id) else usage_title,
             "summary": str(usage.get("project_summary") or ""),
             "status": "done" if status == "done" else status,
             "workflow_state": "completed" if status == "done" else status,
@@ -421,10 +422,12 @@ def _progress_row(store: Store, job: dict, duration: int, workers: int, retry_st
         remaining = 0
     error = _friendly_error(str(job.get("error") or ""))
     retries = retry_stats or {}
+    raw_title = str(job.get("resolved_title") or job.get("title") or "")
+    source_id = str(job.get("source_id") or "")
     return {
         "job_id": int(job.get("id") or 0),
-        "source_id": str(job.get("source_id") or ""),
-        "title": str(job.get("resolved_title") or job.get("title") or ""),
+        "source_id": source_id,
+        "title": "" if is_placeholder_project_title(raw_title, source_id) else raw_title,
         "summary": str(job.get("project_summary") or ""),
         "status": status,
         "workflow_state": state,

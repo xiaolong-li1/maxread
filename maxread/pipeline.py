@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import traceback
+import html
 import json
 import os
 import re
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -17,7 +18,7 @@ from .feishu import FeishuClient, doc_token_from_url
 from .models import ArxivMetadata, FeishuEvent, PaperBundle, PaperRef
 from .openai_client import OpenAIClient
 from .prompts import FINAL_SYSTEM_PROMPT, SECTION_GENERATION_TASKS, build_final_user_prompt, build_paper_evidence_prefix, build_section_user_prompt, select_key_source_tables
-from .project_metadata import extract_project_summary as _extract_project_summary, one_sentence_summary as _one_sentence_summary
+from .project_metadata import extract_project_summary as _extract_project_summary, is_placeholder_project_title, one_sentence_summary as _one_sentence_summary
 from .publishing import publish_marker_image
 from .quality import PrePublishQualityError, blocking_quality_warnings, paper_markdown_completeness_errors, verify_published_docx
 from .quality_repair import QualityRepairResult, repair_until_quality_passes
@@ -516,6 +517,7 @@ class MaxReadPipeline:
             self.store.upsert_paper(
                 ref.paper_id,
                 "writing_doc",
+                title=_extract_generated_paper_title(markdown, bundle.metadata.title, ref.paper_id),
                 project_summary=_extract_project_summary(markdown, bundle.metadata.summary),
             )
             if event and send_progress:
@@ -616,7 +618,14 @@ class MaxReadPipeline:
                 if event and send_progress:
                     self._reply(event, f"这篇发布后质检未通过：{ref.paper_id}\n原因：{message}", "quality-fail", ref.paper_id)
                 return ProcessResult(ref.paper_id, doc["url"], cached=False, error=message)
-            self.store.upsert_paper(ref.paper_id, "done", doc_url=doc["url"], doc_token=doc["token"], error="; ".join(figure_warnings))
+            self.store.upsert_paper(
+                ref.paper_id,
+                "done",
+                title=_extract_generated_paper_title(markdown, bundle.metadata.title, ref.paper_id),
+                doc_url=doc["url"],
+                doc_token=doc["token"],
+                error="; ".join(figure_warnings),
+            )
             self._workflow(WorkflowEvent.COMPLETE, doc["url"])
             if event and send_progress:
                 self._reply(event, f"哥，读完了：{doc['url']}", "done", ref.paper_id)
@@ -637,7 +646,14 @@ class MaxReadPipeline:
         """Recheck and repair an existing published document without rerunning the LLM."""
         doc_url = checkpoint.doc_url
         doc_token = record.doc_token if record else doc_token_from_url(doc_url)
-        expected_title = checkpoint.expected_title or (record.title if record else "")
+        resolved_title = str(record.title if record else "")
+        if is_placeholder_project_title(resolved_title, ref.paper_id):
+            try:
+                fetched = self.feishu.fetch_docx(doc_url, doc_format="xml", detail="simple")
+                resolved_title = _published_document_title_from_payload(fetched) or resolved_title
+            except Exception:
+                pass
+        expected_title = checkpoint.expected_title or resolved_title
         try:
             self._workflow(WorkflowEvent.RESUME_PUBLISHED, doc_url)
             initial_warnings = list(
@@ -694,6 +710,7 @@ class MaxReadPipeline:
             self.store.upsert_paper(
                 ref.paper_id,
                 "done",
+                title=resolved_title,
                 doc_url=doc_url,
                 doc_token=doc_token,
                 error="; ".join(warnings),
@@ -1455,6 +1472,64 @@ def _paper_review_source_context(bundle: PaperBundle, max_chars: int = 190000) -
     ]
     text = "\n\n".join(item for item in sections if item.strip())
     return text[: max(1000, int(max_chars))]
+
+
+def _extract_generated_paper_title(markdown: str, fallback: str, paper_id: str) -> str:
+    if not is_placeholder_project_title(fallback, paper_id):
+        return str(fallback).strip()
+    match = re.search(r"(?mi)^\s*\*\*英文标题\*\*\s*[：:]\s*(.+?)\s*$", str(markdown or ""))
+    if match:
+        title = _clean_paper_title(match.group(1), paper_id)
+        if title:
+            return title
+    heading = re.search(r"(?m)^#\s+(.+?)\s*$", str(markdown or ""))
+    if heading:
+        title = _clean_paper_title(heading.group(1), paper_id)
+        if title:
+            return title
+    return str(fallback or "").strip()
+
+
+def _published_document_title_from_payload(payload) -> str:
+    content = _nested_document_content(payload)
+    if not content:
+        return ""
+    english = re.search(
+        r"(?is)(?:<b[^>]*>)?英文标题(?:</b>)?\s*[：:]\s*(.+?)(?:<br\s*/?>|</p>)",
+        content,
+    )
+    if english:
+        title = _clean_paper_title(re.sub(r"<[^>]+>", "", english.group(1)), "")
+        if title:
+            return title
+    document_title = re.search(r"(?is)<title(?:\s[^>]*)?>(.*?)</title>", content)
+    return _clean_paper_title(re.sub(r"<[^>]+>", "", document_title.group(1)), "") if document_title else ""
+
+
+def _nested_document_content(value) -> str:
+    if isinstance(value, dict):
+        for item in value.values():
+            content = _nested_document_content(item)
+            if content:
+                return content
+    elif isinstance(value, list):
+        for item in value:
+            content = _nested_document_content(item)
+            if content:
+                return content
+    elif isinstance(value, str) and "<title" in value:
+        return value
+    return ""
+
+
+def _clean_paper_title(value: str, paper_id: str) -> str:
+    title = html.unescape(str(value or ""))
+    title = re.sub(r"^\s*\[[^\]]+\]\s*", "", title)
+    title = re.sub(r"[*_`#]", "", title)
+    title = re.sub(r"\s+", " ", title).strip(" ：:")
+    if is_placeholder_project_title(title, paper_id):
+        return ""
+    return title[:500]
 
 
 def _paper_method_markdown(markdown: str) -> str:

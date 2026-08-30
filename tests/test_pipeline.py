@@ -4,7 +4,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _replace_paper_method_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_generated_paper_title, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _published_document_title_from_payload, _replace_paper_method_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 from maxread.workflow import WorkflowEvent, WorkflowState
@@ -43,6 +43,36 @@ def test_project_summary_prefers_generated_one_sentence_positioning():
 """
 
     assert _extract_project_summary(markdown, "abstract fallback") == "通过稀疏路由减少长视频生成成本"
+
+
+def test_generated_title_replaces_arxiv_placeholder_with_english_title():
+    markdown = """# [2410.02367] SageAttention：可即插即用的精确 8-bit Attention 加速
+
+**英文标题**：SageAttention: Accurate 8-bit Attention for Plug-and-Play Inference Acceleration
+"""
+
+    assert _extract_generated_paper_title(markdown, "arXiv 2410.02367", "2410.02367") == (
+        "SageAttention: Accurate 8-bit Attention for Plug-and-Play Inference Acceleration"
+    )
+    assert _extract_generated_paper_title(markdown, "Official Metadata Title", "2410.02367") == "Official Metadata Title"
+
+
+def test_published_document_title_prefers_embedded_english_title():
+    payload = {
+        "data": {
+            "document": {
+                "content": (
+                    '<title>SageAttention：可即插即用的精确 8-bit Attention 加速</title>'
+                    '<p><b>英文标题</b>：SageAttention: Accurate 8-bit Attention for Plug-and-Play Inference Acceleration<br/>'
+                    '<b>原文链接</b>：https://arxiv.org/abs/2410.02367</p>'
+                )
+            }
+        }
+    }
+
+    assert _published_document_title_from_payload(payload) == (
+        "SageAttention: Accurate 8-bit Attention for Plug-and-Play Inference Acceleration"
+    )
 
 
 def test_post_publish_message_distinguishes_export_infrastructure_from_visual_failure():

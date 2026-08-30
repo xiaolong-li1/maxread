@@ -4,7 +4,7 @@ import pytest
 
 from maxread.cli import _handle_web_binding_event
 from maxread.db import Store
-from maxread.project_metadata import UNCLASSIFIED_CATEGORY
+from maxread.project_metadata import UNCLASSIFIED_CATEGORY, is_placeholder_project_title
 from maxread.web_submit import (
     WEB_SUBMIT_HTML,
     claim_binding_code,
@@ -30,6 +30,12 @@ def test_web_identity_defaults_to_guest_and_is_stable(tmp_path):
     assert store.web_identity_sender(first).startswith("guest:web_")
     assert store.get_user_names([store.web_identity_sender(first)])[store.web_identity_sender(first)] == "游客"
     store.close()
+
+
+def test_arxiv_id_title_is_treated_as_placeholder():
+    assert is_placeholder_project_title("arXiv 2410.02367", "2410.02367") is True
+    assert is_placeholder_project_title("2410.02367", "2410.02367") is True
+    assert is_placeholder_project_title("SageAttention: Accurate 8-bit Attention", "2410.02367") is False
 
 
 def test_web_submit_queues_paper_without_feishu_message(tmp_path):
