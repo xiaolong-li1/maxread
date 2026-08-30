@@ -1539,16 +1539,51 @@ class Store:
             job = self.find_active_job(dedupe_key)
             created = False
             if job is None:
-                cur = self.conn.execute(
-                    """
-                    insert into queue_jobs (dedupe_key, source_kind, source_id, source_url, status)
-                    values (?, ?, ?, ?, 'queued')
-                    """,
-                    (dedupe_key, source_kind, source_id, source_url),
-                )
-                job_id = int(cur.lastrowid)
-                created = True
-                self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (job_id, "enqueue", source_url))
+                cache_row = None
+                if source_kind == "paper":
+                    cache_row = self.conn.execute(
+                        "select status from papers where paper_id = ?",
+                        (source_id,),
+                    ).fetchone()
+                reusable = None
+                if cache_row is not None and str(cache_row["status"] or "") in {"legacy", "cache_expired"}:
+                    reusable = self.conn.execute(
+                        "select id from queue_jobs where dedupe_key = ? order by id desc limit 1",
+                        (dedupe_key,),
+                    ).fetchone()
+                if reusable is not None:
+                    job_id = int(reusable["id"])
+                    self.conn.execute(
+                        """
+                        update queue_jobs set
+                            source_url=?, status='queued', priority=0, attempts=0,
+                            title='', doc_url='', error='', started_at=null, finished_at=null,
+                            worker_id='', heartbeat_at=null, stage='queued',
+                            stage_updated_at=current_timestamp, workflow_state='queued',
+                            state_version=state_version+1, last_event='cache_refresh',
+                            checkpoint_json='', suppress_progress_notifications=?,
+                            recovery_reason='', recovery_attempts=0, rebuild_pipeline=1,
+                            auto_retry_count=0, updated_at=current_timestamp
+                        where id=?
+                        """,
+                        (source_url, 1 if suppress_progress_notifications else 0, job_id),
+                    )
+                    self.conn.execute(
+                        "insert into job_events (job_id, event_type, detail) values (?, 'cache_refresh', ?)",
+                        (job_id, source_url),
+                    )
+                    created = True
+                else:
+                    cur = self.conn.execute(
+                        """
+                        insert into queue_jobs (dedupe_key, source_kind, source_id, source_url, status)
+                        values (?, ?, ?, ?, 'queued')
+                        """,
+                        (dedupe_key, source_kind, source_id, source_url),
+                    )
+                    job_id = int(cur.lastrowid)
+                    created = True
+                    self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (job_id, "enqueue", source_url))
             else:
                 job_id = int(job["id"])
                 self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (job_id, "watch", sender_id))

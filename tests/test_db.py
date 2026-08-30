@@ -100,7 +100,12 @@ def test_store_queue_jobs_and_watchers(tmp_path):
     assert job["source_id"] == "2604.12946"
     assert job["workflow_state"] == WorkflowState.CLAIMED.value
     assert store.queue_position(first["job_id"]) == 0
-    watchers = store.get_job_watchers(first["job_id"])
+    watchers = [
+        dict(row) for row in store.conn.execute(
+            "select * from job_watchers where job_id=? order by id",
+            (first["job_id"],),
+        ).fetchall()
+    ]
     assert len(watchers) == 2
     store.complete_queue_job(first["job_id"], "https://doc", "Title")
     rows = store.list_queue_jobs()
@@ -114,6 +119,46 @@ def test_store_queue_jobs_and_watchers(tmp_path):
     assert any(event["event_type"] == "done" for event in events)
     stats = store.queue_stats()
     assert stats["done"] == 1
+    store.close()
+
+
+def test_legacy_cache_refresh_reuses_terminal_queue_job(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    store.upsert_paper("2604.12946", "done", doc_url="https://old-doc")
+    first_usage = store.add_usage_event(
+        "evt-1", "om-1", "oc", "p2p", "ou-1", "paper", "2604.12946", "url", status="queued"
+    )
+    first = store.enqueue_job(
+        "paper", "2604.12946", "url", "evt-1", "om-1", "oc", "p2p", "ou-1", first_usage
+    )
+    store.claim_next_queue_job(worker_id="worker-a")
+    store.complete_queue_job(first["job_id"], "https://old-doc", "Old title")
+    store.conn.execute("update job_watchers set notified=1 where job_id=?", (first["job_id"],))
+    store.upsert_paper("2604.12946", "legacy", doc_url="https://old-doc", doc_token="old-doc")
+
+    second_usage = store.add_usage_event(
+        "evt-2", "om-2", "oc", "p2p", "ou-2", "paper", "2604.12946", "url", status="queued"
+    )
+    refreshed = store.enqueue_job(
+        "paper", "2604.12946", "url", "evt-2", "om-2", "oc", "p2p", "ou-2", second_usage
+    )
+
+    assert refreshed["created"] is True
+    assert refreshed["job_id"] == first["job_id"]
+    assert len(store.list_queue_jobs()) == 1
+    job = store.get_queue_job(first["job_id"])
+    assert job["status"] == "queued"
+    assert job["workflow_state"] == "queued"
+    assert job["attempts"] == 0
+    assert job["doc_url"] == ""
+    watchers = [
+        dict(row) for row in store.conn.execute(
+            "select * from job_watchers where job_id=? order by id",
+            (first["job_id"],),
+        ).fetchall()
+    ]
+    assert [watcher["notified"] for watcher in watchers] == [1, 0]
+    assert any(event["event_type"] == "cache_refresh" for event in store.list_job_events(first["job_id"]))
     store.close()
 
 

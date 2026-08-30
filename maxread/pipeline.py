@@ -515,8 +515,27 @@ class MaxReadPipeline:
             )
             if event and send_progress:
                 self._reply(event, f"[敲键盘] 在写飞书文档：{ref.paper_id}", "writing", ref.paper_id)
-            doc = self.feishu.create_docx(bundle.metadata.title or ref.paper_id)
-            self.feishu.overwrite_docx_xml(doc["url"], xml)
+            refresh_existing = bool(
+                record
+                and record.status in {"legacy", "cache_expired"}
+                and record.doc_url
+            )
+            if refresh_existing:
+                doc = {
+                    "url": record.doc_url,
+                    "token": record.doc_token or doc_token_from_url(record.doc_url),
+                }
+                try:
+                    self.feishu.overwrite_docx_xml(doc["url"], xml)
+                except Exception:
+                    # A deleted or inaccessible legacy document cannot be
+                    # refreshed in place. Creating a replacement is the only
+                    # fallback that still delivers a usable document.
+                    doc = self.feishu.create_docx(bundle.metadata.title or ref.paper_id)
+                    self.feishu.overwrite_docx_xml(doc["url"], xml)
+            else:
+                doc = self.feishu.create_docx(bundle.metadata.title or ref.paper_id)
+                self.feishu.overwrite_docx_xml(doc["url"], xml)
             figure_warnings = list(publish_warnings)
             for marker, image_path, caption in figure_inserts:
                 if marker not in markdown:

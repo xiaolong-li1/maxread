@@ -127,6 +127,20 @@ class RepairablePublishedFormulaFeishu(FakeFeishu):
         return {"ok": True}
 
 
+class ExistingLegacyDocFeishu(FakeFeishu):
+    def __init__(self):
+        super().__init__()
+        self.overwritten = []
+
+    def create_docx(self, _title):
+        raise AssertionError("legacy refresh unexpectedly created a duplicate document")
+
+    def overwrite_docx_xml(self, doc_url, xml):
+        self.overwritten.append(doc_url)
+        assert "Fake Paper" in xml or "A fake abstract" in xml
+        return {"ok": True}
+
+
 class FakeLLM:
     def responses_text(self, system, user, **kwargs):
         body = "# Fake Paper\n\n**TL;DR**：A fake abstract.\n\n"
@@ -276,6 +290,27 @@ def test_pipeline_process_and_cache(tmp_path):
     assert forced.doc_url == first.doc_url
     assert forced.cached is False
     assert feishu.published == ["doc123", "doc123"]
+    store.close()
+
+
+def test_pipeline_refreshes_legacy_document_in_place(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    store.upsert_paper(
+        "2604.12946",
+        "legacy",
+        title="Old title",
+        doc_url="https://tenant.feishu.cn/docx/existing",
+        doc_token="existing",
+    )
+    feishu = ExistingLegacyDocFeishu()
+    pipeline = MaxReadPipeline(store, FakeArxiv(), feishu, FakeLLM(), require_source=True)
+
+    result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
+
+    assert result.error == ""
+    assert result.doc_url == "https://tenant.feishu.cn/docx/existing"
+    assert feishu.overwritten == ["https://tenant.feishu.cn/docx/existing"]
+    assert store.get_paper("2604.12946").doc_url == result.doc_url
     store.close()
 
 
