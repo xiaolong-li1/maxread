@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .db import Store
 from .openai_client import OpenAIClient
-from .project_metadata import PROJECT_CATEGORIES, auto_project_category, load_generated_project_context
+from .project_metadata import PROJECT_CATEGORIES, UNCLASSIFIED_CATEGORY, auto_project_category, load_generated_project_context
 from .sources import extract_supported_inputs
 
 
@@ -250,14 +250,29 @@ def update_web_project(store: Store, identity, source_id: str, action: str, valu
     raise ValueError("不支持的项目操作")
 
 
-def organize_web_projects(settings, store: Store, identity, projects: list[dict]) -> dict:
+def organize_web_projects(
+    settings,
+    store: Store,
+    identity,
+    projects: list[dict],
+    source_ids: list[str] | None = None,
+) -> dict:
     if not str(identity.get("feishu_open_id") or "").strip():
-        raise ValueError("绑定飞书账号后才能使用一键整理")
+        raise ValueError("绑定飞书账号后才能使用自动归类")
+    selected = {
+        str(source_id or "").strip()
+        for source_id in (source_ids or [])
+        if str(source_id or "").strip()
+    }
+    if not selected:
+        raise ValueError("请先选择要自动归类的项目")
     candidates = [
         item for item in projects
         if str(item.get("source_id") or "").strip()
+        and str(item.get("source_id") or "").strip() in selected
         and str(item.get("status") or "") == "done"
-        and str(item.get("category_source") or "auto") != "manual"
+        and str(item.get("category") or "") == UNCLASSIFIED_CATEGORY
+        and str(item.get("category_source") or "") == "unclassified"
     ][:100]
     if not candidates:
         return {"ok": True, "updated": 0, "used_ai": False}

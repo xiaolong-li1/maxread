@@ -374,6 +374,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path == "/api/web/organize":
+            payload = self._read_json()
             try:
                 self._web_json(
                     lambda store, identity: organize_web_projects(
@@ -381,6 +382,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         store,
                         identity,
                         progress_payload(self.server.settings, store, identity).get("recent", []),
+                        payload.get("source_ids") if isinstance(payload.get("source_ids"), list) else [],
                     )
                 )
             except ValueError as exc:

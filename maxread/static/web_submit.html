@@ -197,6 +197,7 @@
     .organize-button:disabled { opacity: 0.55; cursor: wait; }
     .projects { display: grid; gap: 22px; }
     .category-group { display: grid; gap: 10px; }
+    .category-head-row { display: flex; align-items: center; gap: 12px; }
     .category-heading { width: 100%; display: flex; align-items: center; gap: 8px; margin: 0; padding: 2px 0; color: var(--muted); background: transparent; border: 0; font-size: 12px; font-weight: 620; text-align: left; cursor: pointer; }
     .category-heading::after { content: ""; height: 1px; flex: 1; background: var(--line); }
     .category-chevron { width: 16px; height: 16px; transition: transform 0.18s ease; }
@@ -204,6 +205,9 @@
     .category-count { color: #9aa19a; font-variant-numeric: tabular-nums; }
     .category-list { display: grid; gap: 12px; }
     .category-list[hidden] { display: none; }
+    .unclassified-toolbar { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+    .select-all { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; cursor: pointer; }
+    .select-all input, .project-select input { width: 16px; height: 16px; accent-color: var(--green); }
     .project-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 92px;
@@ -220,8 +224,11 @@
     }
     .project-card.failed { border-color: #e5c9c6; }
     .project-card.done { border-color: #c9ddd4; }
+    .project-card.selected { border-color: var(--green); box-shadow: 0 0 0 1px rgba(30, 112, 86, 0.12); }
     .project-main { padding: 15px 16px 13px; }
     .project-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+    .project-title-wrap { min-width: 0; display: flex; align-items: flex-start; gap: 10px; }
+    .project-select { display: inline-flex; align-items: center; padding-top: 2px; cursor: pointer; }
     .project-title { min-width: 0; }
     .project-title strong {
       display: block;
@@ -453,7 +460,6 @@
           <div class="project-tools">
             <div class="project-search"><span class="icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span><input id="project-search" type="search" placeholder="搜索标题或 arXiv ID" oninput="setSearch(this.value)" /></div>
             <select class="category-filter" id="category-filter" aria-label="分类筛选" onchange="setCategoryFilter(this.value)"><option value="all">全部分类</option></select>
-            <button class="organize-button hidden" id="organize-button" onclick="organizeProjects()" title="保留人工分类，重新整理其余论文"><span class="icon"><svg viewBox="0 0 24 24"><path d="m12 3-1.9 4.1L6 9l4.1 1.9L12 15l1.9-4.1L18 9l-4.1-1.9Z"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4"/></svg></span><span id="organize-label">一键整理</span></button>
             <div class="filters" role="tablist" aria-label="项目筛选">
               <button class="active" data-filter="all" onclick="setFilter('all')">全部</button>
               <button data-filter="favorite" onclick="setFilter('favorite')">收藏</button>
@@ -508,6 +514,7 @@
       petProject: null,
       petChats: {},
       petBusy: false,
+      selectedProjects: new Set(),
       onboardingStep: 0,
       collapsedCategories: new Set(storedCollapsedCategories),
     };
@@ -568,7 +575,6 @@
       button.classList.toggle('bound', state.me.bound);
       button.querySelector('.account-label').textContent = state.me.acting_as ? `管理员 · ${state.me.display_name}` : (state.me.bound ? state.me.display_name : '游客');
       $('identity-note').textContent = state.me.acting_as ? `正在查看 ${state.me.display_name} 的项目` : `仅显示 ${state.me.display_name || '当前账号'} 的项目`;
-      $('organize-button').classList.toggle('hidden', !state.me.bound);
     }
 
     async function loadAdminContext() {
@@ -603,7 +609,7 @@
     }
 
     function categoryOptions(selected) {
-      return state.categories.filter(category => category !== '进行中').map(category => `<option value="${esc(category)}" ${category === selected ? 'selected' : ''}>${esc(category)}</option>`).join('');
+      return state.categories.filter(category => !['进行中', '已完成未分类'].includes(category)).map(category => `<option value="${esc(category)}" ${category === selected ? 'selected' : ''}>${esc(category)}</option>`).join('');
     }
 
     function projectHtml(project) {
@@ -621,20 +627,25 @@
       const remove = `<button class="project-icon-action delete" aria-label="删除项目" title="从我的项目中删除" onclick="deleteProject('${esc(project.source_id)}')">${icon('trash')}</button>`;
       const progress = status === 'done' ? '' : `<div class="project-progress"><div class="project-progress-head"><strong>${esc(project.label || '等待调度')}</strong><span>${percent}%${eta ? ` · ${esc(eta)}` : ''}</span></div><div class="track"><div class="fill ${repair ? 'repair' : ''}" style="width:${percent}%"></div></div></div>`;
       const companion = status === 'done' ? '' : `<div class="pet-dock"><button class="project-pet" aria-label="询问 Max 当前项目" title="问 Max" onclick="openPet(${Number(project.job_id || 0)}, '${esc(project.source_id)}')"><div class="pet-sprite ${petFrame(project)}"></div></button><span class="pet-label">问 Max</span></div>`;
-      const categoryLabel = project.category_source === 'manual' ? '人工分类' : project.category_source === 'ai' ? '智能整理' : '自动分类';
+      const selectable = Boolean(state.me?.bound && project.status === 'done' && project.category === '已完成未分类');
+      const checked = state.selectedProjects.has(project.source_id);
+      const selector = selectable ? `<label class="project-select" title="选择这个项目"><input type="checkbox" ${checked ? 'checked' : ''} onchange="toggleProjectSelection('${esc(project.source_id)}', this.checked)" /></label>` : '';
+      const categoryLabel = project.category_source === 'manual' ? '人工分类' : project.category_source === 'ai' ? '智能整理' : project.category_source === 'unclassified' ? '等待归类' : '状态分类';
       const categoryControl = project.category_source === 'status'
-        ? '<span class="category-pending">完成后由 Max 自动归类</span>'
-        : `<select class="category-select" aria-label="调整项目分类" onchange="changeCategory('${esc(project.source_id)}', this.value)">${categoryOptions(project.category)}</select><span class="project-updated">${categoryLabel}</span>`;
+        ? '<span class="category-pending">完成后进入未分类</span>'
+        : project.category_source === 'unclassified'
+          ? `<select class="category-select" aria-label="手动分类" onchange="changeCategory('${esc(project.source_id)}', this.value)"><option value="" selected disabled>手动分类</option>${categoryOptions('')}</select><span class="project-updated">${categoryLabel}</span>`
+          : `<select class="category-select" aria-label="调整项目分类" onchange="changeCategory('${esc(project.source_id)}', this.value)">${categoryOptions(project.category)}</select><span class="project-updated">${categoryLabel}</span>`;
       const retryHistory = [];
       if (Number(project.user_retries || 0) > 0) retryHistory.push(`用户重试 ${Number(project.user_retries)} 次`);
       if (Number(project.auto_retries || 0) > 0) retryHistory.push(`自动重试 ${Number(project.auto_retries)} 次`);
       if (Number(project.service_recoveries || 0) > 0) retryHistory.push(`服务恢复 ${Number(project.service_recoveries)} 次`);
       const retrySummary = retryHistory.length ? ` · ${retryHistory.join(' · ')}` : '';
       return `<article class="project-row ${status === 'done' ? 'completed' : ''}" data-source="${esc(project.source_id)}" data-category="${esc(project.category || '其他')}">
-        <div class="project-card ${esc(status)}">
+        <div class="project-card ${esc(status)} ${checked ? 'selected' : ''}">
           <div class="project-main">
             <div class="project-top">
-              <div class="project-title"><strong>${esc(title)}</strong><span>arXiv ${esc(project.source_id)}${esc(retrySummary)}</span></div>
+              <div class="project-title-wrap">${selector}<div class="project-title"><strong>${esc(title)}</strong><span>arXiv ${esc(project.source_id)}${esc(retrySummary)}</span></div></div>
               <span class="project-state ${esc(status)}">${esc(stateLabel(status))}</span>
             </div>
             ${project.summary ? `<p class="project-summary">${esc(project.summary)}</p>` : ''}
@@ -658,10 +669,15 @@
           if (!groups.has(category)) groups.set(category, []);
           groups.get(category).push(project);
         }
-        const groupedRows = [...groups.entries()].sort((left, right) => left[0] === '进行中' ? -1 : right[0] === '进行中' ? 1 : 0);
+        const categoryRank = category => category === '进行中' ? 0 : category === '已完成未分类' ? 1 : 2;
+        const groupedRows = [...groups.entries()].sort((left, right) => categoryRank(left[0]) - categoryRank(right[0]));
         $('projects').innerHTML = groupedRows.map(([category, projects]) => {
           const collapsed = state.collapsedCategories.has(category);
-          return `<section class="category-group"><button class="category-heading ${collapsed ? 'collapsed' : ''}" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
+          const selectedCount = projects.filter(project => state.selectedProjects.has(project.source_id)).length;
+          const toolbar = category === '已完成未分类' && state.me?.bound
+            ? `<div class="unclassified-toolbar"><label class="select-all"><input type="checkbox" ${projects.length && selectedCount === projects.length ? 'checked' : ''} onchange="toggleAllUnclassified(this.checked)" />全选</label><button class="organize-button" ${selectedCount ? '' : 'disabled'} onclick="organizeSelectedProjects()" title="只整理勾选的未分类项目"><span class="icon"><svg viewBox="0 0 24 24"><path d="m12 3-1.9 4.1L6 9l4.1 1.9L12 15l1.9-4.1L18 9l-4.1-1.9Z"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4"/></svg></span><span id="organize-label">自动归类所选${selectedCount ? ` (${selectedCount})` : ''}</span></button></div>`
+            : '';
+          return `<section class="category-group"><div class="category-head-row"><button class="category-heading ${collapsed ? 'collapsed' : ''}" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button>${toolbar}</div><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
         }).join('');
       }
       if (state.petProject) {
@@ -677,6 +693,8 @@
         const previousRects = new Map(previousRows.map(row => [row.dataset.source, row.getBoundingClientRect()]));
         const result = await api('/api/web/progress');
         state.projects = result.recent || [];
+        const unclassifiedIds = new Set(state.projects.filter(item => item.category === '已完成未分类').map(item => item.source_id));
+        state.selectedProjects = new Set([...state.selectedProjects].filter(sourceId => unclassifiedIds.has(sourceId)));
         state.categories = result.categories || [];
         state.service = result.service || null;
         const categoryFilter = $('category-filter');
@@ -685,7 +703,7 @@
         categoryFilter.value = state.categories.includes(currentCategory) ? currentCategory : 'all';
         renderService();
         renderProjects();
-        const moved = state.projects.filter(item => previousCategories.get(item.source_id) === '进行中' && item.category !== '进行中');
+        const moved = state.projects.filter(item => previousCategories.has(item.source_id) && previousCategories.get(item.source_id) !== item.category);
         if (moved.length) animateProjectMoves(moved, previousRects);
       } catch (_error) {
         toast('项目状态暂时无法刷新');
@@ -752,20 +770,37 @@
       });
     }
 
-    async function organizeProjects() {
-      if (!state.me?.bound) { toast('绑定飞书账号后才能一键整理'); return; }
-      const button = $('organize-button');
+    function toggleProjectSelection(sourceId, selected) {
+      if (selected) state.selectedProjects.add(sourceId);
+      else state.selectedProjects.delete(sourceId);
+      renderProjects();
+    }
+
+    function toggleAllUnclassified(selected) {
+      visibleProjects().filter(project => project.category === '已完成未分类').forEach(project => {
+        if (selected) state.selectedProjects.add(project.source_id);
+        else state.selectedProjects.delete(project.source_id);
+      });
+      renderProjects();
+    }
+
+    async function organizeSelectedProjects() {
+      if (!state.me?.bound) { toast('绑定飞书账号后才能自动归类'); return; }
+      const sourceIds = [...state.selectedProjects];
+      if (!sourceIds.length) { toast('请先选择项目'); return; }
+      const button = document.querySelector('.unclassified-toolbar .organize-button');
       button.disabled = true;
       $('organize-label').textContent = '整理中';
       try {
-        const result = await api('/api/web/organize', {method: 'POST', body: '{}'});
+        const result = await api('/api/web/organize', {method: 'POST', body: JSON.stringify({source_ids: sourceIds})});
         toast(result.updated ? `已整理 ${result.updated} 个项目` : '没有需要重新整理的项目');
+        sourceIds.forEach(sourceId => state.selectedProjects.delete(sourceId));
         await refreshProjects();
       } catch (error) {
         toast(error.message);
       } finally {
         button.disabled = false;
-        $('organize-label').textContent = '一键整理';
+        if ($('organize-label')) $('organize-label').textContent = '自动归类所选';
       }
     }
 
@@ -858,7 +893,7 @@
       state.petProject = {source_id: '__guide__', job_id: 0, status: 'done', label: '页面向导', guide: true};
       $('pet-project-title').textContent = '项目台按钮向导';
       $('pet-panel-avatar').style.backgroundPosition = '100% 0';
-      state.petChats.__guide__ = [{role: 'assistant', content: '新任务会固定留在“进行中”。完成后我会参考标题、TL;DR 和正文开头，把卡片搬到合适主题；一键整理会重新聚类已完成论文并保留人工分类。点击分类标题可折叠类内项目；星标是收藏；重试会继续失败任务；垃圾桶只从你的项目台移除。'}];
+      state.petChats.__guide__ = [{role: 'assistant', content: '新任务会固定留在“进行中”，完成后先进入“已完成未分类”。绑定飞书账号后，可以在未分类组勾选多篇，再点“自动归类所选”；人工分类不会被覆盖。点击分类标题可折叠类内项目；星标是收藏；重试会继续失败任务；垃圾桶只从你的项目台移除。'}];
       renderPetChat();
       $('pet-panel').classList.remove('hidden');
     }

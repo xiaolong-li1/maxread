@@ -14,6 +14,7 @@ PROJECT_CATEGORIES = (
     "机器人",
     "其他",
 )
+UNCLASSIFIED_CATEGORY = "已完成未分类"
 
 _CATEGORY_KEYWORDS = (
     ("机器人", ("robot", "robotics", "manipulation", "locomotion", "embodied", "navigation", "motion planning", "机器人", "具身", "导航", "操控")),

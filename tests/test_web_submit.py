@@ -4,6 +4,7 @@ import pytest
 
 from maxread.cli import _handle_web_binding_event
 from maxread.db import Store
+from maxread.project_metadata import UNCLASSIFIED_CATEGORY
 from maxread.web_submit import (
     WEB_SUBMIT_HTML,
     claim_binding_code,
@@ -442,7 +443,7 @@ def test_one_click_organizer_clusters_auto_projects_and_preserves_manual_categor
     update_web_project(store, identity, "2608.25927", "category", "机器人")
 
     projects = progress_payload(settings, store, identity)["recent"]
-    result = organize_web_projects(settings, store, identity, projects)
+    result = organize_web_projects(settings, store, identity, projects, ["2608.27456"])
     organized = {item["source_id"]: item for item in progress_payload(settings, store, identity)["recent"]}
 
     assert result == {"ok": True, "updated": 1, "used_ai": False}
@@ -469,7 +470,7 @@ def test_new_project_stays_in_active_category_until_completion(tmp_path):
     store.close()
 
 
-def test_completed_project_uses_tldr_and_opening_context_for_category(tmp_path):
+def test_completed_project_waits_unclassified_until_selected_for_organizing(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     _token, guest = new_web_identity(store)
     workdir = tmp_path / "work"
@@ -493,9 +494,40 @@ def test_completed_project_uses_tldr_and_opening_context_for_category(tmp_path):
 
     project = progress_payload(settings, store, identity)["recent"][0]
 
-    assert project["category"] == "生成模型"
-    assert project["category_source"] == "ai"
-    assert store.web_project_preferences(identity)["2608.25927"]["category"] == "生成模型"
+    assert project["category"] == UNCLASSIFIED_CATEGORY
+    assert project["category_source"] == "unclassified"
+    assert store.web_project_preferences(identity).get("2608.25927", {}).get("category", "") == ""
+
+    result = organize_web_projects(settings, store, identity, [project], ["2608.25927"])
+    organized = progress_payload(settings, store, identity)["recent"][0]
+
+    assert result["updated"] == 1
+    assert organized["category"] == "生成模型"
+    assert organized["category_source"] == "ai"
+    store.close()
+
+
+def test_selected_organizer_leaves_unselected_completed_project_unclassified(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="", workdir=tmp_path / "work")
+    submit_web_papers(settings, store, guest, "2608.25927 2608.27456")
+    identity = claim_binding_code(store, issue_binding_code(store, guest)["code"], "ou_feishu_user")
+    store.upsert_paper("2608.25927", "done", title="Video Diffusion Generation")
+    store.upsert_paper("2608.27456", "done", title="KV Cache Compression")
+    store.conn.execute(
+        "update queue_jobs set status='done', workflow_state='completed', stage='done' where source_id in (?, ?)",
+        ("2608.25927", "2608.27456"),
+    )
+    store.conn.commit()
+    projects = progress_payload(settings, store, identity)["recent"]
+
+    organize_web_projects(settings, store, identity, projects, ["2608.25927"])
+    organized = {item["source_id"]: item for item in progress_payload(settings, store, identity)["recent"]}
+
+    assert organized["2608.25927"]["category"] == "生成模型"
+    assert organized["2608.27456"]["category"] == UNCLASSIFIED_CATEGORY
+    assert organized["2608.27456"]["category_source"] == "unclassified"
     store.close()
 
 
@@ -601,7 +633,7 @@ def test_existing_project_summary_is_backfilled_from_pipeline_artifact(tmp_path)
     project = progress_payload(settings, store, identity)["recent"][0]
 
     assert project["summary"] == "通过视频扩散模型生成可控长序列"
-    assert project["category"] == "生成模型"
+    assert project["category"] == UNCLASSIFIED_CATEGORY
     assert store.get_paper("2608.25927").project_summary == project["summary"]
     store.close()
 
@@ -696,12 +728,14 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "/api/web/pet/chat" in WEB_SUBMIT_HTML
     assert "/api/web/project-action" in WEB_SUBMIT_HTML
     assert "/api/web/organize" in WEB_SUBMIT_HTML
-    assert "一键整理" in WEB_SUBMIT_HTML
+    assert "自动归类所选" in WEB_SUBMIT_HTML
+    assert "toggleProjectSelection" in WEB_SUBMIT_HTML
+    assert "toggleAllUnclassified" in WEB_SUBMIT_HTML
     assert "toggleCategory(" in WEB_SUBMIT_HTML
     assert "这些按钮怎么用" in WEB_SUBMIT_HTML
     assert "智能整理" in WEB_SUBMIT_HTML
     assert ".category-list[hidden]" in WEB_SUBMIT_HTML
-    assert "完成后由 Max 自动归类" in WEB_SUBMIT_HTML
+    assert "完成后进入未分类" in WEB_SUBMIT_HTML
     assert "animateProjectMoves" in WEB_SUBMIT_HTML
     assert "归档中" in WEB_SUBMIT_HTML
     assert 'id="progress-panel"' not in WEB_SUBMIT_HTML
