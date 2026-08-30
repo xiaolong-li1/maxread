@@ -1,7 +1,9 @@
+import threading
 from types import SimpleNamespace
 
 from maxread.db import Store
 from maxread.remote_worker import (
+    RemotePaperWorker,
     coordinator_claim,
     coordinator_event,
     coordinator_finish,
@@ -17,6 +19,18 @@ def settings(tmp_path):
         feishu_as="bot",
         auto_retry_attempts=0,
         db_path=tmp_path / "maxread.sqlite3",
+    )
+
+
+def worker_settings(tmp_path):
+    return SimpleNamespace(
+        worker_name="5090",
+        worker_coordinator_url="http://coordinator.invalid",
+        worker_token="token",
+        workdir=tmp_path,
+        batch_llm_concurrency=10,
+        batch_feishu_concurrency=1,
+        queue_workers=2,
     )
 
 
@@ -129,3 +143,30 @@ def test_remote_event_rejects_lost_worker_lease(tmp_path):
 
     assert result == {"ok": False, "lease": "lost"}
     store.close()
+
+
+def test_remote_worker_runs_slots_concurrently_with_isolated_stores(tmp_path, monkeypatch):
+    worker = RemotePaperWorker(worker_settings(tmp_path))
+    barrier = threading.Barrier(2)
+    observed = []
+
+    def claim_loop(worker_id, local_store):
+        barrier.wait(timeout=2)
+        local_store.upsert_paper(f"paper-{worker_id[-1]}", "queued")
+        observed.append((worker_id, local_store.path))
+
+    monkeypatch.setattr(worker, "_claim_loop", claim_loop)
+
+    worker.run_forever()
+
+    assert {worker_id.rsplit(":", 1)[-1] for worker_id, _path in observed} == {"1", "2"}
+    paths = {path for _worker_id, path in observed}
+    assert paths == {
+        tmp_path / "remote-worker-db" / "slot-1.sqlite3",
+        tmp_path / "remote-worker-db" / "slot-2.sqlite3",
+    }
+    for path in paths:
+        check = Store(path)
+        slot = path.stem.rsplit("-", 1)[-1]
+        assert check.get_paper(f"paper-{slot}") is not None
+        check.close()

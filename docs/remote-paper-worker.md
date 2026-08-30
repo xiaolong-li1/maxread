@@ -49,9 +49,17 @@ MAXREAD_WORKER_NAME=ziplab-5090
 MAXREAD_WORKER_POLL_SECONDS=2
 MAXREAD_ARXIV_PROXY_URL=http://127.0.0.1:18890
 MAXREAD_ARXIV_PROXY_REQUIRED=true
-MAXREAD_LLM_CONCURRENCY=5
+MAXREAD_QUEUE_WORKERS=2
+MAXREAD_LLM_CONCURRENCY=10
 MAXREAD_SECTIONAL_GENERATION_WORKERS=5
+MAXREAD_FEISHU_CONCURRENCY=1
 ```
+
+Each queue slot owns a separate local SQLite file under
+`$MAXREAD_WORKDIR/remote-worker-db`; SQLite connections never cross threads.
+Both slots share the process-wide ten-call model semaphore and the Feishu write
+semaphore. This gives two-paper generation concurrency without allowing either
+document to create an independent ten-call burst.
 
 Install `deploy/systemd/maxread-aliyun-tunnel.service` and
 `deploy/systemd/maxread-paper-worker.service` as user services. The 5090 user

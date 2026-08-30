@@ -1,43 +1,54 @@
 # MaxRead capacity and reliability profile
 
-Validated on 2026-08-29 against `gpt-5.6-sol` through the primary
-`sub2api.ziplab.co/v1` Responses endpoint. The production host has 1.6 GiB of
-RAM. These limits are an operational contract, not theoretical model limits.
+Validated through 2026-08-30 against `gpt-5.6-sol` with medium reasoning through
+the `sub2api-hk.ziplab.co/v1` Responses endpoint. Paper computation runs on
+ziplab-5090; Aliyun remains the coordinator and database owner. These limits
+are an operational contract, not theoretical model limits.
 
 ## Validated capacity
 
 | Layer | Production limit | Reason |
 | --- | ---: | --- |
 | Concurrent documents | 2 | Two real papers completed together without memory pressure. |
-| Global text/vision model calls | 5 | Revalidated after the 2026-08-30 host restart: five 122k-character requests completed 5/5 in 198 seconds. |
-| Section workers per document | 5 | All five logical sections may start together, while the global semaphore prevents two papers from exceeding five total calls. |
+| Global text/vision model calls | 10 | Ten real 123k-character requests completed 10/10 in 96.3 seconds. Twelve added no meaningful throughput; sixteen hit the account concurrency limit. |
+| Section workers per document | 5 | All five logical sections may start together; two paper workers share one ten-call process semaphore. |
 | Feishu writes | 1 | Publishing is short relative to generation and serial writes avoid document races. |
 | PDF/visual QA | 1 | Real checks took 11 and 13 seconds; serialization costs little and avoids simultaneous export pressure. |
 
-Do not raise model concurrency above five because the queue looks long. Scale
-beyond five only after a fresh heavy-prompt benchmark or by adding a separately
-measured provider/key.
+Keep production at ten even though twelve succeeded in one boundary run. The
+two spare account slots absorb retries and occasional Aliyun article calls.
+Raising the worker to sixteen is known-bad and produces provider rate limits.
 
 ## Benchmark evidence
 
 ### Provider concurrency
 
-The test input was the real 2308.04079 method prompt: 146,409 characters,
+The first test input was the real 2308.04079 method prompt: 146,409 characters,
 including metadata, TeX source, captions, figure markers, tables, and the
-method-section contract.
+method-section contract. It captured a degraded gateway period before the host
+restart and is retained as failure history, not as the current limit.
 
 | Concurrent heavy requests | Success | Wall time | Decision |
 | ---: | ---: | ---: | --- |
-| 1 | 1/1 | 178.6 s | Stable baseline |
-| 2 | 2/2 | 252.3 s | Production maximum |
-| 3 | 0/3 | 300.0 s timeout | Reject |
-| 5 | 0/5 first attempts in production | 502/524 | Reject |
+| 1 | 1/1 | 178.6 s | Historical baseline |
+| 2 | 2/2 | 252.3 s | Historical stable run |
+| 3 | 0/3 | 300.0 s timeout | Degraded gateway snapshot |
+| 5 | 0/5 first attempts in production | 502/524 | Degraded gateway snapshot |
 
 The 2026-08-30 post-restart recheck used the real Rope3D method prompt
-(122,602 characters) and medium reasoning. It completed 5/5 in 198.0 seconds;
-four calls finished in 42.1-57.2 seconds and one long-tail call took 198.0
-seconds. This supersedes the earlier transient 5-way failure for the current
-gateway state, but keeps five as the hard global ceiling.
+(123,597 characters, including 90,013 source characters) and medium reasoning:
+
+| Concurrent heavy requests | Success | Wall time | Median | Maximum | Decision |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 5 | 5/5 | 198.0 s | 54.6 s | 198.0 s | Stable, one long tail |
+| 8 | 8/8 | 94.8 s | 74.1 s | 94.5 s | Stable |
+| 10 | 10/10 | 96.3 s | 68.5 s | 96.2 s | Production setting |
+| 12 | 12/12 | 115.2 s | 63.6 s | 114.9 s | Stable boundary, no throughput gain |
+| 16 | 13/16 | 228.8 s | 85.1 s | 228.2 s | Reject: three account concurrency limits |
+
+Ten and twelve have nearly identical completed-call throughput. Ten has a
+shorter tail and leaves capacity for a retry or a coordinator-side article, so
+it is the durable setting rather than the largest one-time success.
 
 Reasoning remains `medium`. Text verbosity is `low` and Responses storage is
 disabled. A real 146k-character method prompt produced 3,694 characters in
@@ -57,7 +68,7 @@ The last seven days contained 33 completed jobs with a mean duration of about
 ## Generation policy
 
 1. A fresh paper uses sectional generation directly. Its five logical sections
-   may run together, subject to a global five-call ceiling shared by all jobs.
+   may run together. Two remote paper slots share a global ten-call ceiling.
 2. Each section owns its figure markers and tables. Successful sections remain
    valid when another section encounters a transient gateway error.
 3. Transport retries stay inside `OpenAIClient`; a section has one additional
@@ -112,7 +123,7 @@ generic instruction.
 
 ```dotenv
 MAXREAD_QUEUE_WORKERS=2
-MAXREAD_LLM_CONCURRENCY=5
+MAXREAD_LLM_CONCURRENCY=10
 MAXREAD_OPENAI_REVIEW_TIMEOUT=240
 MAXREAD_SECTIONAL_GENERATION_ENABLED=true
 MAXREAD_SECTIONAL_GENERATION_WORKERS=5
@@ -129,9 +140,9 @@ MAXREAD_MAX_IMAGE_DISPLAY_HEIGHT=560
 
 ## Operational fallback
 
-- If transient model failures exceed 10% over ten real section calls, reduce
-  `MAXREAD_LLM_CONCURRENCY` to 1 and investigate the provider. Do not shorten
-  paper evidence as a first response.
+- If transient model failures exceed 10% over ten real section calls, first
+  reduce `MAXREAD_LLM_CONCURRENCY` to 5 and investigate the provider. Use 1 only
+  for isolation. Do not shorten paper evidence as a first response.
 - If PDF infrastructure failures repeat, keep model generation running and
   pause only visual delivery. Recheck published checkpoints after Feishu
   recovers.

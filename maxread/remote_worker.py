@@ -15,7 +15,13 @@ from .arxiv import ArxivClient
 from .cache_cleanup import cleanup_source_cache
 from .db import Store
 from .feishu import FeishuClient
-from .job_queue import _LimitedLLM, _notify_watchers, _notify_watchers_started, auto_retry_queue_job
+from .job_queue import (
+    _LimitedFeishu,
+    _LimitedLLM,
+    _notify_watchers,
+    _notify_watchers_started,
+    auto_retry_queue_job,
+)
 from .models import PaperRef
 from .openai_client import OpenAIClient
 from .pipeline import MaxReadPipeline
@@ -225,16 +231,41 @@ class RemotePaperWorker:
     def __init__(self, settings):
         self.settings = settings
         name = settings.worker_name or socket.gethostname()
-        self.worker_id = f"remote:{name}:{os.getpid()}"
+        self.worker_id_prefix = f"remote:{name}:{os.getpid()}"
         self.client = CoordinatorClient(settings.worker_coordinator_url, settings.worker_token)
-        self.local_store = Store(Path(settings.workdir) / "remote-worker.sqlite3")
         self.stop = threading.Event()
         self.llm_sem = BoundedSemaphore(max(1, int(settings.batch_llm_concurrency)))
+        self.feishu_sem = BoundedSemaphore(max(1, int(settings.batch_feishu_concurrency)))
 
     def run_forever(self) -> None:
+        workers = []
+        for slot in range(max(1, int(self.settings.queue_workers))):
+            thread = threading.Thread(
+                target=self._worker_loop,
+                args=(slot + 1,),
+                name=f"remote-paper-worker-{slot + 1}",
+                daemon=True,
+            )
+            thread.start()
+            workers.append(thread)
+        while not self.stop.wait(1):
+            if any(thread.is_alive() for thread in workers):
+                continue
+            return
+
+    def _worker_loop(self, slot: int) -> None:
+        worker_id = f"{self.worker_id_prefix}:{slot}"
+        store_path = Path(self.settings.workdir) / "remote-worker-db" / f"slot-{slot}.sqlite3"
+        local_store = Store(store_path)
+        try:
+            self._claim_loop(worker_id, local_store)
+        finally:
+            local_store.close()
+
+    def _claim_loop(self, worker_id: str, local_store: Store) -> None:
         while not self.stop.is_set():
             try:
-                payload = self.client.claim(self.worker_id)
+                payload = self.client.claim(worker_id)
             except Exception:
                 self.stop.wait(self.settings.worker_poll_seconds)
                 continue
@@ -242,17 +273,17 @@ class RemotePaperWorker:
             if not isinstance(job, dict):
                 self.stop.wait(self.settings.worker_poll_seconds)
                 continue
-            self._process(job, payload.get("paper"))
+            self._process(job, payload.get("paper"), worker_id, local_store)
 
-    def _process(self, job: dict, paper: dict | None) -> None:
+    def _process(self, job: dict, paper: dict | None, worker_id: str, local_store: Store) -> None:
         job_id = int(job["id"])
         source_id = str(job["source_id"])
         if paper:
             fields = {key: paper.get(key) for key in (
                 "title", "project_summary", "doc_url", "doc_token", "error"
             ) if paper.get(key) is not None}
-            self.local_store.upsert_paper(source_id, str(paper.get("status") or "queued"), **fields)
-        issue_row = self.local_store.conn.execute(
+            local_store.upsert_paper(source_id, str(paper.get("status") or "queued"), **fields)
+        issue_row = local_store.conn.execute(
             "select coalesce(max(id), 0) as id from review_issues where source_kind='paper' and source_id=?",
             (source_id,),
         ).fetchone()
@@ -261,7 +292,7 @@ class RemotePaperWorker:
         heartbeat_stop = threading.Event()
         heartbeat = threading.Thread(
             target=self._heartbeat_loop,
-            args=(job_id, heartbeat_stop),
+            args=(job_id, worker_id, heartbeat_stop),
             name=f"remote-heartbeat-{job_id}",
             daemon=True,
         )
@@ -281,18 +312,21 @@ class RemotePaperWorker:
                 self.llm_sem,
                 review_timeout=self.settings.openai_review_timeout,
                 on_timing=lambda event_type, detail: self.client.event(
-                    job_id, self.worker_id, event_type, detail
+                    job_id, worker_id, event_type, detail
                 ),
             )
             pipeline = MaxReadPipeline(
-                self.local_store,
+                local_store,
                 ArxivClient(
                     self.settings.workdir,
                     timeout=self.settings.arxiv_timeout,
                     parallel_streams=self.settings.arxiv_parallel_streams,
                     parallel_min_bytes=self.settings.arxiv_parallel_min_bytes,
                 ),
-                FeishuClient(self.settings.lark_cli, self.settings.feishu_as),
+                _LimitedFeishu(
+                    FeishuClient(self.settings.lark_cli, self.settings.feishu_as),
+                    self.feishu_sem,
+                ),
                 llm,
                 require_source=self.settings.require_source,
                 review_reasoning_effort=self.settings.openai_review_reasoning_effort,
@@ -302,7 +336,7 @@ class RemotePaperWorker:
                 sectional_generation_workers=self.settings.sectional_generation_workers,
                 quality_repair_rounds=self.settings.quality_repair_rounds,
                 on_workflow_event=lambda event, detail="": self.client.transition(
-                    job_id, self.worker_id, event, detail
+                    job_id, worker_id, event, detail
                 ),
             )
             result = pipeline.process_ref(
@@ -314,9 +348,9 @@ class RemotePaperWorker:
                 resume_published_checkpoint=str(job.get("checkpoint_json") or ""),
                 force_rebuild=bool(job.get("rebuild_pipeline")),
             )
-            record = self.local_store.get_paper(source_id)
+            record = local_store.get_paper(source_id)
             issues = [
-                issue for issue in self.local_store.list_review_issues(100, "paper", source_id)
+                issue for issue in local_store.list_review_issues(100, "paper", source_id)
                 if int(issue.get("id") or 0) > review_start_id
             ][:20]
             cleanup_payload = {}
@@ -325,7 +359,7 @@ class RemotePaperWorker:
                 cleanup_payload = {"files": cleanup.files_removed, "bytes": cleanup.bytes_removed}
             finish_payload = {
                 "job_id": job_id,
-                "worker_id": self.worker_id,
+                "worker_id": worker_id,
                 "doc_url": result.doc_url,
                 "error": result.error,
                 "paper": record.__dict__ if record else {},
@@ -334,11 +368,11 @@ class RemotePaperWorker:
             }
             finish = self.client.finish(finish_payload)
         except Exception as exc:
-            record = self.local_store.get_paper(source_id)
+            record = local_store.get_paper(source_id)
             try:
                 self.client.finish({
                     "job_id": job_id,
-                    "worker_id": self.worker_id,
+                    "worker_id": worker_id,
                     "doc_url": getattr(result, "doc_url", "") if result else "",
                     "error": f"remote-worker: {type(exc).__name__}: {str(exc)[:1000]}",
                     "paper": record.__dict__ if record else {},
@@ -350,11 +384,11 @@ class RemotePaperWorker:
             heartbeat_stop.set()
             heartbeat.join(timeout=2)
 
-    def _heartbeat_loop(self, job_id: int, stop: threading.Event) -> None:
+    def _heartbeat_loop(self, job_id: int, worker_id: str, stop: threading.Event) -> None:
         interval = max(5, int(self.settings.queue_heartbeat_seconds))
         while not stop.wait(interval):
             try:
-                if not self.client.heartbeat(job_id, self.worker_id):
+                if not self.client.heartbeat(job_id, worker_id):
                     return
             except Exception:
                 continue
