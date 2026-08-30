@@ -79,6 +79,42 @@ def test_quality_flags_markdown_structure_swallowed_inside_xml_paragraph():
     assert "quality:format:xml:high:figure-marker-inside-paragraph" in warnings
 
 
+def test_quality_blocks_long_english_prose_outside_tables():
+    markdown = (
+        "Quantitative comparison on our one-minute benchmark. Bold resolution marks 720p. "
+        "Pose accuracy reports rotation and translation errors, while throughput is measured on eight GPUs."
+    )
+
+    warnings = pre_publish_quality_warnings(markdown, markdown_to_docx_xml(markdown))
+
+    assert "quality:format:markdown:high:long-english-prose" in warnings
+
+
+def test_quality_blocks_english_table_caption_joined_to_chinese_paragraph():
+    markdown = (
+        "主表比较的是完整生成链路，而不是单独的注意力层。\n"
+        "Quantitative comparison on our one-minute benchmark. Bold resolution marks 720p. "
+        "Pose accuracy reports rotation and translation errors, while throughput is measured on eight GPUs."
+    )
+
+    warnings = pre_publish_quality_warnings(markdown, markdown_to_docx_xml(markdown))
+
+    assert "quality:format:markdown:high:long-english-prose" in warnings
+
+
+def test_quality_allows_english_table_headers_and_english_title_metadata():
+    markdown = """**英文标题**：SageAttention2: Efficient Attention with Thorough Outlier Smoothing and Per-thread INT4 Quantization
+
+| Method | Param | Throughput |
+| --- | ---: | ---: |
+| SANA-WM | 2.6B | 24.1 |
+"""
+
+    warnings = pre_publish_quality_warnings(markdown, markdown_to_docx_xml(markdown))
+
+    assert "quality:format:markdown:high:long-english-prose" not in warnings
+
+
 def test_paper_completeness_requires_all_sections_and_three_selected_figures():
     markers = [f"[MaxReadFigure:{i}:f{i}]" for i in range(1, 6)]
     markdown = "# T\n\n**TL;DR**：摘要。\n\n" + "\n\n".join(

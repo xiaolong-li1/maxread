@@ -93,6 +93,8 @@ class FormattingQualityAgent(QualityAgent):
                 issues.append(QualityIssue(self.name, stage, "high", "figure-marker-inside-paragraph"))
             if _has_raw_table_uncertainty(text, stage):
                 issues.append(QualityIssue(self.name, stage, "high", "raw-table-math"))
+            if stage == "markdown" and _has_long_english_prose_block(text):
+                issues.append(QualityIssue(self.name, stage, "high", "long-english-prose"))
         return _dedupe_issues(issues)
 
 
@@ -206,6 +208,23 @@ def _has_raw_table_uncertainty(text: str, stage: str) -> bool:
     if stage == "xml":
         return any(_RAW_TABLE_UNCERTAINTY_PATTERN.search(block) for block in re.findall(r"<table\b.*?</table>", protected, re.S | re.I))
     return any("|" in line and _RAW_TABLE_UNCERTAINTY_PATTERN.search(line) for line in protected.splitlines())
+
+
+def _has_long_english_prose_block(markdown: str) -> bool:
+    for block in re.split(r"\n{2,}", str(markdown or "")):
+        for candidate in block.splitlines() or [block]:
+            value = candidate.strip()
+            if not value or value.startswith(("#", "```", "[MaxReadFigure:")):
+                continue
+            if "|" in value or "英文标题" in value or re.search(r"(?i)(?:原文|repository|github|arxiv)\s*[：:]", value):
+                continue
+            plain = re.sub(r"<latex>.*?</latex>|`[^`]*`|https?://\S+", " ", value, flags=re.S | re.I)
+            words = re.findall(r"\b[A-Za-z][A-Za-z0-9+./-]*\b", plain)
+            letters = len(re.findall(r"[A-Za-z]", plain))
+            cjk = len(re.findall(r"[\u4e00-\u9fff]", plain))
+            if len(words) >= 16 and letters >= 90 and cjk < 12:
+                return True
+    return False
 
 
 def paper_markdown_completeness_errors(markdown: str, expected_markers: Iterable[str] = ()) -> List[str]:

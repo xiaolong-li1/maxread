@@ -59,6 +59,26 @@ def test_figure_caption_compiler_never_hard_truncates_and_prefers_chinese_visual
     assert "..." not in caption
 
 
+def test_method_pipeline_group_is_not_reclassified_as_experiment_by_quality_word():
+    target = _figure_section_target(
+        Path("related-data_pipeline-pipeline_overview.png"),
+        "Data construction pipeline and SANA-WM architecture followed by a refiner to improve visual quality.",
+        "上半部分展示数据构建流程，下半部分展示模型架构与细化器。",
+    )
+
+    assert target == "method"
+
+
+def test_result_comparison_stays_in_experiment_section():
+    target = _figure_section_target(
+        Path("main-result-comparison.png"),
+        "Quantitative benchmark comparison across methods.",
+        "不同方法的主结果对比。",
+    )
+
+    assert target == "experiments"
+
+
 def test_polish_markdown_converts_tex_delimited_math():
     text = r"结果显示，\(k=4\) 有 \(1.6\times\) 加速。\[\hat{x}_{t+1}=F^{-1}(z)\]"
     out = polish_markdown(text)
@@ -489,6 +509,28 @@ def test_markdown_to_docx_xml_preserves_latex_and_tables():
     assert "<latex>x &lt; y</latex>" in xml
     assert "<table>" in xml
     assert "<latex>a+b</latex>" in xml
+
+
+def test_two_column_table_fills_document_width_with_weighted_columns():
+    markdown = """| 项目 | 设置 |
+| --- | --- |
+| 任务 | 给定首帧、文本与相机轨迹 |
+"""
+
+    xml = markdown_to_docx_xml(markdown)
+
+    assert '<col width="384"/><col width="816"/>' in xml
+    assert xml.startswith("<table><colgroup>")
+
+
+def test_wide_table_uses_readable_columns_and_horizontal_scroll_width():
+    header = "| " + " | ".join(f"C{i}" for i in range(10)) + " |"
+    separator = "| " + " | ".join("---" for _ in range(10)) + " |"
+    row = "| " + " | ".join(str(i) for i in range(10)) + " |"
+
+    xml = markdown_to_docx_xml("\n".join((header, separator, row)))
+
+    assert xml.count('<col width="120"/>') == 10
 
 
 def test_polish_markdown_compiles_raw_uncertainty_values_inside_tables():

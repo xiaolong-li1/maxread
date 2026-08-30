@@ -888,12 +888,38 @@ def _list_xml(block: str, ordered: bool) -> str:
 def _table_xml(block: str) -> str:
     lines = [_normalize_table_line(line) for line in block.splitlines() if line.strip()]
     rows = [lines[0]] + lines[2:]
-    out = ["<table>"]
+    column_count = max(
+        (len([cell for cell in row.strip("|").split("|")]) for row in rows),
+        default=1,
+    )
+    widths = _table_column_widths(column_count)
+    out = ["<table><colgroup>"]
+    out.extend(f'<col width="{width}"/>' for width in widths)
+    out.append("</colgroup><tbody>")
     for row in rows:
         cells = [cell.strip() for cell in row.strip("|").split("|")]
         out.append("<tr>" + "".join(f"<td><p>{_inline_xml(cell)}</p></td>" for cell in cells) + "</tr>")
-    out.append("</table>")
+    out.append("</tbody></table>")
     return "".join(out)
+
+
+def _table_column_widths(column_count: int, target_width: int = 1200) -> List[int]:
+    count = max(1, int(column_count))
+    target = max(720, int(target_width))
+    if count == 1:
+        return [target]
+    if count == 2:
+        return [round(target * 0.32), target - round(target * 0.32)]
+    if count <= 6:
+        first = max(180, round(target * 0.22))
+        remaining = target - first
+        base = remaining // (count - 1)
+        widths = [first] + [base] * (count - 1)
+        widths[-1] += target - sum(widths)
+        return widths
+    # Wide result tables should remain readable and use horizontal scrolling;
+    # squeezing 10-20 metric columns into the viewport makes every cell wrap.
+    return [max(120, target // count)] * count
 
 
 def _normalize_table_line(line: str) -> str:
@@ -1654,20 +1680,33 @@ def _is_referenced_or_result_figure(path: Path, caption: str = "", visual_descri
 
 
 def _figure_section_target(path: Path, caption: str = "", visual_description: str = "") -> str:
-    text = f"{path.stem} {caption or ''} {visual_description or ''}".lower()
+    path_text = path.stem.lower()
+    context = f"{caption or ''} {visual_description or ''}".lower()
+    text = f"{path_text} {context}"
     if any(word in text for word in (
         "ablation", "sensitivity", "appendix", "supplement", "failure", "scaling",
         "learnable sink", "with and without", "pilot", "training signal", "warmup",
-        "detach", "sliding-window", "消融", "敏感", "附录", "失败",
+        "detach", "sliding-window", "probe", "heatmap", "attention map", "visualization",
+        "消融", "敏感", "附录", "失败", "探针", "热力图", "可视化",
     )):
         return "analysis"
-    if any(word in text for word in (
-        "experiment", "benchmark", "comparison", "result", "quality", "validation",
-        "accuracy", "aggregate performance", "performance under", "acc_vs", "acc-vs",
-        "loss", "rank", "实验", "结果", "对比", "指标",
-    )):
+    method_words = (
+        "overview", "workflow", "framework", "architecture", "mechanism", "pipeline",
+        "data construction", "model design", "流程", "架构", "框架", "机制", "数据构建",
+    )
+    experiment_words = (
+        "experiment", "benchmark", "comparison", "result", "validation", "accuracy",
+        "aggregate performance", "performance under", "qualitative", "quantitative",
+        "latency", "throughput", "memory", "acc_vs", "acc-vs", "loss", "rank",
+        "实验", "结果", "对比", "指标", "性能", "延迟", "吞吐", "显存",
+    )
+    method_score = 3 * sum(word in path_text for word in method_words) + sum(word in context for word in method_words)
+    experiment_score = 3 * sum(word in path_text for word in experiment_words) + sum(word in context for word in experiment_words)
+    if method_score and method_score >= experiment_score:
+        return "method"
+    if experiment_score:
         return "experiments"
-    if any(word in text for word in ("overview", "workflow", "framework", "architecture", "mechanism", "attention", "pipeline", "流程", "架构", "框架", "机制")):
+    if "attention" in text and not any(word in text for word in ("compare", "comparison", "map", "pattern")):
         return "method"
     return ""
 

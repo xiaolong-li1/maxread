@@ -349,6 +349,7 @@ def repair_markdown_with_quality_report(
 BLOCK_REPAIR_SYSTEM_PROMPT = r"""你是 MaxRead 的局部格式修复器。只修复给定的一个 Markdown 块，不补上下文、不输出整篇文章。
 只输出 JSON：{"markdown":"修复后的单个块","issues":[]}。不要代码围栏或解释。
 只能修复列出的公式/XML/格式错误；不得改变事实、数字、变量关系或删除 [MaxReadFigure:...] marker。
+当错误为 long-english-prose 时，把该英文说明完整、紧凑地翻译为中文，保留方法名、数据集、指标、数字和方向符号；不要删除信息，也不要改动相邻表格。
 """
 
 
