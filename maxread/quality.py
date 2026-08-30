@@ -422,6 +422,7 @@ def _inspect_latex_body(stage: str, body: str) -> List[QualityIssue]:
         (r"\\(?:qquad|quad)[A-Za-z]", "joined-spacing-command"),
         (r"(?<!\\)\\(?:\[|\])", "internal-display-delimiter"),
         (r"\\(?:overline|underline|hat|widehat|tilde|widetilde|bar|vec|dot|ddot|check|breve|acute|grave)(?:\s+[A-Za-z]|[A-Z])", "fused-accent-command"),
+        (r"\\(?:Alpha|Beta|Gamma|Delta|Epsilon|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega)[A-Z](?=[^A-Za-z]|$)", "fused-greek-command"),
         (r"<\s*/?\s*(?:br|p|div)\b[^<>]*>", "html-tag-in-formula"),
         (r"<\s*/?\s*latex\b[^<>]*>", "nested-latex-tag"),
         (r"\\mbox\s*\{", "mbox-command-in-formula"),

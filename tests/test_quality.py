@@ -165,6 +165,14 @@ def test_quality_formula_agent_flags_joined_spacing_commands():
     assert "quality:formula:markdown:high:joined-spacing-command" in warnings
 
 
+def test_quality_flags_and_renderer_repairs_fused_greek_variable():
+    warnings = quality_warnings(r"<latex>\DeltaS+\SigmaK</latex>")
+
+    assert "quality:formula:markdown:high:fused-greek-command" in warnings
+    polished = polish_markdown(r"变化量为 <latex>\DeltaS+\SigmaK</latex>。")
+    assert r"<latex>\Delta S+\Sigma K</latex>" in polished
+
+
 def test_quality_formula_agent_flags_internal_display_delimiter():
     warnings = quality_warnings(r"<latex>\begin{cases}a \[4pt] b\end{cases}</latex>")
 

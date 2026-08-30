@@ -1084,6 +1084,7 @@ def _normalize_latex_body(
     body = _normalize_latex_text_macros(body)
     body = _normalize_boldsymbol(body)
     body = _normalize_latex_control_spaces(body)
+    body = _repair_fused_greek_commands(body)
     body = _normalize_latex_delimiter_sizing(body)
     body = _repair_internal_display_delimiters(body)
     body = _repair_cases_missing_row_breaks(body)
@@ -1109,6 +1110,15 @@ def _normalize_latex_body(
     body = re.sub(r"(\d+)\\mathrm\{e\}\{(-?\d+)\}", r"\1\\times10^{\2}", body)
     body = re.sub(r"(\d+)\\mathrm\{e\}\s*([+-]\d+)", r"\1\\times10^{\2}", body)
     return body
+
+
+def _repair_fused_greek_commands(body: str) -> str:
+    commands = (
+        "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Theta", "Lambda",
+        "Xi", "Pi", "Sigma", "Upsilon", "Phi", "Psi", "Omega",
+    )
+    pattern = r"\\(" + "|".join(commands) + r")([A-Z])(?=[^A-Za-z]|$)"
+    return re.sub(pattern, r"\\\1 \2", str(body or ""))
 
 
 def _normalize_latex_delimiter_sizing(body: str) -> str:
