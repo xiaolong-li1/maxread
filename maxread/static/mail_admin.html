@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MaxRead 邮件机器人</title>
+  <style>
+    :root { --bg:#f5f7f4; --paper:#fff; --text:#202621; --muted:#6f7871; --line:#dce2dd; --green:#1f755d; --green-soft:#e8f2ee; --orange:#b86c24; --orange-soft:#f8eee3; --red:#b44037; --red-soft:#faecea; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--text); background:var(--bg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif; }
+    button,input { font:inherit; }
+    button { cursor:pointer; }
+    .wrap { width:min(1180px,calc(100% - 32px)); margin:0 auto; padding:24px 0 48px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding-bottom:18px; border-bottom:1px solid var(--line); }
+    h1,h2 { margin:0; letter-spacing:0; }
+    h1 { font-size:24px; }
+    h2 { font-size:16px; }
+    .sub,.muted { color:var(--muted); }
+    .actions,.inline { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    a.button,button { min-height:36px; display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:0 12px; color:var(--text); background:var(--paper); border:1px solid var(--line); border-radius:7px; text-decoration:none; }
+    button.primary { color:#fff; background:var(--green); border-color:var(--green); }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .status { margin:18px 0; padding:14px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px; background:var(--paper); border:1px solid var(--line); border-left:4px solid var(--green); border-radius:8px; }
+    .status.degraded { border-left-color:var(--orange); }
+    .status.down { border-left-color:var(--red); }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--green); }
+    .degraded .dot { background:var(--orange); }
+    .down .dot { background:var(--red); }
+    .grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:14px; }
+    .card { grid-column:span 6; min-width:0; padding:16px; background:var(--paper); border:1px solid var(--line); border-radius:8px; }
+    .wide { grid-column:1/-1; }
+    .card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:13px; }
+    .metric-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+    .metric { padding-top:9px; border-top:2px solid var(--line); }
+    .metric strong { display:block; margin-top:3px; font-size:19px; font-variant-numeric:tabular-nums; }
+    .account-list { display:grid; gap:10px; }
+    .account { display:grid; grid-template-columns:minmax(210px,1.5fr) repeat(3,minmax(90px,.7fr)) auto; align-items:center; gap:12px; padding:12px 0; border-top:1px solid var(--line); }
+    .account:first-child { border-top:0; padding-top:0; }
+    .address { overflow-wrap:anywhere; font-weight:650; }
+    label.field { display:grid; gap:5px; color:var(--muted); font-size:12px; }
+    input[type=number] { width:100%; height:38px; padding:0 10px; color:var(--text); background:var(--paper); border:1px solid var(--line); border-radius:7px; }
+    .config { display:grid; grid-template-columns:1fr 1fr auto; align-items:end; gap:12px; }
+    .table-wrap { overflow:auto; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:10px 9px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }
+    th { color:var(--muted); font-size:12px; font-weight:600; }
+    .pill { display:inline-flex; align-items:center; min-height:24px; padding:0 8px; border-radius:12px; color:var(--green); background:var(--green-soft); }
+    .pill.bad { color:var(--red); background:var(--red-soft); }
+    .pill.warn { color:var(--orange); background:var(--orange-soft); }
+    .error-list { display:grid; gap:8px; }
+    .error-row { display:grid; grid-template-columns:56px minmax(0,1fr) 150px; gap:12px; padding:9px 0; border-top:1px solid var(--line); }
+    .empty { padding:24px; color:var(--muted); text-align:center; }
+    .auth { margin-top:80px; padding:28px; text-align:center; background:var(--paper); border:1px solid var(--line); border-radius:8px; }
+    .hidden { display:none !important; }
+    .toast { position:fixed; right:20px; bottom:20px; padding:10px 13px; color:#fff; background:#202621; border-radius:7px; opacity:0; transform:translateY(8px); transition:.2s; pointer-events:none; }
+    .toast.show { opacity:1; transform:none; }
+    @media (max-width:760px) { .wrap{width:min(100% - 20px,1180px);padding-top:14px;} header{align-items:flex-start;flex-direction:column;} .card{grid-column:1/-1;} .account{grid-template-columns:1fr 1fr;} .account .address{grid-column:1/-1;} .config{grid-template-columns:1fr;} .metric-grid{grid-template-columns:1fr 1fr;} .error-row{grid-template-columns:44px 1fr;} .error-row .time{display:none;} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div><h1>邮件机器人</h1><div class="sub">MaxRead Recruiting Mail</div></div>
+      <div class="actions"><a class="button" href="admin">返回控制台</a><button onclick="loadStatus()">刷新</button></div>
+    </header>
+    <section id="auth" class="auth hidden"><h2>需要管理员登录</h2><p class="muted">请先在 MaxRead 控制台完成管理员登录。</p><a class="button" href="admin">前往登录</a></section>
+    <main id="dashboard" class="hidden">
+      <section id="status" class="status"><div class="inline"><span class="dot"></span><strong id="status-label">读取中</strong></div><span class="muted" id="status-detail"></span></section>
+      <div class="grid">
+        <section class="card wide">
+          <div class="card-head"><div><h2>邮箱</h2><div class="muted" id="control-state"></div></div><button class="primary" id="scan-all" onclick="scanMailbox('all')">扫描全部</button></div>
+          <div class="account-list" id="accounts"></div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>自动任务</h2><span class="pill" id="service-pill">未知</span></div>
+          <div class="metric-grid" id="service-metrics"></div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>候选处理</h2><span class="pill" id="run-pill">未知</span></div>
+          <div class="metric-grid" id="run-metrics"></div>
+        </section>
+        <section class="card wide">
+          <div class="card-head"><h2>调度配置</h2><span class="muted">保存后重启对应 systemd 单元</span></div>
+          <div class="config">
+            <label class="field">自动扫描/候选发布间隔（分钟）<input id="scan-interval" type="number" min="5" max="10080" step="5" /></label>
+            <label class="field">周报发布间隔（小时）<input id="report-interval" type="number" min="1" max="720" step="1" /></label>
+            <button class="primary" id="save-config" onclick="saveConfig()">保存配置</button>
+          </div>
+        </section>
+        <section class="card wide">
+          <div class="card-head"><h2>最近运行</h2><span class="muted" id="run-count"></span></div>
+          <div class="table-wrap"><table><thead><tr><th>开始</th><th>状态</th><th>邮件</th><th>新增</th><th>更新</th><th>失败</th><th>耗时</th></tr></thead><tbody id="runs"></tbody></table></div>
+        </section>
+        <section class="card wide">
+          <div class="card-head"><h2>近期错误</h2><span class="muted">按相同错误聚合</span></div>
+          <div class="error-list" id="errors"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script>
+    const $ = id => document.getElementById(id);
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const fmt = value => value ? new Intl.DateTimeFormat('zh-CN',{dateStyle:'short',timeStyle:'medium'}).format(new Date(value)) : '—';
+    const duration = (start,end) => { if(!start||!end)return '—'; const s=Math.max(0,(new Date(end)-new Date(start))/1000); return s<60?`${Math.round(s)} 秒`:`${Math.round(s/60)} 分钟`; };
+    async function api(path,options={}) { const response=await fetch(path,{credentials:'same-origin',headers:{'content-type':'application/json'},...options}); const body=await response.json().catch(()=>({})); if(!response.ok){const e=new Error(body.error||`HTTP ${response.status}`);e.status=response.status;throw e;} return body; }
+    function toast(text){$('toast').textContent=text;$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),2200);}
+    function metric(label,value){return `<div class="metric"><span class="muted">${esc(label)}</span><strong>${esc(value)}</strong></div>`;}
+    function pill(status,bad=false,warn=false){return `<span class="pill ${bad?'bad':warn?'warn':''}">${esc(status)}</span>`;}
+    async function loadStatus(){
+      try{
+        const data=await api('/api/admin/mail/status');
+        $('auth').classList.add('hidden');$('dashboard').classList.remove('hidden');render(data);
+      }catch(error){if(error.status===401){$('dashboard').classList.add('hidden');$('auth').classList.remove('hidden');return;}toast(error.message);}
+    }
+    function render(data){
+      const latest=data.runs?.[0]||{}; const state=data.business_state||'down';
+      $('status').className=`status ${state}`;$('status-label').textContent=state==='healthy'?'运行正常':state==='degraded'?'进程正常，业务降级':'服务异常';
+      $('status-detail').textContent=latest.started_at?`最近运行 ${fmt(latest.started_at)}`:'暂无运行记录';
+      const active=Boolean(data.control?.active);$('control-state').textContent=active?`后台任务：${data.control.account||'all'}`:'当前没有手动扫描';$('scan-all').disabled=active;
+      $('accounts').innerHTML=(data.accounts||[]).map(a=>`<div class="account"><div><div class="address">${esc(a.address)}</div><div class="muted">${esc(a.id)}</div></div><div><span class="muted">邮件</span><br><strong>${Number(a.messages||0)}</strong></div><div><span class="muted">最近扫描</span><br>${esc(fmt(a.last_scan))}</div><div><span class="muted">最新来信</span><br>${esc(fmt(a.latest_mail))}</div><button ${active?'disabled':''} onclick="scanMailbox('${esc(a.id)}')">立即扫描</button></div>`).join('')||'<div class="empty">未发现邮箱配置</div>';
+      const serviceActive=data.service?.ActiveState==='active';$('service-pill').outerHTML=pill(serviceActive?'active':data.service?.ActiveState||'unknown',!serviceActive,false).replace('<span','<span id="service-pill"');
+      $('service-metrics').innerHTML=metric('PID',data.service?.MainPID||'—')+metric('重启次数',data.service?.NRestarts||0)+metric('周报下次',fmt(data.report_timer?.NextElapseUSecRealtime));
+      const failed=Number(latest.failed_threads||0);$('run-pill').outerHTML=pill(latest.status||'暂无',latest.status==='failed',failed>0).replace('<span','<span id="run-pill"');
+      $('run-metrics').innerHTML=metric('活动线程',data.thread_stats?.active||0)+metric('提取失败',data.thread_stats?.extract_failed||0)+metric('最近失败',failed);
+      $('scan-interval').value=data.config?.scan_interval_minutes||1440;$('report-interval').value=data.config?.report_interval_hours||168;
+      $('run-count').textContent=`${(data.runs||[]).length} 条`;
+      $('runs').innerHTML=(data.runs||[]).map(r=>`<tr><td>${esc(fmt(r.started_at))}</td><td>${pill(r.status,r.status==='failed'||r.status==='abandoned',Number(r.failed_threads)>0)}</td><td>${Number(r.scanned_messages||0)}</td><td>${Number(r.new_threads||0)}</td><td>${Number(r.updated_threads||0)}</td><td>${Number(r.failed_threads||0)}</td><td>${esc(duration(r.started_at,r.finished_at))}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">暂无运行</td></tr>';
+      $('errors').innerHTML=(data.errors||[]).map(e=>`<div class="error-row"><strong>${Number(e.count||0)}</strong><span>${esc(e.error||'未知错误')}</span><span class="time muted">${esc(fmt(e.last_seen))}</span></div>`).join('')||'<div class="empty">没有近期错误</div>';
+    }
+    async function scanMailbox(account){try{const result=await api('/api/admin/mail/scan',{method:'POST',body:JSON.stringify({account})});toast(`已启动 ${result.account==='all'?'全部邮箱':result.account} 扫描`);await loadStatus();}catch(error){toast(error.message);}}
+    async function saveConfig(){const button=$('save-config');button.disabled=true;try{await api('/api/admin/mail/config',{method:'POST',body:JSON.stringify({scan_interval_minutes:Number($('scan-interval').value),report_interval_hours:Number($('report-interval').value)})});toast('配置已保存');await loadStatus();}catch(error){toast(error.message);}finally{button.disabled=false;}}
+    loadStatus();setInterval(loadStatus,15000);
+  </script>
+</body>
+</html>

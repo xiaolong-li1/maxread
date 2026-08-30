@@ -123,6 +123,12 @@ IMAP_PASSWORD=app-password-or-mailbox-password
 ./bin/recruiting-pipeline status
 ```
 
+管理员可在 `/maxread/mail` 查看两个邮箱的最近扫描、运行统计和错误聚合，
+并手动触发单邮箱或全部邮箱扫描。页面可调整完整扫描与候选发布间隔，
+以及招聘周报发布间隔；写操作复用 MaxRead 管理员会话，不返回邮箱凭据。
+手动扫描由 `bin/recruiting-control-scan` 在独立 systemd transient unit 中执行，
+运行期间暂停常驻管线，避免并发写同一个 SQLite。
+
 如果 Base 表被清空或更换，不要删除邮件、材料文档或整个 SQLite。先预览，
 再显式确认回填最近 30 天候选人：
 

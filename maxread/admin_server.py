@@ -20,6 +20,7 @@ from .admin_architecture import architecture_html, architecture_spec
 from .config import Settings
 from .db import Store
 from .feedback import count_feedback_by_status, visible_feedback_rows
+from .mail_admin import MAIL_ADMIN_HTML, mail_admin_status, trigger_mail_scan, update_mail_admin_config
 from .review import visible_review_issues
 from .remote_worker import (
     coordinator_claim,
@@ -162,6 +163,9 @@ class AdminHandler(BaseHTTPRequestHandler):
         if parsed.path in {"/admin", "/admin/"}:
             self._html(INDEX_HTML)
             return
+        if parsed.path in {"/mail", "/mail/"}:
+            self._html(MAIL_ADMIN_HTML)
+            return
         if parsed.path in {"/submit", "/submit/", "/projects", "/projects/"}:
             self._html(WEB_SUBMIT_HTML)
             return
@@ -218,6 +222,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/admin/status":
             self._json_response({"authenticated": self._is_admin()})
+            return
+        if parsed.path == "/api/admin/mail/status":
+            if not self._require_admin():
+                return
+            try:
+                self._json_response(mail_admin_status())
+            except Exception as exc:
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc)[:500])
             return
         if parsed.path == "/api/usage":
             if not self._require_admin():
@@ -411,6 +423,23 @@ class AdminHandler(BaseHTTPRequestHandler):
             )
             return
         if not self._require_admin():
+            return
+        if parsed.path == "/api/admin/mail/scan":
+            payload = self._read_json()
+            try:
+                self._json_response(trigger_mail_scan(str(payload.get("account") or "all")))
+            except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/config":
+            payload = self._read_json()
+            try:
+                self._json_response(update_mail_admin_config(
+                    int(payload.get("scan_interval_minutes") or 0),
+                    int(payload.get("report_interval_hours") or 0),
+                ))
+            except (TypeError, ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path == "/api/service-status":
             payload = self._read_json()
@@ -822,6 +851,7 @@ INDEX_HTML = r'''
       <div class="actions">
         <a class="architecture-link" href="submit"><svg viewBox="0 0 24 24"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="M12 13 19 5"/></svg>提交论文</a>
         <a class="architecture-link" href="architecture"><svg viewBox="0 0 24 24"><path d="M4 6h6v6H4zM14 3h6v6h-6zM14 15h6v6h-6zM10 9l4-3M10 11l4 6"/></svg>Pipeline 架构</a>
+        <a class="architecture-link" href="mail"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="m4 7 8 6 8-6"/></svg>邮件机器人</a>
         <button id="admin-auth-button" onclick="toggleAdminSession()">管理员登录</button>
         <button class="primary" onclick="refreshAll()">刷新</button>
       </div>

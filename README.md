@@ -239,6 +239,7 @@ python3 -m maxread.cli feedback --limit 50 --resolve-users
 ## Recruiting Mail Ingestion
 
 `features/mail_ingestion` is an independent, read-only IMAP collector and recruiting pipeline. It keeps mailbox credentials, raw messages, attachments, OAuth state, and SQLite data outside Git, while syncing candidate summaries and material documents to Feishu. See [`features/mail_ingestion/README.md`](features/mail_ingestion/README.md) for account setup, dry-run, backfill, weekly reporting, and systemd deployment.
+Its authenticated operations dashboard is served at `/maxread/mail` on the Aliyun admin host.
 
 ## Global Queue
 

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${MAXREAD_ROOT:-/opt/maxread}"
+MAIL_ROOT="$ROOT/features/mail_ingestion"
+ACCOUNT="${1:-all}"
+LOCK_FILE="/run/maxread-recruiting-manual.lock"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  printf '{"ok":false,"error":"another manual mail scan is running"}\n'
+  exit 75
+fi
+
+restore_service() {
+  systemctl start recruiting-pipeline.service || true
+}
+trap restore_service EXIT
+
+systemctl stop recruiting-pipeline.service
+cd "$ROOT"
+
+if [[ "$ACCOUNT" == "all" ]]; then
+  exec_env="features/mail_ingestion/data/accounts/zip-lab.env"
+  "$MAIL_ROOT/bin/recruiting-pipeline" --root "$ROOT" --env-file "$exec_env" scan-once
+else
+  if [[ ! "$ACCOUNT" =~ ^[a-z0-9-]+$ ]]; then
+    printf '{"ok":false,"error":"invalid account id"}\n'
+    exit 64
+  fi
+  env_file="$MAIL_ROOT/data/accounts/$ACCOUNT.env"
+  if [[ ! -f "$env_file" ]]; then
+    printf '{"ok":false,"error":"account environment not found"}\n'
+    exit 66
+  fi
+  collector=("$MAIL_ROOT/bin/mail-collector" scan --env-file "$env_file" --all-folders --include-system-folders)
+  for folder in arXiv Drafts Outbox Junk "Junk E-mail" "Virus Items" Deleted Trash Notes; do
+    collector+=(--exclude-folder "$folder")
+  done
+  "${collector[@]}"
+  "$MAIL_ROOT/bin/recruiting-pipeline" --root "$ROOT" --env-file features/mail_ingestion/data/accounts/zip-lab.env scan-once --skip-scan
+fi
