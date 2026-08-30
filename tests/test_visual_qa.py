@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from types import SimpleNamespace
 
@@ -105,7 +106,16 @@ class FormulaRepairLLM:
     def responses_text(self, system, user, **kwargs):
         self.calls += 1
         self.users.append(user)
-        return '{"repairs":[{"id":"formula","mode":"latex","value":"a=1\\\\text{ok}"}]}'
+        digest = re.search(r"BLOCK id=formula sha256=([0-9a-f]{64})", user).group(1)
+        return json.dumps({
+            "patches": [{
+                "block_id": "formula",
+                "expected_sha256": digest,
+                "operation": "replace_formula",
+                "old": r"\unsupportedmacro{x}",
+                "new": "a=1",
+            }]
+        })
 
 
 class RetryFormulaRepairLLM(FormulaRepairLLM):
@@ -114,7 +124,38 @@ class RetryFormulaRepairLLM(FormulaRepairLLM):
         self.users.append(user)
         if self.calls == 1:
             raise TimeoutError("upstream 524")
-        return '{"repairs":[{"id":"formula","mode":"latex","value":"a=1"}]}'
+        digest = re.search(r"BLOCK id=formula sha256=([0-9a-f]{64})", user).group(1)
+        return json.dumps({
+            "patches": [{
+                "block_id": "formula",
+                "expected_sha256": digest,
+                "operation": "replace_formula",
+                "old": r"\unsupportedmacro{x}",
+                "new": "a=1",
+            }]
+        })
+
+
+class ScopedPatchLLM:
+    def __init__(self, target="target", stale=False):
+        self.target = target
+        self.stale = stale
+        self.image_calls = []
+
+    def responses_image_text(self, system, user, image_path, **kwargs):
+        self.image_calls.append((user, image_path))
+        digest = re.search(rf"BLOCK id={self.target} sha256=([0-9a-f]{{64}})", user).group(1)
+        if self.stale:
+            digest = "0" * 64
+        return json.dumps({
+            "patches": [{
+                "block_id": self.target,
+                "expected_sha256": digest,
+                "operation": "replace_formula",
+                "old": r"\unsupportedmacro{b}",
+                "new": "b=1",
+            }]
+        })
 
 
 def test_repair_structural_blocks_downgrades_code_like_formula():
@@ -491,12 +532,61 @@ def test_controller_uses_model_after_deterministic_formula_repair_makes_no_chang
 
     assert result.passed is True
     assert llm.calls == 1
-    assert result.rounds[0].repair_strategy == "model-formula"
+    assert result.rounds[0].repair_strategy == "model-xml-patch"
     assert result.rounds[0].model_used is True
     assert "unsupported macro remained" in llm.users[0]
     assert "不得重复同样的无效修改" in llm.users[0]
+    assert "当前飞书文档格式源文件" in llm.users[0]
+    assert "sha256=" in llm.users[0]
     assert feishu.replacements[0][1] == "formula"
     assert "<latex>a=1" in feishu.replacements[0][2]
+
+
+def test_visual_patch_uses_screenshot_and_exact_xml_without_touching_other_block(tmp_path):
+    screenshot = tmp_path / "invalid.png"
+    screenshot.write_bytes(b"png")
+    feishu = FakeVisualFeishu(
+        '<title>T</title><p id="first"><latex>\\unsupportedmacro{a}</latex></p>'
+        '<p id="target">阅读价值：<latex>\\unsupportedmacro{b}</latex> 用 GEMV 补回。</p>'
+    )
+    llm = ScopedPatchLLM()
+    controller = StubVisualQA([
+        RemoteVisualResult(
+            status="issues",
+            findings=[VisualFinding(kind="invalid-formula", severity="high", screenshot=str(screenshot), autofixable=True)],
+        ),
+        RemoteVisualResult(status="ok"),
+    ])
+    controller.llm = llm
+
+    result = controller.run(feishu, "doc", source_id="paper")
+
+    assert result.passed is True
+    assert result.rounds[0].repair_strategy == "model-xml-patch"
+    assert [block_id for _url, block_id, _xml in feishu.replacements] == ["target"]
+    assert "<latex>b=1</latex>" in feishu.replacements[0][2]
+    assert llm.image_calls[0][1] == screenshot
+    assert "当前飞书文档格式源文件" in llm.image_calls[0][0]
+
+
+def test_visual_patch_rejects_stale_block_hash(tmp_path):
+    screenshot = tmp_path / "invalid.png"
+    screenshot.write_bytes(b"png")
+    feishu = FakeVisualFeishu('<title>T</title><p id="target"><latex>\\unsupportedmacro{b}</latex></p>')
+    llm = ScopedPatchLLM(stale=True)
+    controller = StubVisualQA([
+        RemoteVisualResult(
+            status="issues",
+            findings=[VisualFinding(kind="invalid-formula", severity="high", screenshot=str(screenshot), autofixable=True)],
+        )
+    ])
+    controller.llm = llm
+
+    result = controller.run(feishu, "doc", source_id="paper")
+
+    assert result.passed is False
+    assert feishu.replacements == []
+    assert "visual-repair:patch-stale-hash:target" in result.rounds[0].warnings
 
 
 def test_controller_retries_transient_visual_repair_model_failure():

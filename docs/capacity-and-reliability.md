@@ -111,11 +111,20 @@ generic instruction.
    are diagnostics only.
 5. Allow two inspect retries. A concrete visual issue can receive at most two
    bounded repairs, each followed by a real PDF recheck.
-6. Treat `export-pending`, browser transport, and remote-runner errors as
+6. Formula/raw-format findings are repaired as scoped XML patches, never by
+   regenerating a section. The multimodal repair call receives the failing
+   screenshot, current Feishu Docx XML, allowed block XML and SHA-256 hashes.
+   A patch must name an allowed block, match its current hash, and replace one
+   exact formula/text fragment. Unrelated XML is preserved by code.
+7. A visual finding without a block ID may use deterministic repair only when
+   the fresh document has exactly one repairable candidate. Ambiguous cases go
+   through screenshot + XML patch selection; do not scan-and-edit the first
+   suspicious block.
+8. Treat `export-pending`, browser transport, and remote-runner errors as
    infrastructure failures. The queue may retry infrastructure once.
-7. An infrastructure retry reloads the latest queue row and resumes the
+9. An infrastructure retry reloads the latest queue row and resumes the
    published checkpoint. It must not regenerate the paper.
-8. If the retry budget is exhausted, retain and return the published document
+10. If the retry budget is exhausted, retain and return the published document
    URL with an explicit manual-review status. Never discard an already useful
    document because PDF export was slow.
 

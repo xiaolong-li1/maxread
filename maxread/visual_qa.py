@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import re
@@ -351,11 +352,14 @@ class VisualQAController:
         strategies: List[str] = []
         model_response = ""
         if structural:
+            hinted_ids = _finding_block_ids(structural)
             structural_changed, structural_warnings, structural_blocks = repair_structural_blocks(
                 feishu,
                 doc_url,
                 ["visual-qa:repairable-structural"],
                 max_repairs=self.max_repairs,
+                allowed_block_ids=hinted_ids or None,
+                require_unique=not bool(hinted_ids),
             )
             changed = changed or structural_changed
             warnings.extend(structural_warnings)
@@ -375,7 +379,7 @@ class VisualQAController:
                 changed = changed or model_changed
                 warnings.extend(model_warnings)
                 blocks.extend(model_blocks)
-                strategies.append("model-formula" if model_response else "model-formula-unavailable")
+                strategies.append("model-xml-patch" if model_response else "model-xml-patch-unavailable")
             else:
                 strategies.append("deterministic-structural-no-change")
 
@@ -519,6 +523,8 @@ def repair_structural_blocks(
     doc_url: str,
     warnings: Iterable[str],
     max_repairs: int = 2,
+    allowed_block_ids: Optional[set[str]] = None,
+    require_unique: bool = False,
 ) -> tuple[bool, List[str], List[str]]:
     """Repair round-trip formula corruption using fresh block IDs."""
     if max_repairs <= 0 or not hasattr(feishu, "block_replace"):
@@ -537,6 +543,8 @@ def repair_structural_blocks(
         block_id = str(element.attrib.get("id") or "")
         if not block_id or element.tag.lower() not in _BLOCK_TAGS:
             continue
+        if allowed_block_ids is not None and block_id not in allowed_block_ids:
+            continue
         if any(child.tag.lower() in _RESOURCE_TAGS for child in element.iter() if child is not element):
             continue
         serialized = ET.tostring(element, encoding="unicode", short_empty_elements=True)
@@ -544,6 +552,9 @@ def repair_structural_blocks(
         repaired = _repair_raw_formatting_xml_block(repaired)
         if repaired and repaired != serialized:
             candidates.append((block_id, repaired))
+
+    if require_unique and len(candidates) != 1:
+        return False, [f"visual-repair:structural-ambiguous:{len(candidates)}"], []
 
     changed = False
     repaired_blocks: List[str] = []
@@ -559,18 +570,17 @@ def repair_structural_blocks(
     return changed, audit, repaired_blocks
 
 
-_VISUAL_FORMULA_REPAIR_SYSTEM = """你是飞书文档的公式和格式字符修复器。你只负责修复浏览器截图已经确认的“无效公式”或直接显示出来的 TeX/Markdown 控制字符。
+_VISUAL_FORMULA_REPAIR_SYSTEM = """你是飞书文档的视觉 XML 补丁生成器。你只负责修复浏览器截图已经确认的“无效公式”或直接显示出来的 TeX/Markdown 控制字符。
 
 只输出一个 JSON 对象，不要解释，不要代码围栏：
-{"repairs":[{"id":"已提供的 block id","mode":"latex|text|plain","value":"修复后的内容"}]}
+{"patches":[{"block_id":"已提供的 block id","expected_sha256":"已提供的哈希","operation":"replace_formula|replace_text","old":"原始精确片段","new":"修复后的精确片段"}]}
 
 硬约束：
-1. 只能使用输入中出现的 block id；不确定就返回空 repairs。
-2. mode=latex 时 value 只能是公式体，不要包 <latex>，不得包含 HTML、中文、Markdown 或美元符号。
-3. mode=text 时把公式降级为短文本/代码，只有原内容明显是代码或无法保持数学含义时才使用。
-4. mode=plain 只用于 KIND=raw 的正文 block，返回去掉控制命令后的可读纯文本，不要返回 Markdown、TeX 或 HTML。
-5. 不改变变量、上下标、数值、运算关系和语义；只修复不支持的宏、粘连命令、HTML/CJK 混入或非法转义。
-6. 不要返回 XML，不要修改未发现问题的 block。
+1. 只能使用输入中出现的 block_id 和对应 expected_sha256；不确定就返回空 patches。
+2. replace_formula 的 old/new 都是单个公式内的精确 TeX 片段，不要包 <latex>，old 必须能在该 block 中唯一匹配。
+3. replace_text 只替换正文里的精确可见字符串，不得触碰公式、代码、数字、表格或其他 block。
+4. 不改变变量、上下标、数值、运算关系和语义；只修复不支持的宏、粘连命令、HTML/CJK 混入或非法转义。
+5. 不要返回整段、整节或完整 XML；只返回最小 old -> new patch。
 """
 
 
@@ -598,12 +608,21 @@ def repair_formula_blocks_with_llm(
     except Exception as exc:
         return False, [f"visual-repair:model-fetch-failed:{_clip(str(exc))}"], [], ""
 
-    candidates = _structural_block_candidates(root, max_candidates=max(64, max_repairs * 16))
+    candidates = _structural_block_candidates(root, max_candidates=512)
     if not candidates:
         return False, ["visual-repair:model-no-structural-block"], [], ""
     hinted_ids = _finding_block_ids(findings)
     if hinted_ids:
         candidates.sort(key=lambda item: (item["id"] not in hinted_ids, item["id"]))
+    prompt_candidates = []
+    prompt_chars = 0
+    for candidate in candidates:
+        serialized_chars = len(candidate["xml"]) + 120
+        if prompt_candidates and prompt_chars + serialized_chars > 120_000:
+            break
+        prompt_candidates.append(candidate)
+        prompt_chars += serialized_chars
+    candidates = prompt_candidates
     candidate_by_id = {item["id"]: item for item in candidates}
     finding_text = "\n".join(
         f"- {finding.kind}: {finding.detail} [section={finding.section}] "
@@ -612,9 +631,11 @@ def repair_formula_blocks_with_llm(
         if finding.kind in {"invalid-formula", "raw-formatting"}
     ) or "- 浏览器发现公式或格式控制字符无法正常渲染"
     formula_text = "\n".join(
-        f"BLOCK id={item['id']}\nKIND={item['kind']}\nFORMULA={item['formula']}\nCONTEXT={item['context']}"
+        f"BLOCK id={item['id']} sha256={item['sha256']}\nXML={item['xml']}"
         for item in candidates
     )
+    document_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    document_source = content if len(content) <= 100_000 else "[完整 XML 超过 100000 字符；以下 BLOCK XML 是允许修改的精确源块]"
     history_text = "\n".join(f"- {item}" for item in _dedupe_text(previous_feedback)) or "- 无"
     user = f"""浏览器截图质检发现以下问题：
 {finding_text}
@@ -622,7 +643,13 @@ def repair_formula_blocks_with_llm(
 之前轮次的失败与修复记录（不得重复同样的无效修改）：
 {history_text}
 
-下面是当前文档中可疑的公式 block。只修复确实相关的 block：
+当前飞书文档 XML SHA256：{document_hash}
+当前飞书文档格式源文件：
+```xml
+{document_source}
+```
+
+下面是允许生成补丁的精确 block 及哈希。只修复截图中确实相关的 block：
 {formula_text}
 """
 
@@ -646,60 +673,40 @@ def repair_formula_blocks_with_llm(
     payload = _parse_model_json(raw)
     if not isinstance(payload, dict):
         return False, ["visual-repair:model-invalid-json"], [], raw[:20000]
-    repairs = payload.get("repairs")
-    if not isinstance(repairs, list):
+    patches = payload.get("patches")
+    if not isinstance(patches, list):
         return False, ["visual-repair:model-invalid-schema"], [], raw[:20000]
 
     changed = False
     warnings: List[str] = []
     repaired_blocks: List[str] = []
-    for item in repairs[:max_repairs]:
+    for item in patches[:max_repairs]:
         if not isinstance(item, dict):
             continue
-        block_id = str(item.get("id") or "")
+        block_id = str(item.get("block_id") or "")
         candidate = candidate_by_id.get(block_id)
         if candidate is None:
             warnings.append(f"visual-repair:model-unknown-block:{_clip(block_id)}")
             continue
-        mode = str(item.get("mode") or "latex").strip().lower()
-        value = html.unescape(str(item.get("value") or "")).strip()
-        value = re.sub(r"</?latex[^>]*>", "", value, flags=re.I).strip()
-        if mode == "plain" and candidate["kind"] == "raw":
-            plain = re.sub(r"<[^>]+>", "", value)
-            plain = " ".join(plain.split())
-            if not plain or _raw_block_has_formatting_artifact(plain):
-                warnings.append(f"visual-repair:model-invalid-plain:{block_id}")
-                continue
-            replacement = _plain_block_xml(candidate, plain)
-        elif mode == "text" and candidate["kind"] == "formula":
-            replacement = re.sub(
-                _FORMULA_RE,
-                lambda _match: f"<code>{html.escape(_strip_latex_for_text(value), quote=False)}</code>",
-                candidate["xml"],
-                count=1,
-            )
-        elif mode == "latex" and candidate["kind"] == "formula":
-            body = _normalize_latex_body(value)
-            if not _is_valid_latex_body(body):
-                warnings.append(f"visual-repair:model-invalid-latex:{block_id}")
-                continue
-            replacement = re.sub(
-                _FORMULA_RE,
-                lambda _match: f"<latex>{html.escape(body, quote=False)}</latex>",
-                candidate["xml"],
-                count=1,
-            )
-        else:
-            warnings.append(f"visual-repair:model-invalid-mode:{block_id}")
+        expected_hash = str(item.get("expected_sha256") or "")
+        if expected_hash != candidate["sha256"]:
+            warnings.append(f"visual-repair:patch-stale-hash:{block_id}")
             continue
-        if replacement == candidate["xml"]:
+        operation = str(item.get("operation") or "").strip().lower()
+        old = html.unescape(str(item.get("old") or ""))
+        new = html.unescape(str(item.get("new") or ""))
+        replacement, patch_error = _apply_scoped_xml_patch(candidate, operation, old, new)
+        if patch_error:
+            warnings.append(f"visual-repair:patch-{patch_error}:{block_id}")
+            continue
+        if not replacement or replacement == candidate["xml"]:
             continue
         replacement = re.sub(r'\s+id="[^"]+"', "", replacement, count=1)
         try:
             feishu.block_replace(doc_url, block_id, replacement)
             changed = True
             repaired_blocks.append(block_id)
-            warnings.append(f"visual-repair:model-block:{block_id}")
+            warnings.append(f"visual-repair:patch-block:{block_id}:{candidate['sha256'][:12]}")
         except Exception as exc:
             warnings.append(f"visual-repair:model-block-failed:{block_id}:{_clip(str(exc))}")
     if not changed and not warnings:
@@ -737,11 +744,70 @@ def _structural_block_candidates(root: ET.Element, max_candidates: int = 24) -> 
                 "xml": serialized,
                 "tag": element.tag,
                 "attrs": attrs,
+                "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
             }
         )
         if len(candidates) >= max_candidates:
             break
     return candidates
+
+
+def _apply_scoped_xml_patch(
+    candidate: Dict[str, str],
+    operation: str,
+    old: str,
+    new: str,
+) -> tuple[str, str]:
+    if not old or old == new or any(token in new for token in ("<latex", "</latex>", "$$")):
+        return "", "invalid-content"
+    try:
+        element = ET.fromstring(candidate["xml"])
+    except ET.ParseError:
+        return "", "invalid-source-xml"
+    hits = 0
+    if operation == "replace_formula":
+        if re.search(r"[<>]|[\u4e00-\u9fff]", new):
+            return "", "invalid-formula-content"
+        for formula in element.iter("latex"):
+            value = str(formula.text or "")
+            count = value.count(old)
+            if count:
+                formula.text = value.replace(old, new)
+                hits += count
+        if hits != 1:
+            return "", f"formula-match-count-{hits}"
+        for formula in element.iter("latex"):
+            body = _normalize_latex_body(str(formula.text or ""))
+            if not _is_valid_latex_body(body):
+                return "", "invalid-latex"
+            formula.text = body
+    elif operation == "replace_text":
+        if any(token in new for token in ("<", ">")) or _raw_block_has_formatting_artifact(new):
+            return "", "invalid-text-content"
+
+        def replace_text(node: ET.Element, protected: bool = False) -> None:
+            nonlocal hits
+            protected = protected or node.tag.lower() in {"latex", "code", "pre"}
+            if not protected and node.text:
+                count = node.text.count(old)
+                if count:
+                    node.text = node.text.replace(old, new)
+                    hits += count
+            for child in node:
+                replace_text(child, protected)
+                if not protected and child.tail:
+                    count = child.tail.count(old)
+                    if count:
+                        child.tail = child.tail.replace(old, new)
+                        hits += count
+
+        replace_text(element)
+        if hits != 1:
+            return "", f"text-match-count-{hits}"
+    else:
+        return "", "invalid-operation"
+    element.attrib.pop("id", None)
+    return ET.tostring(element, encoding="unicode", short_empty_elements=True), ""
 
 
 def _raw_block_has_formatting_artifact(text: str) -> bool:
