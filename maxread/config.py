@@ -54,8 +54,13 @@ class Settings:
     batch_max_items: int
     feedback_url: str
     queue_workers: int
+    queue_source_kinds: tuple[str, ...]
     queue_stale_minutes: int
     queue_heartbeat_seconds: int
+    worker_coordinator_url: str
+    worker_token: str
+    worker_name: str
+    worker_poll_seconds: float
     visual_qa_enabled: bool
     visual_qa_host: str
     visual_qa_runner: str
@@ -117,8 +122,17 @@ class Settings:
             batch_max_items=int(os.environ.get("MAXREAD_BATCH_MAX_ITEMS", "6")),
             feedback_url=os.environ.get("MAXREAD_FEEDBACK_URL", ""),
             queue_workers=int(os.environ.get("MAXREAD_QUEUE_WORKERS", os.environ.get("MAXREAD_BATCH_WORKERS", "2"))),
+            queue_source_kinds=tuple(
+                item.strip().lower()
+                for item in os.environ.get("MAXREAD_QUEUE_SOURCE_KINDS", "paper,article").split(",")
+                if item.strip().lower() in {"paper", "article"}
+            ),
             queue_stale_minutes=int(os.environ.get("MAXREAD_QUEUE_STALE_MINUTES", "30")),
             queue_heartbeat_seconds=int(os.environ.get("MAXREAD_QUEUE_HEARTBEAT_SECONDS", "15")),
+            worker_coordinator_url=os.environ.get("MAXREAD_WORKER_COORDINATOR_URL", "").rstrip("/"),
+            worker_token=os.environ.get("MAXREAD_WORKER_TOKEN", ""),
+            worker_name=os.environ.get("MAXREAD_WORKER_NAME", "").strip(),
+            worker_poll_seconds=max(0.5, float(os.environ.get("MAXREAD_WORKER_POLL_SECONDS", "2"))),
             visual_qa_enabled=os.environ.get("MAXREAD_VISUAL_QA_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
             visual_qa_host=os.environ.get("MAXREAD_VISUAL_QA_HOST", "").strip(),
             visual_qa_runner=os.environ.get("MAXREAD_VISUAL_QA_RUNNER", "").strip(),

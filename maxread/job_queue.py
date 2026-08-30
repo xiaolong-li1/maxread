@@ -77,7 +77,10 @@ class QueueManager:
                     time.sleep(2)
                     continue
                 worker_id = f"{self.manager_id}:{threading.current_thread().name}"
-                job = store.claim_next_queue_job(worker_id=worker_id)
+                job = store.claim_next_queue_job(
+                    worker_id=worker_id,
+                    source_kinds=tuple(getattr(self.settings, "queue_source_kinds", ())),
+                )
             except Exception:
                 store.close()
                 time.sleep(2)
@@ -302,41 +305,7 @@ class QueueManager:
         infrastructure; the durable checkpoint and failure ledger make the
         replay idempotent. Source absence and cancellation stay manual.
         """
-        budget = max(0, int(getattr(self.settings, "auto_retry_attempts", 0)))
-        current = store.get_queue_job(int(job["id"])) or dict(job)
-        auto_retries = max(0, int(current.get("auto_retry_count") or 0))
-        if auto_retries >= budget or not _is_auto_retryable_error(error):
-            return False
-        # A failed write may have already created a partial document. Only
-        # replay it automatically after a durable publish checkpoint exists;
-        # otherwise leave it visible for an operator to inspect.
-        checkpoint = str(current.get("checkpoint_json") or "").strip()
-        if not checkpoint and any(
-            marker in str(error or "").lower()
-            for marker in ("feishu", "create_docx", "overwrite_docx", "insert_image", "publish_docx")
-        ):
-            return False
-        if not store.fail_queue_job(job["id"], error, worker_id=worker_id):
-            return False
-        resume_published = bool(checkpoint) and any(
-            marker in str(error or "").lower()
-            for marker in (
-                "visual-qa",
-                "browser",
-                "export",
-                "pdf",
-                "post-publish",
-                "remote-error",
-                "infrastructure",
-            )
-        )
-        return store.retry_queue_job(
-            job["id"],
-            reason=f"automatic retry {auto_retries + 1}/{budget}: {str(error)[:700]}",
-            event_type="auto_retry",
-            suppress_progress_notifications=bool(job.get("suppress_progress_notifications")),
-            rebuild_pipeline=False if resume_published else bool(current.get("rebuild_pipeline")),
-        )
+        return auto_retry_queue_job(self.settings, store, job, error, worker_id)
 
     def _start_job_heartbeat(self, job_id: int, worker_id: str):
         stop = threading.Event()
@@ -359,6 +328,41 @@ class QueueManager:
         thread = threading.Thread(target=run, name=f"maxread-heartbeat-{job_id}", daemon=True)
         thread.start()
         return stop, thread
+
+
+def auto_retry_queue_job(settings, store: Store, job, error: str, worker_id: str) -> bool:
+    budget = max(0, int(getattr(settings, "auto_retry_attempts", 0)))
+    current = store.get_queue_job(int(job["id"])) or dict(job)
+    auto_retries = max(0, int(current.get("auto_retry_count") or 0))
+    if auto_retries >= budget or not _is_auto_retryable_error(error):
+        return False
+    checkpoint = str(current.get("checkpoint_json") or "").strip()
+    if not checkpoint and any(
+        marker in str(error or "").lower()
+        for marker in ("feishu", "create_docx", "overwrite_docx", "insert_image", "publish_docx")
+    ):
+        return False
+    if not store.fail_queue_job(job["id"], error, worker_id=worker_id):
+        return False
+    resume_published = bool(checkpoint) and any(
+        marker in str(error or "").lower()
+        for marker in (
+            "visual-qa",
+            "browser",
+            "export",
+            "pdf",
+            "post-publish",
+            "remote-error",
+            "infrastructure",
+        )
+    )
+    return store.retry_queue_job(
+        job["id"],
+        reason=f"automatic retry {auto_retries + 1}/{budget}: {str(error)[:700]}",
+        event_type="auto_retry",
+        suppress_progress_notifications=bool(job.get("suppress_progress_notifications")),
+        rebuild_pipeline=False if resume_published else bool(current.get("rebuild_pipeline")),
+    )
 
 
 class _LimitedLLM:

@@ -230,8 +230,8 @@ is not public and does not alter Aliyun's default route. If it disappears,
 arXiv fails quickly while Feishu/OpenAI/SSH continue direct.
 
 Aliyun currently has **no ZeroTier client and no ZeroTier address**. The old
-`ziplab-5090` address `10.214.232.45` belongs to the retired 5090 deployment and
-must not be used as the paper listener, admin backend or visual-QA host.
+`ziplab-5090` address `10.214.232.45` hosts the remote paper-compute worker and
+its local visual-QA runner; it must not run the paper listener or admin backend.
 ZeroTier may still be useful from a maintainer laptop to reach old/internal
 machines, but it is not in the Aliyun production data path. The arXiv reverse
 tunnel is SSH-based, not ZeroTier-based.
@@ -285,7 +285,8 @@ of echoing values.
    `nginx -t` before reload.
 8. Commit and push the exact tested source to GitHub.
 
-Do not start a second Feishu listener on 5090 or a laptop. It can consume the
+Do not start a second Feishu listener on 5090 or a laptop. Only the SSH tunnel
+and remote paper-worker units run there. A second listener can consume the
 same event and cause duplicate acknowledgements/documents.
 
 ## 8. Routine health checks

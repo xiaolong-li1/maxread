@@ -1576,10 +1576,19 @@ class Store:
                 else:
                     cur = self.conn.execute(
                         """
-                        insert into queue_jobs (dedupe_key, source_kind, source_id, source_url, status)
-                        values (?, ?, ?, ?, 'queued')
+                        insert into queue_jobs (
+                            dedupe_key, source_kind, source_id, source_url, status,
+                            suppress_progress_notifications
+                        )
+                        values (?, ?, ?, ?, 'queued', ?)
                         """,
-                        (dedupe_key, source_kind, source_id, source_url),
+                        (
+                            dedupe_key,
+                            source_kind,
+                            source_id,
+                            source_url,
+                            1 if suppress_progress_notifications else 0,
+                        ),
                     )
                     job_id = int(cur.lastrowid)
                     created = True
@@ -1657,16 +1666,28 @@ class Store:
         row = self.conn.execute("select count(*) as n from queue_jobs where status = 'queued'").fetchone()
         return int(row["n"])
 
-    def claim_next_queue_job(self, worker_id: str = ""):
+    def claim_next_queue_job(self, worker_id: str = "", source_kinds: tuple[str, ...] = ()):
         try:
             self.conn.execute("begin immediate")
+            kinds = tuple(
+                kind for kind in (str(item).strip().lower() for item in source_kinds)
+                if kind in {"paper", "article"}
+            )
+            kind_clause = ""
+            params: list[object] = []
+            if kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                kind_clause = f"and source_kind in ({placeholders})"
+                params.extend(kinds)
             row = self.conn.execute(
-                """
+                f"""
                 select * from queue_jobs
                 where status = 'queued'
+                  {kind_clause}
                 order by priority desc, id asc
                 limit 1
-                """
+                """,
+                params,
             ).fetchone()
             if row is None:
                 self.conn.execute("commit")

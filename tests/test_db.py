@@ -122,6 +122,51 @@ def test_store_queue_jobs_and_watchers(tmp_path):
     store.close()
 
 
+def test_queue_claim_can_filter_worker_source_kinds(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    article_usage = store.add_usage_event(
+        "evt-a", "om-a", "oc", "p2p", "ou", "article", "article-1", "url", status="queued"
+    )
+    article = store.enqueue_job(
+        "article", "article-1", "url", "evt-a", "om-a", "oc", "p2p", "ou", article_usage
+    )
+    paper_usage = store.add_usage_event(
+        "evt-p", "om-p", "oc", "p2p", "ou", "paper", "2604.12946", "url", status="queued"
+    )
+    paper = store.enqueue_job(
+        "paper", "2604.12946", "url", "evt-p", "om-p", "oc", "p2p", "ou", paper_usage
+    )
+
+    claimed = store.claim_next_queue_job(worker_id="article-worker", source_kinds=("article",))
+
+    assert claimed["id"] == article["job_id"]
+    assert store.get_queue_job(paper["job_id"])["status"] == "queued"
+    store.close()
+
+
+def test_new_queue_job_persists_suppressed_progress_flag(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage = store.add_usage_event(
+        "evt", "om", "internal", "internal", "system", "paper", "2604.12946", "url", status="queued"
+    )
+
+    queued = store.enqueue_job(
+        "paper",
+        "2604.12946",
+        "url",
+        "evt",
+        "om",
+        "internal",
+        "internal",
+        "system",
+        usage,
+        suppress_progress_notifications=True,
+    )
+
+    assert store.get_queue_job(queued["job_id"])["suppress_progress_notifications"] == 1
+    store.close()
+
+
 def test_legacy_cache_refresh_reuses_terminal_queue_job(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     store.upsert_paper("2604.12946", "done", doc_url="https://old-doc")

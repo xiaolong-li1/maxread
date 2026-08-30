@@ -242,7 +242,7 @@ python3 -m maxread.cli feedback --limit 50 --resolve-users
 
 ## Global Queue
 
-`listen` now enqueues supported Feishu messages and starts background worker threads in the same process. This keeps the event listener responsive while papers are processed concurrently.
+`listen` enqueues supported Feishu messages and starts role-filtered background workers. In production Aliyun claims `article` only, while the authenticated 5090 remote worker claims `paper`; Aliyun remains the single database and notification owner. See [`docs/remote-paper-worker.md`](docs/remote-paper-worker.md) for the deployed split, tunnel, recovery and rollback procedure.
 
 The durable queue lifecycle is modeled as a state machine with audited transitions, bounded generation/quality/visual repair loops, worker leases, and publish checkpoints. See [`docs/workflow-state-machine.md`](docs/workflow-state-machine.md) for the lifecycle and recovery invariants. The admin server exposes the live executable specification at `/architecture` and `/api/workflow-spec`; both are generated from `maxread/workflow.py` instead of a second handwritten state graph.
 
@@ -259,10 +259,11 @@ python3 -m maxread.cli retry-job 1
 Queue settings:
 
 ```bash
-MAXREAD_QUEUE_WORKERS=3
+MAXREAD_QUEUE_WORKERS=2
+MAXREAD_QUEUE_SOURCE_KINDS=paper,article
 MAXREAD_QUEUE_STALE_MINUTES=30
 MAXREAD_QUEUE_HEARTBEAT_SECONDS=15
-MAXREAD_LLM_CONCURRENCY=2
+MAXREAD_LLM_CONCURRENCY=5
 MAXREAD_FEISHU_CONCURRENCY=1
 ```
 

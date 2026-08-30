@@ -309,6 +309,53 @@ def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
         thread.join(timeout=3)
 
 
+def test_worker_coordinator_requires_bearer_token_and_claims_paper(tmp_path, monkeypatch):
+    token = "worker-test-token"
+    settings = SimpleNamespace(
+        db_path=tmp_path / "maxread.sqlite3",
+        admin_password_hash="",
+        lark_cli="lark-cli",
+        feishu_as="bot",
+        worker_token=token,
+        auto_retry_attempts=0,
+    )
+    store = Store(settings.db_path)
+    usage = store.add_usage_event(
+        "evt", "om", "oc", "p2p", "ou", "paper", "2604.12946", "url", status="queued"
+    )
+    store.enqueue_job("paper", "2604.12946", "url", "evt", "om", "oc", "p2p", "ou", usage)
+    store.close()
+    monkeypatch.setattr("maxread.remote_worker._notify_watchers_started", lambda *_args, **_kwargs: None)
+    server = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+
+    try:
+        body = json.dumps({"worker_id": "remote:5090:test"})
+        connection.request("POST", "/api/worker/claim", body=body, headers={"content-type": "application/json"})
+        response = connection.getresponse()
+        assert response.status == 403
+        response.read()
+
+        connection.request(
+            "POST",
+            "/api/worker/claim",
+            body=body,
+            headers={"content-type": "application/json", "authorization": f"Bearer {token}"},
+        )
+        response = connection.getresponse()
+        result = json.loads(response.read().decode())
+        assert response.status == 200
+        assert result["job"]["source_id"] == "2604.12946"
+        assert result["job"]["worker_id"] == "remote:5090:test"
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
 def test_admin_session_can_overlay_web_identity_without_replacing_own_cookie(tmp_path):
     password = "admin-pass"
     settings = SimpleNamespace(

@@ -21,6 +21,13 @@ from .config import Settings
 from .db import Store
 from .feedback import count_feedback_by_status, visible_feedback_rows
 from .review import visible_review_issues
+from .remote_worker import (
+    coordinator_claim,
+    coordinator_event,
+    coordinator_finish,
+    coordinator_heartbeat,
+    coordinator_transition,
+)
 from .web_submit import (
     WEB_SESSION_COOKIE,
     WEB_SUBMIT_HTML,
@@ -33,6 +40,7 @@ from .web_submit import (
     web_identity_payload,
 )
 from .web_pet import chat_with_project_pet, progress_payload
+from .workflow import InvalidWorkflowTransition
 
 
 DEFAULT_LIMIT = 80
@@ -270,6 +278,28 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        worker_handlers = {
+            "/api/worker/claim": coordinator_claim,
+            "/api/worker/heartbeat": coordinator_heartbeat,
+            "/api/worker/transition": coordinator_transition,
+            "/api/worker/event": coordinator_event,
+            "/api/worker/finish": coordinator_finish,
+        }
+        if parsed.path in worker_handlers:
+            if not self._require_worker():
+                return
+            try:
+                payload = self._read_json()
+                self._json_response(
+                    self._with_store(
+                        lambda store: worker_handlers[parsed.path](self.server.settings, store, payload)
+                    )
+                )
+            except (TypeError, ValueError, InvalidWorkflowTransition) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            except Exception as exc:
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc)[:500])
+            return
         if parsed.path == "/api/web/submit":
             if not self.server.allow_web_submission(self._client_id()):
                 self._error(HTTPStatus.TOO_MANY_REQUESTS, "提交过于频繁，请稍后再试")
@@ -484,6 +514,15 @@ class AdminHandler(BaseHTTPRequestHandler):
         if self._is_admin():
             return True
         self._error(HTTPStatus.UNAUTHORIZED, "需要管理员登录")
+        return False
+
+    def _require_worker(self) -> bool:
+        expected = str(getattr(self.server.settings, "worker_token", "") or "")
+        authorization = str(self.headers.get("authorization", "") or "")
+        provided = authorization.removeprefix("Bearer ").strip()
+        if expected and provided and secrets.compare_digest(expected, provided):
+            return True
+        self._error(HTTPStatus.FORBIDDEN, "worker authentication failed")
         return False
 
     def _session_cookie(self, token: str, max_age: int = ADMIN_SESSION_SECONDS) -> str:

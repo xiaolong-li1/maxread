@@ -1054,7 +1054,7 @@ def test_section_output_rejects_malformed_nested_heading():
     assert "malformed nested heading" in errors
 
 
-def test_section_length_budget_applies_to_all_prose_but_not_tables():
+def test_section_length_check_enforces_minimum_but_never_rejects_long_prose():
     oversized_closing = "## 6. 局限性与开放问题\n\n" + ("冗长说明。" * 700) + "\n\n## 7. 整体评价\n\n结论。"
     large_method = "## 3. 方法框架\n\n" + ("必要推导。" * 1800)
     compact_with_large_table = "## 4. 实验结果\n\n" + ("关键结论。" * 100) + "\n\n|配置|结果|\n|---|---|\n" + ("|A|1|\n" * 2000)
@@ -1063,8 +1063,8 @@ def test_section_length_budget_applies_to_all_prose_but_not_tables():
     method_errors = _section_output_errors(large_method, "method", [], [])
     experiment_errors = _section_output_errors(compact_with_large_table, "experiments", [], [])
 
-    assert any("narrative too long" in error for error in closing_errors)
-    assert any("narrative too long" in error for error in method_errors)
+    assert not any("narrative too long" in error for error in closing_errors)
+    assert not any("narrative too long" in error for error in method_errors)
     assert not any("narrative too long" in error for error in experiment_errors)
 
 

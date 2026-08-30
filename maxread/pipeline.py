@@ -1086,9 +1086,6 @@ def _section_output_errors(markdown: str, section: str, markers: List[str], tabl
         minimum = 250
     if narrative_length < minimum:
         errors.append(f"section narrative too short:{narrative_length}<{minimum}")
-    maximum = {"front": 4800, "method": 9000, "experiments": 6000, "ablation": 7000, "closing": 3000}.get(section)
-    if maximum is not None and narrative_length > maximum:
-        errors.append(f"section narrative too long:{narrative_length}>{maximum}; keep tables, compress prose")
     allowed_markers = set(markers)
     found_markers = re.findall(r"\[MaxReadFigure:[^\]]+\]", text)
     for marker in markers:

@@ -1,0 +1,13 @@
+[Unit]
+Description=MaxRead worker to Aliyun coordinator tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -NT -i /home/lixiaolong/.ssh/maxread_aliyun_tunnel -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -L 127.0.0.1:18765:127.0.0.1:8765 -L 127.0.0.1:18890:127.0.0.1:17890 root@47.103.111.28
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

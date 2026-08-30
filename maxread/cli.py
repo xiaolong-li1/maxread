@@ -20,6 +20,7 @@ from .help import group_intro_message, intro_message, plain_message_text, should
 from .job_queue import QueueManager, _queue_eta_text, enqueue_event_items, run_worker_forever
 from .openai_client import OpenAIClient
 from .pipeline import MaxReadPipeline
+from .remote_worker import run_remote_paper_worker
 from .models import PaperRef
 from .sources import WebRef, extract_supported_inputs, is_supported_web_article_url
 from .web_article import WebArticleClient
@@ -48,6 +49,7 @@ def main(argv: List[str] | None = None) -> int:
 
     p_worker = sub.add_parser("worker", help="Run queue workers without listening to Feishu events")
     p_worker.add_argument("--no-openai", action="store_true", help="Use fallback document instead of OpenAI")
+    sub.add_parser("paper-worker", help="Run a remote paper worker against the Aliyun coordinator")
 
     p_event = sub.add_parser("handle-event", help="Handle one Feishu event JSON from stdin")
     p_event.add_argument("--no-openai", action="store_true")
@@ -120,6 +122,10 @@ def main(argv: List[str] | None = None) -> int:
     # process with no listening port.
     if args.cmd == "admin":
         run_admin_server(settings, host=args.host, port=args.port)
+        return 0
+    if args.cmd == "paper-worker":
+        settings.workdir.mkdir(parents=True, exist_ok=True)
+        run_remote_paper_worker(settings)
         return 0
 
     settings.workdir.mkdir(parents=True, exist_ok=True)

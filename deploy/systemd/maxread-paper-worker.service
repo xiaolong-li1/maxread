@@ -1,0 +1,17 @@
+[Unit]
+Description=MaxRead remote paper worker
+After=network-online.target maxread-aliyun-tunnel.service
+Requires=maxread-aliyun-tunnel.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/lixiaolong/projects/maxread
+Environment=PYTHONPATH=/home/lixiaolong/projects/maxread
+Environment=PATH=/home/lixiaolong/.local/node/bin:/home/lixiaolong/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/lixiaolong/projects/maxread/.venv/bin/python -m maxread.cli paper-worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

@@ -174,6 +174,8 @@ class WebPetAgent:
         events = self.store.list_job_events(job_id, 16)
         heartbeat_age = _elapsed_seconds(job.get("heartbeat_at")) if job.get("heartbeat_at") else None
         stage_age = _elapsed_seconds(job.get("stage_updated_at") or job.get("updated_at"))
+        worker_id = str(job.get("worker_id") or "")
+        execution_node = "5090" if worker_id.startswith("remote:") else "阿里云"
         return {
             "project": {
                 "job_id": job_id,
@@ -186,6 +188,8 @@ class WebPetAgent:
                 "stage_age_seconds": stage_age,
                 "error": _friendly_error(str(job.get("error") or "")),
                 "has_publish_checkpoint": bool(str(job.get("checkpoint_json") or "").strip()),
+                "worker_id": worker_id,
+                "execution_node": execution_node,
             },
             "events": [
                 {
@@ -195,7 +199,11 @@ class WebPetAgent:
                 }
                 for event in events[:10]
             ],
-            "artifacts": _project_artifact_snapshot(self.settings, str(job.get("source_id") or "")),
+            "artifacts": (
+                {"location": "5090", "recent_files": []}
+                if worker_id.startswith("remote:")
+                else _project_artifact_snapshot(self.settings, str(job.get("source_id") or ""))
+            ),
             "service": self.store.get_service_status(),
         }
 
@@ -208,7 +216,18 @@ class WebPetAgent:
         stage_age = int(project.get("stage_age_seconds") or 0)
         artifacts = snapshot.get("artifacts") or {}
         recent_files = artifacts.get("recent_files") or []
-        evidence = f"最近产物：{recent_files[0]}。" if recent_files else "目前还没有新的阶段产物。"
+        execution_node = str(project.get("execution_node") or "阿里云")
+        if execution_node == "5090":
+            timing = next(
+                (
+                    event for event in snapshot.get("events") or []
+                    if event.get("event") in {"remote_llm_call_started", "remote_llm_call_finished", "remote_llm_call_failed"}
+                ),
+                None,
+            )
+            evidence = f"执行节点：5090。最近模型事件：{timing.get('detail')}。" if timing else "执行节点：5090，正在等待新的远端阶段事件。"
+        else:
+            evidence = f"最近产物：{recent_files[0]}。" if recent_files else "目前还没有新的阶段产物。"
         if status == "queued":
             position = self.store.queue_position(int(project.get("job_id") or 0))
             return f"我查了队列和事件：任务仍在等待调度，当前约第 {max(1, position)} 位，没有被 worker 卡死。{evidence}"
