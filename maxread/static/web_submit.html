@@ -563,6 +563,7 @@
     }
 
     async function loadMe() {
+      const previousIdentity = state.me?.public_id || '';
       try {
         state.me = await api('/api/web/me');
       } catch (error) {
@@ -571,6 +572,7 @@
         sessionStorage.removeItem('maxreadActAs');
         state.me = await api('/api/web/me');
       }
+      if (previousIdentity && previousIdentity !== state.me.public_id) state.selectedProjects.clear();
       const button = $('account-button');
       button.classList.toggle('bound', state.me.bound);
       button.querySelector('.account-label').textContent = state.me.acting_as ? `管理员 · ${state.me.display_name}` : (state.me.bound ? state.me.display_name : '游客');
