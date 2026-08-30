@@ -625,9 +625,11 @@ def remove_figure_markers(markdown: str, markers: Iterable[str]) -> str:
 def normalize_figure_captions(
     markdown: str,
     inserts: Iterable[Tuple[str, Path, str]],
+    visual_descriptions: Optional[Dict[str, str]] = None,
 ) -> str:
     """Compile model-written figure notes into numbered, plain caption paragraphs."""
     source_captions = {marker: caption for marker, _path, caption in inserts}
+    visuals = visual_descriptions or {}
     marker_pattern = re.compile(r"^\s*(\[MaxReadFigure:[^\]\n]+\])\s*$")
     lines = str(markdown or "").splitlines()
     output: List[str] = []
@@ -654,10 +656,12 @@ def normalize_figure_captions(
         raw_caption = " ".join(caption_lines)
         caption = _clean_figure_caption_text(raw_caption)
         if not caption:
-            caption = _short_caption(source_captions.get(marker, ""), max_chars=240)
+            caption = _clean_figure_caption_text(source_captions.get(marker, ""))
+        visual = _clean_figure_caption_text(visuals.get(marker, ""))
+        if visual and _looks_english(caption) and not _looks_english(visual):
+            caption = visual
         if not caption:
             caption = "论文关键图。"
-        caption = _short_caption(caption, max_chars=180)
         if caption[-1:] not in "。！？.!?":
             caption += "。"
         output.extend(["", f"图 {figure_number}\u3000{caption}", ""])

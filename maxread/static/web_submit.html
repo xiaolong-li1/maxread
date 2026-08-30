@@ -625,11 +625,16 @@
       const categoryControl = project.category_source === 'status'
         ? '<span class="category-pending">完成后由 Max 自动归类</span>'
         : `<select class="category-select" aria-label="调整项目分类" onchange="changeCategory('${esc(project.source_id)}', this.value)">${categoryOptions(project.category)}</select><span class="project-updated">${categoryLabel}</span>`;
+      const retryHistory = [];
+      if (Number(project.user_retries || 0) > 0) retryHistory.push(`用户重试 ${Number(project.user_retries)} 次`);
+      if (Number(project.auto_retries || 0) > 0) retryHistory.push(`自动重试 ${Number(project.auto_retries)} 次`);
+      if (Number(project.service_recoveries || 0) > 0) retryHistory.push(`服务恢复 ${Number(project.service_recoveries)} 次`);
+      const retrySummary = retryHistory.length ? ` · ${retryHistory.join(' · ')}` : '';
       return `<article class="project-row ${status === 'done' ? 'completed' : ''}" data-source="${esc(project.source_id)}" data-category="${esc(project.category || '其他')}">
         <div class="project-card ${esc(status)}">
           <div class="project-main">
             <div class="project-top">
-              <div class="project-title"><strong>${esc(title)}</strong><span>arXiv ${esc(project.source_id)} · 第 ${Math.max(1, Number(project.attempts || 1))} 次尝试</span></div>
+              <div class="project-title"><strong>${esc(title)}</strong><span>arXiv ${esc(project.source_id)}${esc(retrySummary)}</span></div>
               <span class="project-state ${esc(status)}">${esc(stateLabel(status))}</span>
             </div>
             ${project.summary ? `<p class="project-summary">${esc(project.summary)}</p>` : ''}

@@ -14,7 +14,7 @@ from maxread.web_submit import (
     submit_web_papers,
     update_web_project,
 )
-from maxread.web_pet import WebPetAgent, auto_project_category, chat_with_project_pet, deterministic_status_answer, progress_payload
+from maxread.web_pet import WebPetAgent, _parse_agent_action, auto_project_category, chat_with_project_pet, deterministic_status_answer, progress_payload
 
 
 def test_web_identity_defaults_to_guest_and_is_stable(tmp_path):
@@ -105,6 +105,24 @@ def test_progress_and_pet_agent_are_scoped_to_current_identity(tmp_path):
     store.close()
 
 
+def test_project_progress_separates_user_retries_from_service_recovery(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="")
+    queued = submit_web_papers(settings, store, identity, "2411.10958")["items"][0]
+    job_id = queued["job_id"]
+    store.add_job_event(job_id, "recover_dead_worker", "worker exited")
+    store.add_job_event(job_id, "recover_dead_worker", "worker exited again")
+    store.add_job_event(job_id, "web_retry", "user requested retry")
+
+    project = progress_payload(settings, store, identity)["recent"][0]
+
+    assert project["user_retries"] == 1
+    assert project["service_recoveries"] == 2
+    assert project["auto_retries"] == 0
+    store.close()
+
+
 def test_overdue_project_does_not_claim_one_minute_remaining():
     answer = deterministic_status_answer({
         "active": {
@@ -160,6 +178,28 @@ def test_project_pet_chat_is_ephemeral_and_scoped(tmp_path):
     assert "等待调度" in result["message"]["content"]
     assert store.list_web_messages(identity) == before
     store.close()
+
+
+def test_project_pet_parser_uses_last_valid_json_without_leaking_model_preamble():
+    raw = (
+        'The user said "hi". I need to respond in JSON.\n'
+        '{"type":"answer","text":"自然简短的中文"}\n'
+        '{"type":"answer","text":"嗨，我是 Max。想问进度还是随便聊聊？"}'
+    )
+
+    action = _parse_agent_action(raw)
+
+    assert action == {"type": "answer", "text": "嗨，我是 Max。想问进度还是随便聊聊？"}
+
+
+def test_project_pet_never_returns_unparsed_model_output(monkeypatch):
+    agent = WebPetAgent.__new__(WebPetAgent)
+    monkeypatch.setattr(agent, "_model_call", lambda _transcript: "The user said hi. I should explain my JSON format.")
+
+    answer = agent._agent_loop("hi", {}, [])
+
+    assert answer == "我查了几步还没组织好答案。你可以换个更具体的问题，比如“当前任务到哪了”。"
+    assert "The user said" not in answer
 
 
 def test_project_pet_investigates_heartbeat_instead_of_guessing(tmp_path):

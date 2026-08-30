@@ -2149,6 +2149,32 @@ class Store:
         stats["pending_watchers"] = int(pending_watchers["n"])
         return stats
 
+    def queue_retry_stats(self, job_ids) -> dict[int, dict[str, int]]:
+        ids = sorted({int(job_id) for job_id in job_ids if int(job_id or 0) > 0})
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.conn.execute(
+            f"""
+            select job_id,
+                   sum(case when event_type in ('web_retry', 'topic_retry', 'project_agent_retry', 'retry') then 1 else 0 end) as user_retries,
+                   sum(case when event_type = 'auto_retry' then 1 else 0 end) as auto_retries,
+                   sum(case when event_type in ('recover_dead_worker', 'recover_stale', 'project_agent_recover_stale') then 1 else 0 end) as service_recoveries
+            from job_events
+            where job_id in ({placeholders})
+            group by job_id
+            """,
+            ids,
+        ).fetchall()
+        return {
+            int(row["job_id"]): {
+                "user_retries": int(row["user_retries"] or 0),
+                "auto_retries": int(row["auto_retries"] or 0),
+                "service_recoveries": int(row["service_recoveries"] or 0),
+            }
+            for row in rows
+        }
+
     def retry_queue_job(
         self,
         job_id: int,

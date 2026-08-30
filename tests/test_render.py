@@ -44,6 +44,21 @@ def test_figure_caption_compiler_numbers_by_document_order():
     assert "**图" not in markdown
 
 
+def test_figure_caption_compiler_never_hard_truncates_and_prefers_chinese_visual():
+    marker = "[MaxReadFigure:1:related]"
+    long_english = "A detailed data construction pipeline with annotations, camera poses, rendered trajectories, filtering, and the complete architecture of the world model and refiner."
+
+    markdown = normalize_figure_captions(
+        f"{marker}\n图题：并列图组：{long_english}",
+        [(marker, Path("related.png"), long_english)],
+        visual_descriptions={marker: "上半部分展示数据构建流程，下半部分展示世界模型与细化器的两阶段架构。"},
+    )
+
+    caption = compiled_figure_captions(markdown)[marker]
+    assert caption == "图 1　上半部分展示数据构建流程，下半部分展示世界模型与细化器的两阶段架构。"
+    assert "..." not in caption
+
+
 def test_polish_markdown_converts_tex_delimited_math():
     text = r"结果显示，\(k=4\) 有 \(1.6\times\) 加速。\[\hat{x}_{t+1}=F^{-1}(z)\]"
     out = polish_markdown(text)

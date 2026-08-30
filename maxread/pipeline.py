@@ -427,7 +427,11 @@ class MaxReadPipeline:
                         figure_inserts,
                         visual_descriptions=figure_visuals,
                     )
-                    return normalize_figure_captions(candidate, figure_inserts)
+                    return normalize_figure_captions(
+                        candidate,
+                        figure_inserts,
+                        visual_descriptions=figure_visuals,
+                    )
 
                 quality_result = repair_until_quality_passes(
                     self.llm,
