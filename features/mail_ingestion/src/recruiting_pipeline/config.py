@@ -65,6 +65,7 @@ class PipelineSettings:
     notify_chat_id: str
     mailbox_env_files: tuple[Path, ...] = ()
     mailbox_addresses: tuple[str, ...] = ()
+    team_addresses: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, root: Path, mailbox_env_file: str | Path) -> "PipelineSettings":
@@ -113,6 +114,13 @@ class PipelineSettings:
                 if values.get("IMAP_USERNAME", "").strip()
             )
         )
+        team_addresses = tuple(
+            dict.fromkeys(
+                token.strip().casefold()
+                for token in re.split(r"[,;\n]+", value("RECRUITING_TEAM_ADDRESSES"))
+                if token.strip()
+            )
+        )
 
         return cls(
             root=root,
@@ -145,6 +153,7 @@ class PipelineSettings:
             notify_chat_id=value("RECRUITING_NOTIFY_CHAT_ID"),
             mailbox_env_files=account_envs,
             mailbox_addresses=account_addresses,
+            team_addresses=team_addresses,
         )
 
     def command_env(self) -> dict[str, str]:

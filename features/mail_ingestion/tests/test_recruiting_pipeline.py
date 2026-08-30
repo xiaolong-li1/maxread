@@ -22,7 +22,7 @@ from recruiting_pipeline.llm import _fields_from_json, _strip_json_fence
 from recruiting_pipeline.institution_tags import C9, PROJECT_985, classify_institution
 from recruiting_pipeline.models import CandidateFields
 from recruiting_pipeline.store import PipelineStore
-from recruiting_pipeline.threading import HeaderInfo, build_envelope, candidate_address, normalize_subject, read_headers
+from recruiting_pipeline.threading import HeaderInfo, build_envelope, candidate_address, normalize_subject, read_headers, thread_key
 from recruiting_pipeline.weekly_report import markdown_to_post, render_weekly_report
 
 
@@ -78,6 +78,7 @@ class RecruitingPipelineTest(unittest.TestCase):
                 "MAIL_READ_ONLY=1\n"
                 "RECRUITING_BASE_TOKEN=base\n"
                 "RECRUITING_TABLE_ID=table\n"
+                "RECRUITING_TEAM_ADDRESSES=erix025@outlook.com,wangweijie@zju.edu.cn\n"
                 f"RECRUITING_MAIL_ACCOUNT_ENVS={secondary}\n",
                 encoding="utf-8",
             )
@@ -86,6 +87,7 @@ class RecruitingPipelineTest(unittest.TestCase):
 
             self.assertEqual(settings.mailbox_env_files, (primary, secondary))
             self.assertEqual(settings.mailbox_addresses, ("zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"))
+            self.assertEqual(settings.team_addresses, ("erix025@outlook.com", "wangweijie@zju.edu.cn"))
 
     def test_official_985_and_c9_lists_have_expected_membership(self) -> None:
         self.assertEqual(len(PROJECT_985), 39)
@@ -395,6 +397,18 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertEqual([item.sender_address for item in envelope.incoming], ["candidate@example.com"])
         self.assertEqual([item.sender_address for item in envelope.outgoing], ["bohan.zhuang@zju.edu.cn"])
         self.assertEqual(envelope.source_accounts, frozenset({"zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"}))
+
+    def test_cced_team_member_reply_is_outgoing_without_references(self) -> None:
+        candidate = StoredMessage(1, "1", "INBOX", "申请", "", "candidate@example.com", "2026-08-01T10:00:00+08:00", "申请", Path("/tmp/1.eml"))
+        reply = StoredMessage(2, "2", "INBOX", "Re: 申请", "", "wangweijie@zju.edu.cn", "2026-08-01T11:00:00+08:00", "欢迎交流", Path("/tmp/2.eml"))
+        participants = ("zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn", "wangweijie@zju.edu.cn")
+        candidate_headers = HeaderInfo("<m1>", "", (), "申请", "candidate@example.com", ("zip.lab@zju.edu.cn", "wangweijie@zju.edu.cn"))
+        reply_headers = HeaderInfo("<m2>", "", (), "Re: 申请", "wangweijie@zju.edu.cn", ("candidate@example.com", "zip.lab@zju.edu.cn"))
+
+        self.assertEqual(thread_key(candidate, candidate_headers, participants), thread_key(reply, reply_headers, participants))
+        envelope = build_envelope([(candidate, candidate_headers), (reply, reply_headers)], participants, key="reply-thread")
+        self.assertEqual([item.sender_address for item in envelope.incoming], ["candidate@example.com"])
+        self.assertEqual([item.sender_address for item in envelope.outgoing], ["wangweijie@zju.edu.cn"])
 
     def test_one_ai_future_failure_does_not_discard_other_prepared_threads(self) -> None:
         good_message = StoredMessage(1, "1", "INBOX", "申请", "", "good@example.com", "2026-08-01T10:00:00+08:00", "申请", Path("/tmp/1.eml"))

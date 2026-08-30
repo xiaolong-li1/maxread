@@ -71,6 +71,11 @@ C9 依据九校联盟成员口径；别名按完整院校分段匹配，避免�
 `unknown`。同一时刻仍只运行一个 recruiting pipeline，由它顺序扫描所有
 账户并串行写 Base。
 
+没有直接接入 IMAP、但回复时会抄送受管邮箱的组员地址配置在
+`RECRUITING_TEAM_ADDRESSES`（逗号分隔）。这些地址不作为邮件来源扫描，
+只用于把回到 ZIP Lab/Bohan 的回复副本识别为 outgoing；若回复没有抄送任一
+受管邮箱，管线无法观测。
+
 ## 4. 并发边界
 
 - IMAP：单连接串行 select/fetch，避免共享连接状态和 UID 水位冲突。

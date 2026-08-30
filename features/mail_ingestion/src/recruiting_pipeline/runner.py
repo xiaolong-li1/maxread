@@ -58,6 +58,7 @@ class RecruitingRunner:
         self.dry_run = dry_run
         self._envelope_cache: dict[str, ThreadEnvelope] = {}
         self._mailbox_addresses = settings.mailbox_addresses or (settings.mailbox_address,)
+        self._participant_addresses = tuple(dict.fromkeys((*self._mailbox_addresses, *settings.team_addresses)))
 
     def run_once(
         self,
@@ -179,14 +180,14 @@ class RecruitingRunner:
                     for parent in (headers.message_id, headers.in_reply_to, *headers.references)
                     if parent in message_id_to_key
                 ),
-                thread_key(message, headers, self._mailbox_addresses),
+                thread_key(message, headers, self._participant_addresses),
             )
             # Preserve the canonical Message-ID mapping so a reply from a
             # group member's personal address is joined to the candidate's
             # thread instead of becoming a second candidate.
             if headers.message_id:
                 message_id_to_key[headers.message_id] = key
-            direction = "outgoing" if headers.sender != candidate_address(headers, self._mailbox_addresses, message.body_text) else "incoming"
+            direction = "outgoing" if headers.sender != candidate_address(headers, self._participant_addresses, message.body_text) else "incoming"
             message_updates.append((message.id, key, direction, message.mailbox))
             grouped.setdefault(key, []).append((message, headers))
             old = processing.get(message.id)
@@ -206,7 +207,7 @@ class RecruitingRunner:
                 and str(row["status"] or "") == "base_backfill_pending"
             ):
                 changed.add(key)
-        return {key: build_envelope(items, self._mailbox_addresses, key=key) for key, items in grouped.items()}, changed
+        return {key: build_envelope(items, self._participant_addresses, key=key) for key, items in grouped.items()}, changed
 
     def _extract_changed(self, envelopes: dict[str, ThreadEnvelope], changed_keys: set[str]):
         candidates: list[ThreadEnvelope] = []
@@ -549,13 +550,13 @@ class RecruitingRunner:
                     for parent in (headers.message_id, headers.in_reply_to, *headers.references)
                     if parent in message_id_to_key
                 ),
-                thread_key(message, headers, self._mailbox_addresses),
+                thread_key(message, headers, self._participant_addresses),
             )
             if headers.message_id:
                 message_id_to_key[headers.message_id] = resolved
             grouped.setdefault(resolved, []).append((message, headers))
         items = grouped.get(key, [])
-        return build_envelope(items, self._mailbox_addresses, key=key)
+        return build_envelope(items, self._participant_addresses, key=key)
 
     def _attachment_texts(self, envelope: ThreadEnvelope) -> dict[str, str]:
         paths = [
