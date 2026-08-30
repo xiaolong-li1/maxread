@@ -68,6 +68,22 @@ def test_publish_marker_image_moves_uploaded_block_and_removes_marker(tmp_path):
     assert result.warnings == []
 
 
+def test_publish_marker_image_preserves_compiled_native_caption(tmp_path):
+    image = _png(tmp_path / "main.png")
+    feishu = FlakyFeishu()
+
+    result = publish_marker_image(
+        feishu,
+        "doc",
+        image,
+        "图 1　方法架构与两阶段生成流程。",
+        "[MaxReadFigure:1:main]",
+    )
+
+    assert result.inserted is True
+    assert feishu.insert_calls[0]["caption"] == "图 1　方法架构与两阶段生成流程。"
+
+
 def test_publish_marker_image_does_not_append_when_anchor_fails(tmp_path):
     image = _png(tmp_path / "overview.png")
     feishu = FlakyFeishu(anchor_id="")

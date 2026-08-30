@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure
-from maxread.render import compose_related_figure_groups, constrain_rendered_image, display_caption, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning, _figure_section_target, _pretty_grid_label, _render_asset
+from maxread.render import compiled_figure_captions, compose_related_figure_groups, constrain_rendered_image, display_caption, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, normalize_figure_captions, polish_markdown, prepare_key_figures, remove_false_material_warning, _figure_section_target, _pretty_grid_label, _render_asset
 
 
 def test_polish_markdown_converts_math():
@@ -14,12 +14,34 @@ def test_polish_markdown_converts_math():
     assert "<latex>x+y</latex>" in out
 
 
-def test_markdown_to_docx_xml_keeps_figure_marker_in_its_own_block():
+def test_figure_caption_compiler_emits_numbered_plain_paragraph():
     marker = "[MaxReadFigure:1:overview]"
+    inserts = [(marker, Path("overview.png"), "Method overview")]
 
-    xml = markdown_to_docx_xml(f"正文引用。\n{marker}\n**图：方法总览。**")
+    markdown = normalize_figure_captions(f"正文引用。\n{marker}\n> **图：方法总览。**", inserts)
+    xml = markdown_to_docx_xml(markdown)
 
-    assert f"<p>正文引用。</p><p>{marker}</p><p><b>图：方法总览。</b></p>" == xml
+    assert markdown == f"正文引用。\n{marker}\n\n图 1　方法总览。\n"
+    assert compiled_figure_captions(markdown) == {marker: "图 1　方法总览。"}
+    assert f"<p>正文引用。</p><p>{marker}</p>" == xml
+
+
+def test_figure_caption_compiler_numbers_by_document_order():
+    first = "[MaxReadFigure:2:result]"
+    second = "[MaxReadFigure:1:method]"
+    inserts = [
+        (second, Path("method.png"), "Method overview."),
+        (first, Path("result.png"), "Result comparison."),
+    ]
+
+    markdown = normalize_figure_captions(
+        f"{first}\n图题：主要结果对比\n\n正文。\n\n{second}\n**图 8：方法框架**",
+        inserts,
+    )
+
+    assert f"{first}\n\n图 1　主要结果对比。" in markdown
+    assert f"{second}\n\n图 2　方法框架。" in markdown
+    assert "**图" not in markdown
 
 
 def test_polish_markdown_converts_tex_delimited_math():

@@ -59,7 +59,7 @@ def build_article_user_prompt(bundle: ArticleBundle, image_inserts: Sequence[Ima
 - 不允许把原文后半段内容提前讲，也不允许把不同 section 合成“核心观点/机制/启发”这种新结构。
 - 图片必须出现在原 section 中，marker 独立成行，并紧跟 1-2 句图解。不要生成独立“图片附录”。
 - 正文中的 `[MaxReadFigure:...]` 必须逐字保留；不要改 marker 文本。
-- marker 后面的 `**图：...**` 来自原文 figcaption/alt，必须基于这张图解释；如果 caption/alt 很短，只说明它在原文对应小节的作用。图解必须用中文转述，不要直接复制长英文 caption。
+- marker 后面的 `图题：...` 来自原文 figcaption/alt，必须基于这张图解释；不要加粗、引用或自行编号，发布编译器会统一编号。如果 caption/alt 很短，只说明它在原文对应小节的作用。图解必须用中文转述，不要直接复制长英文 caption。
 - 如果图片说明是“原网页标题区和可视目录”，把它放在正文汉化开头，作为原网页版式导览；不要拆成多张目录小图。
 - 如果图片来自原网页渲染截图，按它在 section 材料里的位置解释：它代表原网页可见的 figure/table/canvas/svg 区块，不要当成附录图，也不要移动到其他 section。
 - 原文表格可以翻译成中文表格；不要新增总结表格。
@@ -103,7 +103,7 @@ def build_article_user_prompt(bundle: ArticleBundle, image_inserts: Sequence[Ima
 def _section_material(bundle: ArticleBundle, image_inserts: Sequence[ImageInsert]) -> str:
     if not bundle.section_blocks:
         return _clip(bundle.text, 60_000)
-    text_by_source = {str(item[3]): f"{item[0]}\n**图：{item[2]}**" for item in image_inserts if len(item) >= 4}
+    text_by_source = {str(item[3]): f"{item[0]}\n图题：{item[2]}" for item in image_inserts if len(item) >= 4}
     parts: List[str] = []
     for index, section in enumerate(bundle.section_blocks[:80], start=1):
         title = section.title or "正文"

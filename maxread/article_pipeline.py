@@ -16,7 +16,7 @@ from .openai_client import OpenAIClient
 from .publishing import publish_marker_image
 from .quality import PrePublishQualityError, blocking_quality_warnings, verify_published_docx
 from .quality_repair import QualityRepairResult, repair_until_quality_passes
-from .render import markdown_to_docx_xml, polish_markdown
+from .render import compiled_figure_captions, markdown_to_docx_xml, normalize_figure_captions, polish_markdown
 from .review import review_markdown_with_report
 from .sources import WebRef
 from .web_article import WebArticleClient
@@ -113,7 +113,10 @@ class ArticlePipeline:
                     markdown,
                     markers,
                     render_xml=markdown_to_docx_xml,
-                    normalize_markdown=polish_markdown,
+                    normalize_markdown=lambda candidate: normalize_figure_captions(
+                        polish_markdown(candidate),
+                        [(marker, path, caption) for marker, path, caption, _source_index in image_inserts],
+                    ),
                     max_repair_rounds=self.quality_repair_rounds,
                     kind="article",
                     reasoning_effort=self.review_reasoning_effort,
@@ -156,10 +159,17 @@ class ArticlePipeline:
             doc = self.feishu.create_docx(bundle.title or ref.url)
             self.feishu.overwrite_docx_xml(doc["url"], xml)
             warnings = list(publish_warnings)
+            native_captions = compiled_figure_captions(markdown)
             for marker, image_path, caption, _source_index in image_inserts:
                 if marker not in markdown:
                     continue
-                publish_result = publish_marker_image(self.feishu, doc["url"], image_path, caption, marker)
+                publish_result = publish_marker_image(
+                    self.feishu,
+                    doc["url"],
+                    image_path,
+                    native_captions.get(marker, caption),
+                    marker,
+                )
                 warnings.extend(publish_result.warnings)
             self.feishu.publish_docx(doc["token"])
             self._workflow(
@@ -356,7 +366,7 @@ def _replace_article_image_markers(text: str, image_inserts) -> str:
         if not item:
             return fallback_caption
         marker, real_caption = item
-        return f"{marker}\n**图：{real_caption or fallback_caption}**"
+        return f"{marker}\n图题：{real_caption or fallback_caption}"
 
     return __import__("re").sub(r"\[ArticleImage:(\d+)\]\s*(.*)", repl, text)
 

@@ -245,10 +245,10 @@ PDF text excerpt（仅在 TeX source 不可用时启用）：
 - 只保留关键公式。所有公式使用 `<latex>...</latex>`，不要使用 `$$...$$`，不要把公式写成 Markdown 标题。
 - API、函数、类、字段、配置项和文件路径使用 Markdown 行内代码；不要把 `tensor_meta()`、`on_worker`、`publish(req_id)` 这类程序标识符包进 `<latex>`。
 - 重要的单行公式独占一段：上一段解释公式来源，下一段解释符号和直觉。
-- 图片必须像参考文档一样嵌入：先写一句“XXX 的整体设计如下图所示。”，下一行放 marker，再紧跟一段 `**图：...**` 图解。
-- caption 以“并列图组”开头时，panel 短说明已经绘制在图内；正文和 `**图：...**` 只总结两图共同结论，不逐 panel 重复描述。
+- 图片必须像参考文档一样嵌入：先写一句“XXX 的整体设计如下图所示。”，下一行放 marker，再紧跟一个普通段落 `图题：...`。不要给题注加粗、加引用块或自行编号；发布编译器会按成稿中的出现顺序生成“图 1、图 2”。
+- caption 以“并列图组”开头时，panel 短说明已经绘制在图内；正文和 `图题：...` 只总结两图共同结论，不逐 panel 重复描述。
 - 图片位置以“原文引用位置”为准：如果 figure 有 label/ref context，必须放在该上下文对应内容附近；不要因为 TeX source 中 figure 环境靠前/靠后就跟着移动。
-- `**图：...**` 必须用中文转述 caption 和图中信息，不要直接复制英文 caption；TeX 宏如 `\formername` 必须展开成真实方法名。
+- `图题：...` 必须用中文转述 caption 和图中信息，不要直接复制英文 caption；TeX 宏如 `\formername` 必须展开成真实方法名。题注只承担识别与解释图片的职责，额外技术推导留在正文。
 - 如果某个 marker 的 caption/visual 与当前段落不一致，不要使用这个 marker；绝不能把 logo、品牌图或无 caption 图片解释成方法/实验图。
 - 不能只根据文件名、marker 名或泛化句子解释图片；图解必须能从同一 figure pair 的 caption、visual 描述或 Figure reference context 直接支撑。
 - 正文中所有可渲染且有论文语义的图片都应保留，每个 marker 必须逐字出现且全篇恰好一次；附录/补充材料图片默认不插入。不要删正文图、重复图或集中堆到文末。
@@ -298,7 +298,7 @@ TeX tables（优先用于实验结果；如果这里有主表，不要说实验�
 {source_tables}
 ```
 
-可插入图片锚点（每个 marker 必须逐字保留，独立成行，插在相关图解段落之前；marker 后紧跟 `**图：...**` 图解；不要修改 marker 内任何字符；如果有 visual 字段，图解必须同时参考 caption 与 visual，不要只参考文件名）：
+可插入图片锚点（每个 marker 必须逐字保留，独立成行，插在相关图解段落之前；marker 后紧跟普通段落 `图题：...`，不要加粗、引用或编号；不要修改 marker 内任何字符；如果有 visual 字段，图解必须同时参考 caption 与 visual，不要只参考文件名）：
 {figure_markers}
 
 TeX/source excerpt：

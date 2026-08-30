@@ -213,8 +213,8 @@ def test_article_image_marker_replacement_uses_source_index(tmp_path):
 
     replaced = _replace_article_image_markers(text, inserts)
 
-    assert "[MaxReadFigure:1:first]\n**图：Caption one**" in replaced
-    assert "[MaxReadFigure:2:third]\n**图：Caption three**" in replaced
+    assert "[MaxReadFigure:1:first]\n图题：Caption one" in replaced
+    assert "[MaxReadFigure:2:third]\n图题：Caption three" in replaced
 
 
 

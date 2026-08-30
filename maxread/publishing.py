@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Protocol
@@ -31,11 +32,17 @@ class ImagePublishResult:
     warnings: List[str] = field(default_factory=list)
 
 
-def publish_marker_image(feishu: ImageDocClient, doc_url: str, image_path: Path | str, caption: str, marker: str) -> ImagePublishResult:
+def publish_marker_image(
+    feishu: ImageDocClient,
+    doc_url: str,
+    image_path: Path | str,
+    caption: str,
+    marker: str,
+) -> ImagePublishResult:
     """Upload an image, move it to its marker block, and roll back on failure."""
     original = Path(image_path)
     safe_path = prepare_feishu_image(original)
-    display = display_caption(caption, safe_path)
+    display = caption.strip() if _is_compiled_caption(caption) else display_caption(caption, safe_path)
     result = ImagePublishResult(marker=marker, image_path=safe_path)
     width, height = image_display_size(safe_path)
 
@@ -91,6 +98,10 @@ def publish_marker_image(feishu: ImageDocClient, doc_url: str, image_path: Path 
         result.warnings.append(f"image-marker-remove-failed:{original.name}:{_short_error(str(exc))}")
     result.inserted = True
     return result
+
+
+def _is_compiled_caption(caption: str) -> bool:
+    return bool(re.match(r"^图\s+\d+\u3000\S", str(caption or "").strip()))
 
 
 def _find_block_id(payload: Any) -> str:

@@ -22,7 +22,7 @@ from .publishing import publish_marker_image
 from .quality import PrePublishQualityError, blocking_quality_warnings, paper_markdown_completeness_errors, verify_published_docx
 from .quality_repair import QualityRepairResult, repair_until_quality_passes
 from .repository import find_repository_url
-from .render import _figure_section_target, compose_related_figure_groups, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, polish_markdown, prepare_key_figures, remove_false_material_warning
+from .render import _figure_section_target, compiled_figure_captions, compose_related_figure_groups, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, normalize_figure_captions, polish_markdown, prepare_key_figures, remove_false_material_warning
 from .review import MethodValidationResult, ReviewIssue, audit_method_consistency_with_report, review_markdown_with_report, validate_method_consistency
 from .visual_qa import VisualQAController
 from .workflow import PublishedCheckpoint, WorkflowEvent
@@ -422,11 +422,12 @@ class MaxReadPipeline:
                         figure_inserts,
                         visual_descriptions=figure_visuals,
                     )
-                    return ensure_referenced_figure_markers(
+                    candidate = ensure_referenced_figure_markers(
                         candidate,
                         figure_inserts,
                         visual_descriptions=figure_visuals,
                     )
+                    return normalize_figure_captions(candidate, figure_inserts)
 
                 quality_result = repair_until_quality_passes(
                     self.llm,
@@ -537,10 +538,17 @@ class MaxReadPipeline:
                 doc = self.feishu.create_docx(bundle.metadata.title or ref.paper_id)
                 self.feishu.overwrite_docx_xml(doc["url"], xml)
             figure_warnings = list(publish_warnings)
+            native_captions = compiled_figure_captions(markdown)
             for marker, image_path, caption in figure_inserts:
                 if marker not in markdown:
                     continue
-                publish_result = publish_marker_image(self.feishu, doc["url"], image_path, caption, marker)
+                publish_result = publish_marker_image(
+                    self.feishu,
+                    doc["url"],
+                    image_path,
+                    native_captions.get(marker, caption),
+                    marker,
+                )
                 figure_warnings.extend(publish_result.warnings)
             self.feishu.publish_docx(doc["token"])
             self._workflow(

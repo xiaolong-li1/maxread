@@ -495,6 +495,11 @@ def markdown_to_docx_xml(
             xml_parts.append(_list_xml(block, ordered=False))
         elif _is_ordered_list(block):
             xml_parts.append(_list_xml(block, ordered=True))
+        elif _is_compiled_figure_caption(stripped):
+            # The publisher attaches this text to the image block using
+            # Feishu's native caption style. Keeping a second paragraph here
+            # would create the duplicate body-style caption users reported.
+            pass
         else:
             text = re.sub(r"\n+", "<br/>", stripped)
             xml_parts.append(f"<p>{_inline_xml(text)}</p>")
@@ -510,10 +515,8 @@ def append_figure_placeholders(markdown: str, figures: List[Tuple[Path, str]]) -
     for index, (path, caption) in enumerate(figures, start=1):
         marker = f"[MaxReadFigure:{index}:{path.stem}]"
         title = path.stem.replace("_", " ")
-        lines.append(f"**图 {index}：{title}**")
         lines.append(marker)
-        if caption:
-            lines.append(f"图解：{caption}")
+        lines.append(f"图题：{caption or title}")
         lines.append("")
         inserts.append((marker, path, caption))
     return markdown.rstrip() + "\n" + "\n".join(lines).rstrip() + "\n", inserts
@@ -530,10 +533,8 @@ def ensure_figure_markers(markdown: str, inserts: List[Tuple[str, Path, str]], m
     lines = [markdown.rstrip(), "", "## 图表补充", ""]
     for marker, path, caption in missing:
         title = path.stem.replace("_", " ")
-        lines.append(f"**{title}**")
         lines.append(marker)
-        if caption:
-            lines.append(f"图解：{caption}")
+        lines.append(f"图题：{caption or title}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -564,7 +565,7 @@ def ensure_priority_figure_markers(
         block.append("这张图概括了论文中最关键的流程或方法结构。")
         block.append(marker)
         if caption:
-            block.append(f"**图：{_short_caption(caption)}**")
+            block.append(f"图题：{_short_caption(caption)}")
     return "\n".join(lines[:insert_at] + [""] + block + [""] + lines[insert_at:]).strip() + "\n"
 
 
@@ -619,6 +620,86 @@ def remove_figure_markers(markdown: str, markers: Iterable[str]) -> str:
         markdown = markdown.replace(marker, "")
     markdown = re.sub(r"\n{3,}", "\n\n", markdown)
     return markdown.strip() + "\n"
+
+
+def normalize_figure_captions(
+    markdown: str,
+    inserts: Iterable[Tuple[str, Path, str]],
+) -> str:
+    """Compile model-written figure notes into numbered, plain caption paragraphs."""
+    source_captions = {marker: caption for marker, _path, caption in inserts}
+    marker_pattern = re.compile(r"^\s*(\[MaxReadFigure:[^\]\n]+\])\s*$")
+    lines = str(markdown or "").splitlines()
+    output: List[str] = []
+    figure_number = 0
+    index = 0
+    while index < len(lines):
+        match = marker_pattern.match(lines[index])
+        if not match:
+            output.append(lines[index])
+            index += 1
+            continue
+        marker = match.group(1)
+        figure_number += 1
+        output.append(marker)
+        index += 1
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+
+        caption_lines: List[str] = []
+        if index < len(lines) and _is_figure_caption_line(lines[index]):
+            while index < len(lines) and lines[index].strip():
+                caption_lines.append(lines[index].strip())
+                index += 1
+        raw_caption = " ".join(caption_lines)
+        caption = _clean_figure_caption_text(raw_caption)
+        if not caption:
+            caption = _short_caption(source_captions.get(marker, ""), max_chars=240)
+        if not caption:
+            caption = "论文关键图。"
+        caption = _short_caption(caption, max_chars=180)
+        if caption[-1:] not in "。！？.!?":
+            caption += "。"
+        output.extend(["", f"图 {figure_number}\u3000{caption}", ""])
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip() + "\n"
+
+
+def _is_figure_caption_line(line: str) -> bool:
+    text = re.sub(r"^\s*>\s*", "", str(line or "")).strip()
+    text = text.strip("*_ ")
+    return bool(re.match(r"(?i)^(?:图解|图题|图(?:\s*\d+)?|fig(?:ure)?\.?\s*\d*)\s*[：:.\-—]?", text))
+
+
+def _clean_figure_caption_text(text: str) -> str:
+    value = re.sub(r"(?:^|\s)>\s*", " ", str(text or "")).strip()
+    value = value.strip("*_ ")
+    value = re.sub(
+        r"(?i)^(?:图解|图题|图(?:\s*\d+)?|fig(?:ure)?\.?\s*\d*)\s*[：:.\-—]?\s*",
+        "",
+        value,
+    )
+    value = value.strip("*_ ")
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def compiled_figure_captions(markdown: str) -> Dict[str, str]:
+    """Return marker -> native image caption after deterministic compilation."""
+    lines = str(markdown or "").splitlines()
+    captions: Dict[str, str] = {}
+    for index, line in enumerate(lines):
+        marker = line.strip()
+        if not re.fullmatch(r"\[MaxReadFigure:[^\]\n]+\]", marker):
+            continue
+        cursor = index + 1
+        while cursor < len(lines) and not lines[cursor].strip():
+            cursor += 1
+        if cursor < len(lines) and _is_compiled_figure_caption(lines[cursor].strip()):
+            captions[marker] = lines[cursor].strip()
+    return captions
+
+
+def _is_compiled_figure_caption(text: str) -> bool:
+    return bool(re.match(r"^图\s+\d+\u3000\S", str(text or "").strip()))
 
 
 
@@ -1540,7 +1621,7 @@ def ensure_referenced_figure_markers(
             "",
             "原文的方法总览图如下。",
             marker,
-            f"**图：{_short_caption(caption or path.stem)}**",
+            f"图题：{_short_caption(caption or path.stem)}",
             "",
         ]
         lines = lines[:insert_at] + block + lines[insert_at:]
