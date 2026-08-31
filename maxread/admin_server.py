@@ -909,6 +909,7 @@ const api = async (url, opts={}) => {
 const pill = (v) => `<span class="pill ${esc(v)}">${esc(v || 'unknown')}</span>`;
 const link = (url) => url ? `<a href="${esc(url)}" target="_blank">打开</a>` : '<span class="muted">-</span>';
 const filteredUrl = (path, extra={}) => { const q = new URLSearchParams({days: state.days, ...extra}); if (state.senderId) q.set('sender_id', state.senderId); return `${path}?${q}`; };
+const adminNextPage = new URLSearchParams(window.location.search).get('next') === 'mail' ? 'mail' : '';
 
 $('filter-days').addEventListener('change', async (event) => { state.days = event.target.value; await loadUsers(); refreshAll(); });
 $('filter-user').addEventListener('change', (event) => { state.senderId = event.target.value; refreshAll(); });
@@ -929,6 +930,7 @@ async function loadAdminStatus() {
   try {
     const result = await api('/api/admin/status');
     state.adminAuthenticated = Boolean(result.authenticated);
+    if (state.adminAuthenticated && adminNextPage) { window.location.replace(adminNextPage); return; }
   } catch (_error) {
     state.adminAuthenticated = false;
   }
@@ -951,6 +953,7 @@ async function loginAdmin(event) {
     state.adminAuthenticated = Boolean(result.authenticated);
     closeAdminDialog();
     updateAdminButton();
+    if (state.adminAuthenticated && adminNextPage) { window.location.replace(adminNextPage); return; }
     refreshAll();
   } catch (error) {
     $('admin-login-error').textContent = error.message || '登录失败';

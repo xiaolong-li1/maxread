@@ -119,6 +119,8 @@ def test_mail_admin_page_uses_reverse_proxy_relative_api_paths():
     assert "api('api/admin/mail/scan'" in html
     assert "api('api/admin/mail/config'" in html
     assert "api('/api/admin/mail" not in html
+    assert 'href="admin?next=mail"' in html
+    assert "登录成功后会自动返回本页" in html
 
 
 def test_systemd_cst_timestamp_is_exposed_as_shanghai_iso():

@@ -463,3 +463,5 @@ def test_admin_html_defaults_to_read_only_and_has_explicit_login():
     assert "worker 心跳正常；任务失败或租约失效后方可重试" in INDEX_HTML
     assert "查看恢复记录" in INDEX_HTML
     assert "任务已在队列中，无需重复提交" in INDEX_HTML
+    assert "adminNextPage" in INDEX_HTML
+    assert "window.location.replace(adminNextPage)" in INDEX_HTML
