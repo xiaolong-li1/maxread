@@ -377,16 +377,28 @@
     .admin-switch { display: grid; gap: 8px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
     .admin-switch label { color: var(--muted); font-size: 12px; }
     .admin-switch select { width: 100%; height: 40px; padding: 0 10px; background: #fff; border: 1px solid var(--line); border-radius: 7px; }
-    .onboarding { display: grid; grid-template-columns: 100px 1fr; gap: 18px; align-items: center; }
-    .onboarding-pet { width: 81px; height: 108px; margin: 0 auto; background: url("assets/web-pet-sprite.png") 0 0 / 400% 100% no-repeat; }
-    .onboarding h2 { margin: 0 0 8px; font-size: 20px; }
-    .onboarding p { margin: 0; color: var(--muted); }
-    .onboarding-dots { display: flex; gap: 5px; margin: 16px 0; }
-    .onboarding-dots span { width: 18px; height: 3px; background: var(--line); border-radius: 2px; }
-    .onboarding-dots span.active { background: var(--green); }
-    .onboarding-actions { display: flex; justify-content: flex-end; gap: 8px; }
-    .onboarding-actions button { height: 36px; padding: 0 12px; background: #fff; border: 1px solid var(--line); border-radius: 7px; }
-    .onboarding-actions .primary { color: #fff; background: var(--green); border-color: var(--green); }
+    .tour-backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(23, 29, 25, 0.46); pointer-events: none; }
+    .tour-target { position: relative !important; z-index: 51 !important; border-radius: 8px; box-shadow: 0 0 0 4px #fff, 0 0 0 7px #4d977e, 0 18px 54px rgba(18, 35, 27, 0.28) !important; }
+    .tour-coach {
+      position: fixed;
+      z-index: 52;
+      width: min(360px, calc(100vw - 24px));
+      padding: 14px;
+      background: var(--paper);
+      border: 1px solid #bfd5ca;
+      border-radius: 8px;
+      box-shadow: 0 22px 64px rgba(20, 31, 25, 0.28);
+    }
+    .tour-coach-head { display: grid; grid-template-columns: 43px minmax(0, 1fr); align-items: center; gap: 10px; }
+    .tour-coach-pet { width: 42px; height: 56px; background: url("assets/web-pet-sprite.png") 100% 0 / 400% 100% no-repeat; }
+    .tour-eyebrow { color: var(--green); font-size: 11px; font-weight: 700; }
+    .tour-coach h2 { margin: 1px 0 0; font-size: 17px; line-height: 1.35; }
+    .tour-coach p { margin: 10px 0 12px; color: #4f5951; font-size: 13px; line-height: 1.7; }
+    .tour-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .tour-actions-left, .tour-actions-right { display: flex; align-items: center; gap: 7px; }
+    .tour-actions button { height: 34px; padding: 0 10px; color: var(--text); background: #fff; border: 1px solid var(--line); border-radius: 7px; }
+    .tour-actions button.primary { color: #fff; background: var(--green); border-color: var(--green); }
+    .tour-actions button:disabled { opacity: 0.45; cursor: default; }
     .toast { position: fixed; left: 50%; bottom: 24px; z-index: 40; padding: 9px 13px; color: #fff; background: #252b27; border-radius: 7px; opacity: 0; pointer-events: none; transform: translate(-50%, 16px); transition: 0.2s; }
     .toast.show { opacity: 1; transform: translate(-50%, 0); }
     @keyframes pet-bob { 0%, 100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-5px) rotate(1deg); } }
@@ -421,8 +433,7 @@
       .project-organize { justify-content: space-between; }
       .action-group { width: 100%; justify-content: flex-end; }
       .pet-panel { right: 8px; bottom: 8px; width: calc(100vw - 16px); height: min(620px, calc(100vh - 16px)); }
-      .onboarding { grid-template-columns: 1fr; text-align: center; }
-      .onboarding-actions { justify-content: center; }
+      .tour-coach { left: 12px !important; right: 12px; width: auto; }
     }
     @media (prefers-reduced-motion: reduce) { .pet-sprite, .fill, .project-arrived .project-card { animation: none !important; transition: none !important; } }
   </style>
@@ -436,8 +447,9 @@
       </div>
       <div class="header-actions">
         <a class="console-link" id="console-link" href="./projects" title="返回个人控制台"><span class="icon"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/><path d="M9 12h10"/></svg></span>个人控制台</a>
+        <a class="console-link" id="pipeline-link" data-guide="pipeline" href="./architecture" title="查看 Pipeline 架构"><span class="icon"><svg viewBox="0 0 24 24"><path d="M4 6h6v6H4zM14 3h6v6h-6zM14 15h6v6h-6zM10 9l4-3M10 11l4 6"/></svg></span>Pipeline 架构</a>
         <a class="admin-link" id="admin-link" href="./admin" title="管理员控制台"><span class="icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg></span>管理员</a>
-        <button class="account" id="account-button" onclick="openAccount()"><span class="dot"></span><span class="account-label">游客</span></button>
+        <button class="account" id="account-button" data-guide="account" onclick="openAccount()"><span class="dot"></span><span class="account-label">游客</span></button>
       </div>
     </header>
     <main>
@@ -446,7 +458,7 @@
         <span class="identity-note" id="identity-note">仅显示当前账号的项目</span>
       </section>
       <div class="service-note" id="service-note"></div>
-      <section class="submit-box" aria-label="提交论文">
+      <section class="submit-box" aria-label="提交论文" data-guide="submit">
         <div class="submit-input">
           <span class="icon link-icon"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg></span>
           <textarea id="paper-input" rows="2" placeholder="粘贴 arXiv 链接或论文 ID"></textarea>
@@ -457,7 +469,7 @@
       <section id="projects-section">
         <div class="projects-head">
           <h2>项目</h2>
-          <div class="project-tools">
+          <div class="project-tools" data-guide="project-tools">
             <div class="project-search"><span class="icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span><input id="project-search" type="search" placeholder="搜索标题或 arXiv ID" oninput="setSearch(this.value)" /></div>
             <select class="category-filter" id="category-filter" aria-label="分类筛选" onchange="setCategoryFilter(this.value)"><option value="all">全部分类</option></select>
             <div class="filters" role="tablist" aria-label="项目筛选">
@@ -466,7 +478,7 @@
               <button data-filter="active" onclick="setFilter('active')">进行中</button>
               <button data-filter="done" onclick="setFilter('done')">已完成</button>
             </div>
-            <button class="icon-button" aria-label="让 Max 介绍页面按钮" title="让 Max 介绍页面按钮" onclick="showButtonGuide()"><span class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 1 1 5.8 1c0 2-3 2-3 4"/><path d="M12 18h.01"/></svg></span></button>
+            <button class="icon-button" data-guide="help" aria-label="让 Max 带我操作页面" title="让 Max 带我操作页面" onclick="showButtonGuide()"><span class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 1 1 5.8 1c0 2-3 2-3 4"/><path d="M12 18h.01"/></svg></span></button>
             <button class="icon-button" aria-label="刷新" title="刷新" onclick="refreshProjects()"><span class="icon"><svg viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg></span></button>
           </div>
         </div>
@@ -483,7 +495,7 @@
     </div>
     <div class="pet-chat" id="pet-chat"></div>
     <div>
-      <div class="pet-quick" id="pet-quick"><button onclick="askPet('这些按钮怎么用？')">页面按钮</button><button onclick="askPet('进度到哪里了？')">当前进度</button><button onclick="askPet('还要多久？')">预计时间</button></div>
+      <div class="pet-quick" id="pet-quick"><button onclick="startPageTour()">带我看页面</button><button onclick="startBindingTour()">绑定飞书</button><button onclick="askPet('进度到哪里了？')">当前进度</button><button onclick="askPet('还要多久？')">预计时间</button></div>
       <div class="pet-composer">
         <textarea id="pet-input" rows="1" placeholder="问 Max 这个项目的情况"></textarea>
         <button class="pet-send" id="pet-send" aria-label="发送" onclick="sendPetMessage()"><span class="icon"><svg viewBox="0 0 24 24"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="M12 13 19 5"/></svg></span></button>
@@ -491,8 +503,14 @@
     </div>
   </aside>
 
+  <div class="tour-backdrop hidden" id="tour-backdrop"></div>
+  <aside class="tour-coach hidden" id="tour-coach" aria-live="polite">
+    <div class="tour-coach-head"><div class="tour-coach-pet"></div><div><div class="tour-eyebrow" id="tour-counter">MAX 使用向导</div><h2 id="tour-title"></h2></div></div>
+    <p id="tour-text"></p>
+    <div class="tour-actions"><div class="tour-actions-left"><button onclick="stopPageTour()">结束</button></div><div class="tour-actions-right"><button id="tour-previous" onclick="previousTourStep()">上一步</button><button class="primary" id="tour-next" onclick="nextTourStep()">下一步</button></div></div>
+  </aside>
+
   <dialog id="account-dialog"><div class="dialog-body"><div class="dialog-head"><h2 id="account-title">绑定飞书账号</h2><button class="close" aria-label="关闭" onclick="closeAccount()"><span class="icon"><svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></span></button></div><div id="account-content"></div><div class="error" id="binding-error"></div></div></dialog>
-  <dialog id="onboarding-dialog"><div class="dialog-body onboarding"><div class="onboarding-pet" id="onboarding-pet"></div><div><h2 id="onboarding-title">每篇论文都是一个项目</h2><p id="onboarding-text"></p><div class="onboarding-dots" id="onboarding-dots"></div><div class="onboarding-actions"><button onclick="finishOnboarding()">跳过</button><button class="primary" id="onboarding-next" onclick="nextOnboarding()">下一步</button></div></div></div></dialog>
   <div class="toast" id="toast"></div>
 
   <script>
@@ -515,7 +533,9 @@
       petChats: {},
       petBusy: false,
       selectedProjects: new Set(),
-      onboardingStep: 0,
+      tourStep: 0,
+      tourSteps: [],
+      tourTarget: null,
       collapsedCategories: new Set(storedCollapsedCategories),
     };
     const $ = id => document.getElementById(id);
@@ -624,11 +644,11 @@
         : (project.overdue ? `已运行 ${minutes(project.elapsed_seconds)} 分钟，超过近期均值` : '');
       const error = status === 'failed' ? `<div class="project-error">${esc(friendlyError(project))}</div>${project.error ? `<details class="technical"><summary>技术详情</summary><div>${esc(String(project.error).slice(0, 700))}</div></details>` : ''}` : '';
       const doc = project.doc_url ? `<a class="action-link" href="${esc(project.doc_url)}" target="_blank" rel="noopener">${icon('open')}打开文档</a>` : '';
-      const retry = status === 'failed' && Number(project.job_id) > 0 ? `<button class="retry-button" onclick="retryProject(${Number(project.job_id)}, this)">${icon('retry')}重试</button>` : '';
+      const retry = status === 'failed' && Number(project.job_id) > 0 ? `<button class="retry-button" data-guide="retry" onclick="retryProject(${Number(project.job_id)}, this)">${icon('retry')}重试</button>` : '';
       const favorite = `<button class="project-icon-action ${project.favorite ? 'favorite' : ''}" aria-label="${project.favorite ? '取消收藏' : '收藏'}" title="${project.favorite ? '取消收藏' : '收藏'}" onclick="toggleFavorite('${esc(project.source_id)}', ${project.favorite ? 'false' : 'true'})">${icon('star')}</button>`;
       const remove = `<button class="project-icon-action delete" aria-label="删除项目" title="从我的项目中删除" onclick="deleteProject('${esc(project.source_id)}')">${icon('trash')}</button>`;
-      const progress = status === 'done' ? '' : `<div class="project-progress"><div class="project-progress-head"><strong>${esc(project.label || '等待调度')}</strong><span>${percent}%${eta ? ` · ${esc(eta)}` : ''}</span></div><div class="track"><div class="fill ${repair ? 'repair' : ''}" style="width:${percent}%"></div></div></div>`;
-      const companion = status === 'done' ? '' : `<div class="pet-dock"><button class="project-pet" aria-label="询问 Max 当前项目" title="问 Max" onclick="openPet(${Number(project.job_id || 0)}, '${esc(project.source_id)}')"><div class="pet-sprite ${petFrame(project)}"></div></button><span class="pet-label">问 Max</span></div>`;
+      const progress = status === 'done' ? '' : `<div class="project-progress" data-guide="progress"><div class="project-progress-head"><strong>${esc(project.label || '等待调度')}</strong><span>${percent}%${eta ? ` · ${esc(eta)}` : ''}</span></div><div class="track"><div class="fill ${repair ? 'repair' : ''}" style="width:${percent}%"></div></div></div>`;
+      const companion = status === 'done' ? '' : `<div class="pet-dock" data-guide="project-pet"><button class="project-pet" aria-label="询问 Max 当前项目" title="问 Max" onclick="openPet(${Number(project.job_id || 0)}, '${esc(project.source_id)}')"><div class="pet-sprite ${petFrame(project)}"></div></button><span class="pet-label">问 Max</span></div>`;
       const selectable = Boolean(state.me?.bound && project.status === 'done' && project.category === '已完成未分类');
       const checked = state.selectedProjects.has(project.source_id);
       const selector = selectable ? `<label class="project-select" title="选择这个项目"><input type="checkbox" ${checked ? 'checked' : ''} onchange="toggleProjectSelection('${esc(project.source_id)}', this.checked)" /></label>` : '';
@@ -644,7 +664,7 @@
       if (Number(project.service_recoveries || 0) > 0) retryHistory.push(`服务恢复 ${Number(project.service_recoveries)} 次`);
       const retrySummary = retryHistory.length ? ` · ${retryHistory.join(' · ')}` : '';
       return `<article class="project-row ${status === 'done' ? 'completed' : ''}" data-source="${esc(project.source_id)}" data-category="${esc(project.category || '其他')}">
-        <div class="project-card ${esc(status)} ${checked ? 'selected' : ''}">
+        <div class="project-card ${esc(status)} ${checked ? 'selected' : ''}" data-guide="project-card">
           <div class="project-main">
             <div class="project-top">
               <div class="project-title-wrap">${selector}<div class="project-title"><strong>${esc(title)}</strong><span>arXiv ${esc(project.source_id)}${esc(retrySummary)}</span></div></div>
@@ -654,7 +674,7 @@
             ${progress}
             ${error}
           </div>
-          <div class="project-actions"><div class="project-organize">${categoryControl}</div><div class="action-group">${favorite}${doc}${retry}${remove}</div></div>
+          <div class="project-actions" data-guide="project-actions"><div class="project-organize">${categoryControl}</div><div class="action-group">${favorite}${doc}${retry}${remove}</div></div>
         </div>
         ${companion}
       </article>`;
@@ -677,15 +697,16 @@
           const collapsed = state.collapsedCategories.has(category);
           const selectedCount = projects.filter(project => state.selectedProjects.has(project.source_id)).length;
           const toolbar = category === '已完成未分类' && state.me?.bound
-            ? `<div class="unclassified-toolbar"><label class="select-all"><input type="checkbox" ${projects.length && selectedCount === projects.length ? 'checked' : ''} onchange="toggleAllUnclassified(this.checked)" />全选</label><button class="organize-button" ${selectedCount ? '' : 'disabled'} onclick="organizeSelectedProjects()" title="只整理勾选的未分类项目"><span class="icon"><svg viewBox="0 0 24 24"><path d="m12 3-1.9 4.1L6 9l4.1 1.9L12 15l1.9-4.1L18 9l-4.1-1.9Z"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4"/></svg></span><span id="organize-label">自动归类所选${selectedCount ? ` (${selectedCount})` : ''}</span></button></div>`
+            ? `<div class="unclassified-toolbar" data-guide="organize"><label class="select-all"><input type="checkbox" ${projects.length && selectedCount === projects.length ? 'checked' : ''} onchange="toggleAllUnclassified(this.checked)" />全选</label><button class="organize-button" ${selectedCount ? '' : 'disabled'} onclick="organizeSelectedProjects()" title="只整理勾选的未分类项目"><span class="icon"><svg viewBox="0 0 24 24"><path d="m12 3-1.9 4.1L6 9l4.1 1.9L12 15l1.9-4.1L18 9l-4.1-1.9Z"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4"/></svg></span><span id="organize-label">自动归类所选${selectedCount ? ` (${selectedCount})` : ''}</span></button></div>`
             : '';
-          return `<section class="category-group"><div class="category-head-row"><button class="category-heading ${collapsed ? 'collapsed' : ''}" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button>${toolbar}</div><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
+          return `<section class="category-group"><div class="category-head-row"><button class="category-heading ${collapsed ? 'collapsed' : ''}" data-guide="category-heading" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button>${toolbar}</div><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
         }).join('');
       }
       if (state.petProject) {
         const fresh = state.projects.find(item => item.source_id === state.petProject.source_id);
         if (fresh) state.petProject = fresh;
       }
+      if (!$('tour-coach').classList.contains('hidden')) setTimeout(() => showTourStep(false), 0);
     }
 
     async function refreshProjects() {
@@ -891,14 +912,145 @@
       $('pet-input').focus();
     }
 
-    function showButtonGuide() {
-      state.petProject = {source_id: '__guide__', job_id: 0, status: 'done', label: '页面向导', guide: true};
-      $('pet-project-title').textContent = '项目台按钮向导';
-      $('pet-panel-avatar').style.backgroundPosition = '100% 0';
-      state.petChats.__guide__ = [{role: 'assistant', content: '新任务会固定留在“进行中”，完成后先进入“已完成未分类”。绑定飞书账号后，可以在未分类组勾选多篇，再点“自动归类所选”；人工分类不会被覆盖。点击分类标题可折叠类内项目；星标是收藏；重试会继续失败任务；垃圾桶只从你的项目台移除。'}];
-      renderPetChat();
-      $('pet-panel').classList.remove('hidden');
+    const tourDefinitions = [
+      {
+        selector: '[data-guide="submit"]',
+        title: '先把论文交给我',
+        text: '在输入框粘贴 arXiv 链接或论文 ID，也支持 HuggingFace Papers 和 papers.cool。可以一行放一篇；确认下方识别数量后，点右侧“开始阅读”。',
+      },
+      {
+        selector: '[data-guide="progress"]',
+        title: '在同一张卡上看进度',
+        text: '提交后，论文会进入“进行中”。这里显示当前阶段、完成比例和预计时间；阶段变化会原位更新，不会连续新增消息卡片。',
+      },
+      {
+        selector: '[data-guide="project-pet"]',
+        title: '点这里询问当前论文',
+        text: '处理中项目右侧会有“问 Max”。点它以后，我会自动知道你问的是哪篇论文；可以直接问“到哪了”“还要多久”或“为什么卡住”。',
+      },
+      {
+        selector: '[data-guide="retry"]',
+        title: '失败时从这里重试',
+        text: '只有未完成任务才显示“重试”。点一次即可从可复用检查点继续；不要连续点击，卡片状态变成处理中就表示已经接收。',
+      },
+      {
+        selector: '[data-guide="project-actions"]',
+        title: '文档和项目操作都在卡片底部',
+        text: '完成后从这里打开飞书文档，也可以手动调整分类、收藏或移出项目台。垃圾桶只移除你看到的项目，不会删除已经生成的飞书文档。',
+      },
+      {
+        selector: '[data-guide="organize"]',
+        title: '完成后再批量归类',
+        text: '已完成论文先进入“已完成未分类”。先勾选要整理的卡片或点“全选”，再点“自动归类所选”。这个功能需要先绑定飞书账号。',
+      },
+      {
+        selector: '[data-guide="category-heading"]',
+        title: '点分类标题折叠项目',
+        text: '分类标题右侧是该类论文数量。点击整行标题可以折叠或展开，适合项目较多时快速收起暂时不看的主题。',
+      },
+      {
+        selector: '[data-guide="project-tools"]',
+        title: '用这里快速找到论文',
+        text: '搜索框按标题或 arXiv ID 查找；分类下拉框限定主题；“收藏、进行中、已完成”用于切换状态视图。问号按钮可以随时重新启动本导览。',
+      },
+      {
+        selector: '[data-guide="pipeline"]',
+        title: '想看系统怎么处理论文',
+        text: '点“Pipeline 架构”可以查看从下载、生成、内容审阅、格式质检到视觉验收的完整状态机，以及失败后会走哪条修复或重试路径。普通用户也可以直接查看。',
+      },
+      {
+        selector: '[data-guide="account"]',
+        title: '最后绑定你的飞书身份',
+        text: '点右上角“游客”，页面会生成一条 10 分钟有效的绑定指令。点复制，打开飞书并私聊“读不动了”，发送完整指令；再回到本页等待自动显示你的姓名，不需要刷新。绑定后网页与飞书任务会合并，并解锁批量归类。',
+      },
+    ];
+
+    function visibleTourTarget(selector) {
+      return [...document.querySelectorAll(selector)].find(element => {
+        const rect = element.getBoundingClientRect();
+        return element.getClientRects().length && rect.width > 0 && rect.height > 0;
+      }) || null;
     }
+
+    function clearTourTarget() {
+      document.querySelectorAll('.tour-target').forEach(element => element.classList.remove('tour-target'));
+      state.tourTarget = null;
+    }
+
+    function positionTourCoach() {
+      const target = state.tourTarget;
+      const coach = $('tour-coach');
+      if (!target || coach.classList.contains('hidden')) return;
+      const rect = target.getBoundingClientRect();
+      const coachRect = coach.getBoundingClientRect();
+      const gap = 14;
+      const margin = 12;
+      let left = Math.min(Math.max(margin, rect.left), window.innerWidth - coachRect.width - margin);
+      let top = rect.bottom + gap;
+      if (top + coachRect.height > window.innerHeight - margin) top = rect.top - coachRect.height - gap;
+      if (top < margin) top = Math.min(window.innerHeight - coachRect.height - margin, Math.max(margin, rect.bottom + gap));
+      coach.style.left = `${Math.max(margin, left)}px`;
+      coach.style.top = `${Math.max(margin, top)}px`;
+    }
+
+    function showTourStep(scroll = true) {
+      clearTourTarget();
+      const step = state.tourSteps[state.tourStep];
+      if (!step) { stopPageTour(); return; }
+      const target = visibleTourTarget(step.selector);
+      if (!target) {
+        state.tourSteps.splice(state.tourStep, 1);
+        showTourStep(scroll);
+        return;
+      }
+      state.tourTarget = target;
+      target.classList.add('tour-target');
+      $('tour-title').textContent = step.title;
+      $('tour-text').textContent = step.text;
+      $('tour-counter').textContent = `MAX 使用向导 · ${state.tourStep + 1}/${state.tourSteps.length}`;
+      $('tour-previous').disabled = state.tourStep === 0;
+      $('tour-next').textContent = state.tourStep === state.tourSteps.length - 1 ? '完成' : '下一步';
+      $('tour-backdrop').classList.remove('hidden');
+      $('tour-coach').classList.remove('hidden');
+      if (scroll) target.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'nearest'});
+      setTimeout(positionTourCoach, scroll ? 280 : 0);
+    }
+
+    function startPageTour() {
+      closePet();
+      state.tourSteps = tourDefinitions.filter(step => visibleTourTarget(step.selector));
+      state.tourStep = 0;
+      if (!state.tourSteps.length) { toast('页面还在加载，请稍后再试'); return; }
+      showTourStep();
+    }
+
+    function startBindingTour() {
+      closePet();
+      const accountStep = tourDefinitions.find(step => step.selector === '[data-guide="account"]');
+      state.tourSteps = accountStep ? [accountStep] : [];
+      state.tourStep = 0;
+      showTourStep();
+    }
+
+    function stopPageTour() {
+      clearTourTarget();
+      $('tour-backdrop').classList.add('hidden');
+      $('tour-coach').classList.add('hidden');
+      localStorage.setItem('maxreadProjectOnboardingSeen', '1');
+    }
+
+    function previousTourStep() {
+      if (state.tourStep > 0) state.tourStep -= 1;
+      showTourStep();
+    }
+
+    function nextTourStep() {
+      if (state.tourStep >= state.tourSteps.length - 1) { stopPageTour(); return; }
+      state.tourStep += 1;
+      showTourStep();
+    }
+
+    function showButtonGuide() { startPageTour(); }
 
     function closePet() { $('pet-panel').classList.add('hidden'); }
     function renderPetChat() {
@@ -910,6 +1062,14 @@
 
     async function askPet(content) {
       if (!state.petProject || !content.trim() || state.petBusy) return;
+      if (/绑定.*飞书|飞书.*绑定/.test(content)) {
+        startBindingTour();
+        return;
+      }
+      if (/按钮|页面怎么用|项目台怎么用|使用方法|新手指引|带我看/.test(content)) {
+        startPageTour();
+        return;
+      }
       const key = state.petProject.source_id;
       const chat = state.petChats[key] || (state.petChats[key] = []);
       chat.push({role: 'user', content: content.trim()});
@@ -991,7 +1151,7 @@
       $('account-content').innerHTML = '<div class="bind-copy">正在生成绑定码...</div>';
       try {
         const data = await api('/api/web/binding-code', {method: 'POST', body: '{}'});
-        $('account-content').innerHTML = `<div class="bind-copy">在飞书私聊「读不动了」发送：</div><div class="command"><code>${esc(data.command)}</code><button class="copy" aria-label="复制" onclick="copyCommand('${esc(data.command)}')">${icon('copy')}</button></div><div class="expires">绑定码 10 分钟内有效。</div>${admin}`;
+        $('account-content').innerHTML = `<div class="bind-copy">1. 点右侧复制按钮。<br>2. 打开飞书，私聊「读不动了」。<br>3. 发送下面这条完整指令。<br>4. 回到本页等待姓名自动出现，不需要刷新。</div><div class="command"><code>${esc(data.command)}</code><button class="copy" aria-label="复制绑定指令" title="复制绑定指令" onclick="copyCommand('${esc(data.command)}')">${icon('copy')}</button></div><div class="expires">绑定指令 10 分钟内有效；绑定后网页与飞书任务会合并到同一账号。</div>${admin}`;
         pollBinding();
       } catch (error) {
         $('binding-error').textContent = error.message;
@@ -1013,26 +1173,16 @@
       }
     }
 
-    const onboarding = [
-      ['每篇论文都是一个项目', '状态、进度、文档与重试都固定在同一张项目卡上。'],
-      ['Max 跟着项目走', '点卡片旁的 Max，它会自动知道你正在问哪篇论文。'],
-      ['聊天不会污染项目记录', 'Max 的对话只留在当前面板，项目台只呈现可交付信息。'],
-    ];
-    function renderOnboarding() {
-      const [title, text] = onboarding[state.onboardingStep];
-      $('onboarding-title').textContent = title;
-      $('onboarding-text').textContent = text;
-      $('onboarding-pet').style.backgroundPosition = `${state.onboardingStep * 33.333}% 0`;
-      $('onboarding-dots').innerHTML = onboarding.map((_, index) => `<span class="${index === state.onboardingStep ? 'active' : ''}"></span>`).join('');
-      $('onboarding-next').textContent = state.onboardingStep === onboarding.length - 1 ? '开始使用' : '下一步';
+    function maybeOnboard() {
+      if (!localStorage.getItem('maxreadProjectOnboardingSeen')) setTimeout(startPageTour, 500);
     }
-    function nextOnboarding() { if (state.onboardingStep < onboarding.length - 1) { state.onboardingStep += 1; renderOnboarding(); } else finishOnboarding(); }
-    function finishOnboarding() { localStorage.setItem('maxreadProjectOnboardingSeen', '1'); $('onboarding-dialog').close(); }
-    function maybeOnboard() { if (!localStorage.getItem('maxreadProjectOnboardingSeen')) { renderOnboarding(); $('onboarding-dialog').showModal(); } }
 
     $('paper-input').addEventListener('input', updateSubmitMeta);
     $('paper-input').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitPapers(); } });
     $('pet-input').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendPetMessage(); } });
+    window.addEventListener('resize', positionTourCoach);
+    window.addEventListener('scroll', positionTourCoach, {passive: true});
+    window.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('tour-coach').classList.contains('hidden')) stopPageTour(); });
 
     async function boot() {
       await Promise.all([loadMe(), loadAdminContext()]);

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .project_metadata import is_placeholder_project_title
 from .workflow import (
     InvalidWorkflowTransition,
     PublishedCheckpoint,
@@ -373,6 +374,15 @@ class Store:
         existing = self.get_paper(paper_id)
         names = {"title", "project_summary", "authors", "arxiv_url", "pdf_path", "source_path", "doc_url", "doc_token", "error"}
         clean = {k: str(v) for k, v in fields.items() if k in names and v is not None}
+        incoming_title = str(clean.get("title") or "").strip()
+        if (
+            incoming_title
+            and is_placeholder_project_title(incoming_title, paper_id)
+            and existing is not None
+            and not is_placeholder_project_title(existing.title, paper_id)
+        ):
+            clean.pop("title", None)
+            incoming_title = ""
         if existing is None:
             columns = ["paper_id", "status"] + list(clean.keys())
             values = [paper_id, status] + list(clean.values())
@@ -385,7 +395,49 @@ class Store:
             assignments = ["status = ?", "updated_at = current_timestamp"] + [f"{k} = ?" for k in clean]
             values = [status] + list(clean.values()) + [paper_id]
             self.conn.execute(f"update papers set {','.join(assignments)} where paper_id = ?", values)
+        if incoming_title and not is_placeholder_project_title(incoming_title, paper_id):
+            self._sync_paper_title_locked(paper_id, incoming_title)
         self.conn.commit()
+
+    def sync_paper_title(self, paper_id: str, title: str) -> int:
+        """Replace blank/placeholder titles for one paper across durable views."""
+        paper_id = str(paper_id or "").strip()
+        title = str(title or "").strip()
+        if not paper_id or is_placeholder_project_title(title, paper_id):
+            raise ValueError("a real paper title is required")
+        self.conn.execute("begin immediate")
+        try:
+            changed = self._sync_paper_title_locked(paper_id, title)
+            self.conn.commit()
+            return changed
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _sync_paper_title_locked(self, paper_id: str, title: str) -> int:
+        changed = 0
+        for table, source_column in (
+            ("papers", "paper_id"),
+            ("queue_jobs", "source_id"),
+            ("usage_events", "source_id"),
+        ):
+            rows = self.conn.execute(
+                f"select rowid as _rowid, title from {table} where {source_column} = ?",
+                (paper_id,),
+            ).fetchall()
+            rowids = [
+                int(row["_rowid"])
+                for row in rows
+                if is_placeholder_project_title(str(row["title"] or ""), paper_id)
+            ]
+            if not rowids:
+                continue
+            self.conn.executemany(
+                f"update {table} set title = ? where rowid = ?",
+                ((title, rowid) for rowid in rowids),
+            )
+            changed += len(rowids)
+        return changed
 
     def set_paper_project_summary(self, paper_id: str, summary: str) -> None:
         self.conn.execute(
@@ -1749,6 +1801,20 @@ class Store:
             if worker_id and str(row["worker_id"] or "") != str(worker_id):
                 self.conn.rollback()
                 return False
+            effective_title = str(title or "").strip()
+            if str(row["source_kind"] or "") == "paper":
+                paper = self.conn.execute(
+                    "select title from papers where paper_id = ?",
+                    (str(row["source_id"] or ""),),
+                ).fetchone()
+                candidates = (effective_title, str(paper["title"] or "") if paper else "", str(row["title"] or ""))
+                effective_title = next(
+                    (
+                        candidate for candidate in candidates
+                        if candidate and not is_placeholder_project_title(candidate, str(row["source_id"] or ""))
+                    ),
+                    effective_title,
+                )
             current = self._queue_workflow_state(row)
             if current is WorkflowState.COMPLETED:
                 result = None
@@ -1772,8 +1838,10 @@ class Store:
                     suppress_progress_notifications = 0, recovery_attempts = 0
                 where id = ?
                 """,
-                (doc_url, title, int(job_id)),
+                (doc_url, effective_title, int(job_id)),
             )
+            if effective_title and not is_placeholder_project_title(effective_title, str(row["source_id"] or "")):
+                self._sync_paper_title_locked(str(row["source_id"] or ""), effective_title)
             self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (int(job_id), "done", doc_url))
             self.conn.commit()
             return True

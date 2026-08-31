@@ -201,13 +201,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._json_response(self._with_store(lambda store: store.list_web_accounts()))
             return
         if parsed.path == "/architecture":
-            if not self._require_admin():
-                return
             self._html(architecture_html())
             return
         if parsed.path == "/api/workflow-spec":
-            if not self._require_admin():
-                return
             self._json_response(architecture_spec())
             return
         if parsed.path == "/api/summary":

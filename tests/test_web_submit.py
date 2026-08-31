@@ -34,6 +34,7 @@ def test_web_identity_defaults_to_guest_and_is_stable(tmp_path):
 
 def test_arxiv_id_title_is_treated_as_placeholder():
     assert is_placeholder_project_title("arXiv 2410.02367", "2410.02367") is True
+    assert is_placeholder_project_title("arXiv ID: 2410.02367", "2410.02367") is True
     assert is_placeholder_project_title("2410.02367", "2410.02367") is True
     assert is_placeholder_project_title("SageAttention: Accurate 8-bit Attention", "2410.02367") is False
 
@@ -738,7 +739,15 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "toggleProjectSelection" in WEB_SUBMIT_HTML
     assert "toggleAllUnclassified" in WEB_SUBMIT_HTML
     assert "toggleCategory(" in WEB_SUBMIT_HTML
-    assert "这些按钮怎么用" in WEB_SUBMIT_HTML
+    assert "带我看页面" in WEB_SUBMIT_HTML
+    assert "startPageTour" in WEB_SUBMIT_HTML
+    assert 'data-guide="submit"' in WEB_SUBMIT_HTML
+    assert 'data-guide="project-pet"' in WEB_SUBMIT_HTML
+    assert 'data-guide="organize"' in WEB_SUBMIT_HTML
+    assert 'id="tour-coach"' in WEB_SUBMIT_HTML
+    assert "点右侧“开始阅读”" in WEB_SUBMIT_HTML
+    assert "完成后再批量归类" in WEB_SUBMIT_HTML
+    assert 'id="onboarding-dialog"' not in WEB_SUBMIT_HTML
     assert "智能整理" in WEB_SUBMIT_HTML
     assert ".category-list[hidden]" in WEB_SUBMIT_HTML
     assert "完成后进入未分类" in WEB_SUBMIT_HTML
@@ -764,6 +773,11 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "问 Max" in WEB_SUBMIT_HTML
     assert "maxreadProjectOnboardingSeen" in WEB_SUBMIT_HTML
     assert 'id="console-link"' in WEB_SUBMIT_HTML
+    assert 'id="pipeline-link"' in WEB_SUBMIT_HTML
+    assert 'href="./architecture"' in WEB_SUBMIT_HTML
+    assert "startBindingTour" in WEB_SUBMIT_HTML
+    assert "发送下面这条完整指令" in WEB_SUBMIT_HTML
+    assert "回到本页等待姓名自动出现" in WEB_SUBMIT_HTML
     assert "class=\"console-link\"" in WEB_SUBMIT_HTML
     assert 'href="./projects"' in WEB_SUBMIT_HTML
     assert 'href="./admin"' in WEB_SUBMIT_HTML

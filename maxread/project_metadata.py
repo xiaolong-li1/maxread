@@ -24,13 +24,14 @@ def is_placeholder_project_title(title: str, source_id: str = "") -> bool:
         return True
     if "标题尚未取得" in value or "title unavailable" in value.lower():
         return True
-    if paper_id and value.lower() in {
+    normalized = re.sub(r"[\s:：\[\]()]+", " ", value.lower()).strip()
+    if paper_id and normalized in {
         paper_id.lower(),
         f"arxiv {paper_id}".lower(),
-        f"arxiv: {paper_id}".lower(),
+        f"arxiv id {paper_id}".lower(),
     }:
         return True
-    return bool(re.fullmatch(r"(?i)arxiv\s+\d{4}\.\d{4,5}", value))
+    return bool(re.fullmatch(r"(?i)arxiv(?:\s+id)?\s*[:：]?\s*\d{4}\.\d{4,5}", value))
 
 _CATEGORY_KEYWORDS = (
     ("机器人", ("robot", "robotics", "manipulation", "locomotion", "embodied", "navigation", "motion planning", "机器人", "具身", "导航", "操控")),

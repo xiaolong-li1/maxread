@@ -588,3 +588,37 @@ def test_store_tracks_review_issues(tmp_path):
     assert stats[0]["category"] == "tex_macro"
     assert stats[0]["count"] == 1
     store.close()
+
+
+def test_store_syncs_real_paper_title_across_placeholder_records(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    paper_id = "2608.24646"
+    placeholder = f"arXiv {paper_id}"
+    real_title = "On-Policy Self-Distillation in Diffusion Models"
+    store.upsert_paper(paper_id, "legacy", title=placeholder)
+    usage_id = store.add_usage_event(
+        "evt", "om", "oc", "p2p", "ou_1", "paper", paper_id, "url", title=placeholder, status="done"
+    )
+    queued = store.enqueue_job("paper", paper_id, "url", "evt", "om", "oc", "p2p", "ou_1", usage_id)
+    store.conn.execute("update queue_jobs set title = ?, status = 'done' where id = ?", (placeholder, queued["job_id"]))
+    store.conn.commit()
+
+    changed = store.sync_paper_title(paper_id, real_title)
+
+    assert changed == 3
+    assert store.get_paper(paper_id).title == real_title
+    assert store.conn.execute("select title from queue_jobs where id = ?", (queued["job_id"],)).fetchone()[0] == real_title
+    assert store.conn.execute("select title from usage_events where id = ?", (usage_id,)).fetchone()[0] == real_title
+    store.close()
+
+
+def test_placeholder_upsert_cannot_overwrite_a_real_paper_title(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    paper_id = "2608.24646"
+    real_title = "On-Policy Self-Distillation in Diffusion Models"
+    store.upsert_paper(paper_id, "done", title=real_title)
+
+    store.upsert_paper(paper_id, "legacy", title=f"arXiv ID: {paper_id}")
+
+    assert store.get_paper(paper_id).title == real_title
+    store.close()

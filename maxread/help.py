@@ -6,6 +6,9 @@ import re
 from .feishu import progress_help_lines
 
 
+WEB_PROJECTS_URL = "https://xiaolong-dev.me/maxread/projects"
+
+
 HELP_PATTERNS = [
     r"^\s*/?help\s*$",
     r"帮助",
@@ -52,6 +55,9 @@ def intro_message(feedback_url: str = "") -> str:
         "- 部分普通网页文章链接\n\n"
         "一条消息可以放多篇，我会并行处理并提示排队顺序。\n"
         "私聊我可以直接发链接；群聊里必须 @ 我，我才会处理。\n\n"
+        f"也可以使用网页项目台：{WEB_PROJECTS_URL}\n"
+        "网页里每篇论文是一张持续更新的项目卡，可以看进度、打开文档、重试、收藏和整理分类。\n"
+        "绑定飞书：在网页右上角点“游客” → 复制 10 分钟有效的绑定指令 → 回飞书私聊我并发送完整指令 → 返回网页等待姓名自动出现。绑定后，网页和飞书任务会归到同一个账号。\n\n"
         "处理过程中，我会在你的原消息下添加飞书表情反应，不单独刷屏：\n"
         + "\n".join(progress_help_lines())
         + "\n\n"
@@ -67,6 +73,8 @@ def group_intro_message() -> str:
         "- 直接 @ 我并带链接：@读不动了 2604.12946\n"
         "- 或者在一条 arXiv 链接消息下开话题 @ 我：@读不动了 看看这个\n"
         "- 一条消息可以放多篇，我会分别排队生成文档。\n\n"
+        f"网页项目台：{WEB_PROJECTS_URL}\n"
+        "网页里可以看每篇论文的实时项目卡、打开文档、重试和整理分类。绑定方法：点网页右上角“游客”，复制绑定指令，回飞书私聊我发送，再返回网页等待姓名自动出现。\n\n"
         "目前支持：\n"
         "- arXiv ID / abs / PDF 链接\n"
         "- HuggingFace Papers 链接\n"

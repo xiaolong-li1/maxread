@@ -246,6 +246,17 @@ def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
         assert response.status == 200
         assert "我的论文项目" in response.read().decode("utf-8")
 
+        connection.request("GET", "/architecture")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert "MaxRead Pipeline Architecture" in response.read().decode("utf-8")
+
+        connection.request("GET", "/api/workflow-spec")
+        response = connection.getresponse()
+        public_spec = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+        assert public_spec["metrics"]["states"] > 0
+
         connection.request("GET", "/assets/web-pet-sprite.png")
         response = connection.getresponse()
         assert response.status == 200
