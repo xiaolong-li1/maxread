@@ -48,7 +48,7 @@ DEFAULT_LIMIT = 80
 DEFAULT_DAYS = 3
 CONTACT_LOOKUP_TIMEOUT_SECONDS = 5
 ADMIN_SESSION_COOKIE = "maxread_admin_session"
-ADMIN_SESSION_SECONDS = 8 * 60 * 60
+ADMIN_SESSION_SECONDS = 30 * 24 * 60 * 60
 ADMIN_LOGIN_WINDOW_SECONDS = 10 * 60
 ADMIN_LOGIN_MAX_FAILURES = 5
 WEB_SUBMIT_WINDOW_SECONDS = 10 * 60
@@ -60,7 +60,6 @@ class AdminServer(ThreadingHTTPServer):
     def __init__(self, server_address, handler_class, settings: Settings):
         super().__init__(server_address, handler_class)
         self.settings = settings
-        self.admin_sessions: dict[str, float] = {}
         self.admin_login_failures: dict[str, list[float]] = {}
         self.web_submit_requests: dict[str, list[float]] = {}
         self.web_pet_requests: dict[str, list[float]] = {}
@@ -85,8 +84,11 @@ class AdminServer(ThreadingHTTPServer):
                 return "", "invalid_password"
             self.admin_login_failures.pop(client_id, None)
             token = secrets.token_urlsafe(32)
-            self.admin_sessions[token] = now + ADMIN_SESSION_SECONDS
-            self._discard_expired_sessions(now)
+            store = Store(self.settings.db_path)
+            try:
+                store.create_admin_session(_admin_token_hash(token), int(now + ADMIN_SESSION_SECONDS))
+            finally:
+                store.close()
             return token, ""
 
     def allow_web_submission(self, client_id: str) -> bool:
@@ -120,22 +122,24 @@ class AdminServer(ThreadingHTTPServer):
     def is_admin_session(self, token: str) -> bool:
         if not token:
             return False
-        now = time.time()
-        with self.admin_lock:
-            self._discard_expired_sessions(now)
-            expires_at = self.admin_sessions.get(token, 0)
-            return bool(expires_at > now)
+        store = Store(self.settings.db_path)
+        try:
+            return store.is_admin_session(_admin_token_hash(token), int(time.time()))
+        finally:
+            store.close()
 
     def delete_admin_session(self, token: str) -> None:
         if not token:
             return
-        with self.admin_lock:
-            self.admin_sessions.pop(token, None)
+        store = Store(self.settings.db_path)
+        try:
+            store.delete_admin_session(_admin_token_hash(token))
+        finally:
+            store.close()
 
-    def _discard_expired_sessions(self, now: float) -> None:
-        expired = [token for token, expires_at in self.admin_sessions.items() if expires_at <= now]
-        for token in expired:
-            self.admin_sessions.pop(token, None)
+
+def _admin_token_hash(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
 
 
 def run_admin_server(settings: Settings, host: str = "127.0.0.1", port: int = 8765) -> None:

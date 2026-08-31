@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -133,6 +134,14 @@ class Store:
 
             create index if not exists web_identity_feishu_idx on web_identities(feishu_open_id);
             create index if not exists web_binding_identity_idx on web_binding_codes(web_identity_id, expires_at);
+
+            create table if not exists admin_sessions (
+                token_hash text primary key,
+                expires_at integer not null,
+                created_at datetime not null default current_timestamp
+            );
+
+            create index if not exists admin_sessions_expiry_idx on admin_sessions(expires_at);
 
             create table if not exists web_conversations (
                 id integer primary key autoincrement,
@@ -354,6 +363,26 @@ class Store:
         if column in columns:
             return
         self.conn.execute(f"alter table {table} add column {column} {definition}")
+        self.conn.commit()
+
+    def create_admin_session(self, token_hash: str, expires_at: int) -> None:
+        now = int(time.time())
+        self.conn.execute("delete from admin_sessions where expires_at <= ?", (now,))
+        self.conn.execute(
+            "insert or replace into admin_sessions (token_hash, expires_at) values (?, ?)",
+            (str(token_hash), int(expires_at)),
+        )
+        self.conn.commit()
+
+    def is_admin_session(self, token_hash: str, now: int) -> bool:
+        row = self.conn.execute(
+            "select 1 from admin_sessions where token_hash = ? and expires_at > ?",
+            (str(token_hash), int(now)),
+        ).fetchone()
+        return row is not None
+
+    def delete_admin_session(self, token_hash: str) -> None:
+        self.conn.execute("delete from admin_sessions where token_hash = ?", (str(token_hash),))
         self.conn.commit()
 
     def get_paper(self, paper_id: str) -> Optional[PaperRecord]:

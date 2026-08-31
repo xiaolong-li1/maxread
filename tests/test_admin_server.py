@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import maxread.admin_server as admin_server
 from maxread.admin_architecture import architecture_html, architecture_spec
-from maxread.admin_server import AdminHandler, AdminServer, INDEX_HTML, _admin_summary, _attach_user_names, _limit, _record_filters
+from maxread.admin_server import ADMIN_SESSION_SECONDS, AdminHandler, AdminServer, INDEX_HTML, _admin_summary, _attach_user_names, _limit, _record_filters
 from maxread.db import Store
 from maxread.workflow import transition
 
@@ -194,6 +194,7 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path):
         cookie = response.getheader("set-cookie").split(";", 1)[0]
         assert cookie.startswith("maxread_admin_session=")
         assert password not in response.getheader("set-cookie")
+        assert f"Max-Age={ADMIN_SESSION_SECONDS}" in response.getheader("set-cookie")
 
         response, body = request(
             "POST",
@@ -216,6 +217,34 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+def test_admin_session_survives_server_recreation_and_logout(tmp_path):
+    password = "persistent-admin-password"
+    settings = SimpleNamespace(
+        db_path=tmp_path / "maxread.sqlite3",
+        admin_password_hash=hashlib.sha256(password.encode("utf-8")).hexdigest(),
+        lark_cli="lark-cli",
+    )
+    first = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
+    token, error = first.create_admin_session(password, "127.0.0.1")
+    first.server_close()
+
+    second = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
+    try:
+        assert error == ""
+        assert second.is_admin_session(token) is True
+        store = Store(settings.db_path)
+        try:
+            stored = store.conn.execute("select token_hash from admin_sessions").fetchone()[0]
+            assert stored != token
+            assert len(stored) == 64
+        finally:
+            store.close()
+        second.delete_admin_session(token)
+        assert second.is_admin_session(token) is False
+    finally:
+        second.server_close()
 
 
 def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):

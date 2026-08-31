@@ -285,6 +285,14 @@ of echoing values.
    `nginx -t` before reload.
 8. Commit and push the exact tested source to GitHub.
 
+The public `/maxread/` location remains GET-only. Its higher-priority write
+allowlist must include only the authenticated product actions. In particular,
+the recruiting dashboard needs `admin/mail/scan` and `admin/mail/config` next
+to `admin/login` and `admin/logout`; do not remove the generic GET-only guard.
+Administrator sessions are hashed in the `admin_sessions` SQLite table, so an
+admin service restart must not require another login. Never store raw session
+tokens in SQLite or Nginx configuration.
+
 Do not start a second Feishu listener on 5090 or a laptop. Only the SSH tunnel
 and remote paper-worker units run there. A second listener can consume the
 same event and cause duplicate acknowledgements/documents.
