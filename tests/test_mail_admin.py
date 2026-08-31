@@ -110,3 +110,12 @@ def test_manual_scan_accepts_only_configured_accounts_and_records_unit(tmp_path,
         assert "未知邮箱" in str(exc)
     else:
         raise AssertionError("unknown account should fail")
+
+
+def test_mail_admin_page_uses_reverse_proxy_relative_api_paths():
+    html = mail_admin.MAIL_ADMIN_HTML
+
+    assert "api('api/admin/mail/status')" in html
+    assert "api('api/admin/mail/scan'" in html
+    assert "api('api/admin/mail/config'" in html
+    assert "api('/api/admin/mail" not in html

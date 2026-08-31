@@ -110,9 +110,14 @@
     function pill(status,bad=false,warn=false){return `<span class="pill ${bad?'bad':warn?'warn':''}">${esc(status)}</span>`;}
     async function loadStatus(){
       try{
-        const data=await api('/api/admin/mail/status');
+        const data=await api('api/admin/mail/status');
         $('auth').classList.add('hidden');$('dashboard').classList.remove('hidden');render(data);
-      }catch(error){if(error.status===401){$('dashboard').classList.add('hidden');$('auth').classList.remove('hidden');return;}toast(error.message);}
+      }catch(error){
+        $('dashboard').classList.add('hidden');$('auth').classList.remove('hidden');
+        if(error.status===401)return;
+        $('auth').querySelector('p').textContent=`状态加载失败：${error.message}`;
+        toast(error.message);
+      }
     }
     function render(data){
       const latest=data.runs?.[0]||{}; const state=data.business_state||'down';
@@ -129,8 +134,8 @@
       $('runs').innerHTML=(data.runs||[]).map(r=>`<tr><td>${esc(fmt(r.started_at))}</td><td>${pill(r.status,r.status==='failed'||r.status==='abandoned',Number(r.failed_threads)>0)}</td><td>${Number(r.scanned_messages||0)}</td><td>${Number(r.new_threads||0)}</td><td>${Number(r.updated_threads||0)}</td><td>${Number(r.failed_threads||0)}</td><td>${esc(duration(r.started_at,r.finished_at))}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">暂无运行</td></tr>';
       $('errors').innerHTML=(data.errors||[]).map(e=>`<div class="error-row"><strong>${Number(e.count||0)}</strong><span>${esc(e.error||'未知错误')}</span><span class="time muted">${esc(fmt(e.last_seen))}</span></div>`).join('')||'<div class="empty">没有近期错误</div>';
     }
-    async function scanMailbox(account){try{const result=await api('/api/admin/mail/scan',{method:'POST',body:JSON.stringify({account})});toast(`已启动 ${result.account==='all'?'全部邮箱':result.account} 扫描`);await loadStatus();}catch(error){toast(error.message);}}
-    async function saveConfig(){const button=$('save-config');button.disabled=true;try{await api('/api/admin/mail/config',{method:'POST',body:JSON.stringify({scan_interval_minutes:Number($('scan-interval').value),report_interval_hours:Number($('report-interval').value)})});toast('配置已保存');await loadStatus();}catch(error){toast(error.message);}finally{button.disabled=false;}}
+    async function scanMailbox(account){try{const result=await api('api/admin/mail/scan',{method:'POST',body:JSON.stringify({account})});toast(`已启动 ${result.account==='all'?'全部邮箱':result.account} 扫描`);await loadStatus();}catch(error){toast(error.message);}}
+    async function saveConfig(){const button=$('save-config');button.disabled=true;try{await api('api/admin/mail/config',{method:'POST',body:JSON.stringify({scan_interval_minutes:Number($('scan-interval').value),report_interval_hours:Number($('report-interval').value)})});toast('配置已保存');await loadStatus();}catch(error){toast(error.message);}finally{button.disabled=false;}}
     loadStatus();setInterval(loadStatus,15000);
   </script>
 </body>
