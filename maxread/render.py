@@ -116,6 +116,9 @@ def _normalize_backticked_math(
             return match.group(0)
         if _looks_like_code_identifier(raw):
             return match.group(0)
+        text_flow = _normalize_backticked_text_flow(raw)
+        if text_flow:
+            return text_flow
         if not _looks_like_math_code(raw):
             return match.group(0)
         body = _normalize_latex_body(raw, latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
@@ -136,6 +139,32 @@ def _normalize_backticked_math(
         return f"<latex>{body}</latex>"
 
     return re.sub(r"`([^`\n]{1,240})`", repl, markdown)
+
+
+_TEXT_FLOW_ARROWS = {
+    "to": "→",
+    "rightarrow": "→",
+    "longrightarrow": "→",
+    "Rightarrow": "⇒",
+    "Longrightarrow": "⇒",
+    "leftrightarrow": "↔",
+    "Leftrightarrow": "⇔",
+}
+
+
+def _normalize_backticked_text_flow(value: str) -> str:
+    """Compile prose pipelines without treating the whole sentence as math."""
+    raw = str(value or "").strip()
+    if not re.search(r"[\u4e00-\u9fff]", raw) or re.search(r"[{}_^$]", raw):
+        return ""
+    commands = re.findall(r"\\([A-Za-z]+)", raw)
+    if not commands or any(command not in _TEXT_FLOW_ARROWS for command in commands):
+        return ""
+    text = raw
+    for command, arrow in _TEXT_FLOW_ARROWS.items():
+        text = re.sub(rf"\\{command}\b", arrow, text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if "\\" not in text else ""
 
 
 _MATH_FUNCTION_NAMES = {

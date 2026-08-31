@@ -229,6 +229,25 @@ def test_polish_markdown_cleans_cjk_math_code_without_leaking_tex():
     assert "S_i" in out
 
 
+def test_polish_markdown_compiles_backticked_cjk_process_arrows_as_text():
+    source = r"`单图像 \rightarrow 对齐的全局 3D 代理 \to 粗糙 RGB-D 轨迹 \Rightarrow 视频精修`"
+
+    out = polish_markdown(source)
+
+    assert out.strip() == "单图像 → 对齐的全局 3D 代理 → 粗糙 RGB-D 轨迹 ⇒ 视频精修"
+    assert "<latex>" not in out
+    assert "`" not in out
+
+
+def test_polish_markdown_keeps_backticked_structured_math_out_of_text_flow_rule():
+    source = r"`中文条件 x_i \rightarrow y_{i+1}`"
+
+    out = polish_markdown(source)
+
+    assert "→" not in out
+    assert r"\rightarrow" in out
+
+
 def test_polish_markdown_normalizes_common_paper_macros():
     out = polish_markdown(r"$\mX \in \R^{N\times d}, \gI_i=\TopK(\mS), \Ls_{\rm KL}=\KL(P\|Q), \sg(P), \softmax(x)$")
     assert r"\mathbf{X}" in out
