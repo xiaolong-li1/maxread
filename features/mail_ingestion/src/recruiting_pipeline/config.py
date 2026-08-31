@@ -131,7 +131,7 @@ class PipelineSettings:
             db_path=db_path,
             interval_days=_float(merged, "RECRUITING_SCAN_INTERVAL_DAYS", 1.0, 0.01),
             scan_limit=_int(merged, "MAIL_SCAN_LIMIT", 100, 1),
-            model=value("RECRUITING_MODEL", "gpt-5.6-sol"),
+            model=value("RECRUITING_MODEL", "gpt-5.6-luna"),
             reasoning_effort=value("RECRUITING_REASONING_EFFORT", "medium"),
             api_key=value("RECRUITING_OPENAI_API_KEY", value("OPENAI_API_KEY")),
             api_base_url=value("RECRUITING_OPENAI_BASE_URL", value("OPENAI_BASE_URL", "https://api.openai.com/v1")),

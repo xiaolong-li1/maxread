@@ -155,4 +155,4 @@ IMAP_PASSWORD=app-password-or-mailbox-password
 
 完整的线程状态、并发边界、模型路由和重试策略见 [`docs/recruiting-pipeline.md`](docs/recruiting-pipeline.md)。
 
-模型默认使用 5090 上现有 API 的 `gpt-5.6-sol`，`reasoning.effort=medium`：普通抽取和 follow-up 合并各一次；不使用模型决定人工筛选结果。后续可在同一配置下比较 `low/medium` 的准确率、延迟、token 与重试率。
+模型默认使用 `gpt-5.6-luna`，`reasoning.effort=medium`：普通抽取和 follow-up 合并各一次；不使用模型决定人工筛选结果。论文生成仍可独立使用更高档模型。后续可在同一配置下比较 `low/medium` 的准确率、延迟、token 与重试率。

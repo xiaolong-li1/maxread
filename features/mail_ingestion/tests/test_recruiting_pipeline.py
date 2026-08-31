@@ -88,6 +88,7 @@ class RecruitingPipelineTest(unittest.TestCase):
             self.assertEqual(settings.mailbox_env_files, (primary, secondary))
             self.assertEqual(settings.mailbox_addresses, ("zip.lab@zju.edu.cn", "bohan.zhuang@zju.edu.cn"))
             self.assertEqual(settings.team_addresses, ("erix025@outlook.com", "wangweijie@zju.edu.cn"))
+            self.assertEqual(settings.model, "gpt-5.6-luna")
 
     def test_official_985_and_c9_lists_have_expected_membership(self) -> None:
         self.assertEqual(len(PROJECT_985), 39)

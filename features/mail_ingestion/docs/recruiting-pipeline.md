@@ -88,13 +88,13 @@ C9 依据九校联盟成员口径；别名按完整院校分段匹配，避免�
 生产环境复用 Aliyun 私有配置中的 OpenAI-compatible API：
 
 ```dotenv
-RECRUITING_MODEL=gpt-5.6-sol
+RECRUITING_MODEL=gpt-5.6-luna
 RECRUITING_REASONING_EFFORT=medium
 RECRUITING_OPENAI_BASE_URL=<private gateway>
 RECRUITING_OPENAI_API_MODE=responses
 ```
 
-普通新邮件和 follow-up 合并都使用 `gpt-5.6-sol` medium；模型只负责分类、字段抽取和短段落摘要，不负责人工筛选。候选摘要最多四行，按需分为申请目的、科研经历、论文/发表（含会议/状态）、奖项/竞赛。PDF 先本地 `pdftotext`，扫描件再扩展视觉输入，避免把整份 PDF 重复发给模型。
+普通新邮件和 follow-up 合并都使用 `gpt-5.6-luna` medium；模型只负责分类、字段抽取和短段落摘要，不负责人工筛选。候选摘要最多四行，按需分为申请目的、科研经历、论文/发表（含会议/状态）、奖项/竞赛。PDF 先本地 `pdftotext`，扫描件再扩展视觉输入，避免把整份 PDF 重复发给模型。
 
 ## 6. 重试与幂等
 
