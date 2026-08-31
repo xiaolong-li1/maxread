@@ -335,6 +335,31 @@ def test_fetch_source_text_extracts_overpic_and_captionof_figures(tmp_path):
     assert figures[0].label == "fig:overview"
 
 
+def test_figure_owner_prefers_first_body_reference_over_float_location(tmp_path):
+    source_dir = tmp_path / "source"
+    (source_dir / "fig").mkdir(parents=True)
+    (source_dir / "fig" / "pipeline.png").write_bytes(b"png")
+    (source_dir / "main.tex").write_text(
+        r"""
+\section{Method}
+The pipeline is shown in Fig.~\ref{fig:pipeline}.
+\section{Experiments}
+\begin{figure}
+\includegraphics{fig/pipeline.png}
+\caption{Complete model architecture.}
+\label{fig:pipeline}
+\end{figure}
+""",
+        encoding="utf-8",
+    )
+
+    figures = arxiv_module._extract_figures_from_dir(source_dir)
+
+    assert len(figures) == 1
+    assert figures[0].owner_section == "method"
+    assert figures[0].owner_evidence.startswith("reference:fig:pipeline:Method")
+
+
 def test_fetch_source_text_extracts_includegraphics_path_on_following_line(tmp_path):
     paper_dir = tmp_path / "papers" / "2608.07193"
     paper_dir.mkdir(parents=True)

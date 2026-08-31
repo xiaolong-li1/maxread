@@ -23,7 +23,7 @@ from .publishing import publish_marker_image
 from .quality import PrePublishQualityError, blocking_quality_warnings, paper_markdown_completeness_errors, verify_published_docx
 from .quality_repair import QualityRepairResult, repair_until_quality_passes
 from .repository import find_repository_url
-from .render import _figure_section_target, compiled_figure_captions, compose_related_figure_groups, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, normalize_figure_captions, polish_markdown, prepare_key_figures, remove_false_material_warning
+from .render import _figure_section_target, compiled_figure_captions, compose_related_figure_groups, enforce_figure_owner_sections, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, normalize_figure_captions, polish_markdown, prepare_key_figures_with_owners, remove_false_material_warning
 from .review import MethodValidationResult, ReviewIssue, audit_method_consistency_with_report, review_markdown_with_report, validate_method_consistency
 from .visual_qa import VisualQAController
 from .workflow import PublishedCheckpoint, WorkflowEvent
@@ -140,6 +140,16 @@ class MaxReadPipeline:
                         "source_chars": len(bundle.source_text or ""),
                         "pdf_chars": len(bundle.pdf_text or ""),
                         "figures": len(bundle.source_figures),
+                        "figure_owners": [
+                            {
+                                "asset": figure.asset,
+                                "label": figure.label,
+                                "owner_section": figure.owner_section,
+                                "owner_evidence": figure.owner_evidence,
+                            }
+                            for figure in bundle.source_figures
+                            if not figure.is_appendix
+                        ],
                         "tables": len(bundle.source_tables),
                         "parse_warnings": list(bundle.parse_warnings),
                     },
@@ -165,11 +175,22 @@ class MaxReadPipeline:
             try:
                 if not self.llm:
                     raise RuntimeError("OPENAI_API_KEY not configured or --no-openai was used")
-                figures = prepare_key_figures(bundle)
+                prepared_figures = prepare_key_figures_with_owners(bundle)
+                figures = [(path, caption) for path, caption, _owner in prepared_figures]
                 _require_renderable_source_figures(bundle, figures)
                 figure_inserts = figure_placeholders(figures)
+                figure_owners = {
+                    marker: owner
+                    for (marker, _path, _caption), (_prepared_path, _prepared_caption, owner) in zip(
+                        figure_inserts, prepared_figures
+                    )
+                }
                 figure_visuals, figure_visual_warnings = _describe_figures_for_prompt(self.llm, figure_inserts)
-                figure_inserts, figure_visuals = compose_related_figure_groups(figure_inserts, figure_visuals)
+                figure_inserts, figure_visuals = compose_related_figure_groups(
+                    figure_inserts,
+                    figure_visuals,
+                    owner_sections=figure_owners,
+                )
                 macro_kwargs = _paper_macro_kwargs(bundle)
                 markers = [marker for marker, _path, _caption in figure_inserts]
                 selected_tables = select_key_source_tables(bundle.source_tables)
@@ -181,6 +202,7 @@ class MaxReadPipeline:
                         bundle,
                         figure_inserts,
                         figure_visuals,
+                        figure_owners=figure_owners,
                         editorial_guidance=editorial_guidance,
                     )
                     if retry_context.feedback:
@@ -192,6 +214,7 @@ class MaxReadPipeline:
                         figure_inserts,
                         figure_visuals,
                         selected_tables,
+                        owner_sections=figure_owners,
                     )
                     return _generate_sectional_paper_markdown(
                         self.llm,
@@ -214,6 +237,7 @@ class MaxReadPipeline:
                         bundle,
                         figure_inserts,
                         figure_visuals,
+                        figure_owners=figure_owners,
                         editorial_guidance=editorial_guidance,
                     )
                     can_fallback = self.sectional_generation_enabled and bool(retry_context.previous_markdown)
@@ -250,7 +274,13 @@ class MaxReadPipeline:
                 markdown = _sanitize_repository_markdown(markdown, repository_url)
                 markdown = polish_markdown(markdown, **macro_kwargs)
                 markdown = remove_false_material_warning(markdown, bundle)
-                markdown = ensure_priority_figure_markers(markdown, figure_inserts, visual_descriptions=figure_visuals)
+                markdown = enforce_figure_owner_sections(markdown, figure_inserts, figure_owners)
+                markdown = ensure_priority_figure_markers(
+                    markdown,
+                    figure_inserts,
+                    visual_descriptions=figure_visuals,
+                    owner_sections=figure_owners,
+                )
                 _write_paper_artifact(bundle, "02-polished.md", markdown)
                 review_warnings = list(figure_visual_warnings)
                 if event and send_progress:
@@ -418,15 +448,20 @@ class MaxReadPipeline:
                     candidate = _sanitize_repository_markdown(candidate, repository_url)
                     candidate = polish_markdown(candidate, **macro_kwargs)
                     candidate = remove_false_material_warning(candidate, bundle)
+                    candidate = enforce_figure_owner_sections(
+                        candidate, figure_inserts, figure_owners
+                    )
                     candidate = ensure_priority_figure_markers(
                         candidate,
                         figure_inserts,
                         visual_descriptions=figure_visuals,
+                        owner_sections=figure_owners,
                     )
                     candidate = ensure_referenced_figure_markers(
                         candidate,
                         figure_inserts,
                         visual_descriptions=figure_visuals,
+                        owner_sections=figure_owners,
                     )
                     return normalize_figure_captions(
                         candidate,
@@ -920,11 +955,18 @@ def _write_section_generation_attempt(
     )
 
 
-def _sectional_material_assignments(figure_inserts, figure_visuals, source_tables):
+def _sectional_material_assignments(
+    figure_inserts,
+    figure_visuals,
+    source_tables,
+    owner_sections=None,
+):
     markers: Dict[str, List[str]] = {key: [] for key in SECTION_GENERATION_TASKS}
     tables: Dict[str, List[int]] = {key: [] for key in SECTION_GENERATION_TASKS}
     for marker, path, caption in figure_inserts:
-        target = _figure_section_target(path, caption, figure_visuals.get(marker, ""))
+        target = str((owner_sections or {}).get(marker) or "")
+        if target not in {"method", "experiments", "analysis"}:
+            target = _figure_section_target(path, caption, figure_visuals.get(marker, ""))
         section = {"experiments": "experiments", "analysis": "ablation", "method": "method"}.get(target, "method")
         markers[section].append(marker)
     for index, table in enumerate(source_tables, start=1):

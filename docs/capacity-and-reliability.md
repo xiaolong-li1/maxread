@@ -71,14 +71,20 @@ The last seven days contained 33 completed jobs with a mean duration of about
    may run together. Two remote paper slots share a global ten-call ceiling.
 2. Each section owns its figure markers and tables. Successful sections remain
    valid when another section encounters a transient gateway error.
-3. Transport retries stay inside `OpenAIClient`; a section has one additional
+3. Figure ownership is immutable. The source parser derives `owner_section`
+   from the first body `label/ref` context or the nearest recognized TeX
+   section. Semantic grouping is allowed only when both owners are known and
+   identical; the composite inherits that owner. Unknown or cross-section
+   figures remain separate, and the publication compiler moves an escaped
+   marker/caption block back to its owner before quality review.
+4. Transport retries stay inside `OpenAIClient`; a section has one additional
    model repair opportunity (`MAXREAD_GENERATION_REPAIR_ROUNDS=1`).
-4. Deterministic repairs run before a second model call. Preambles, duplicated
+5. Deterministic repairs run before a second model call. Preambles, duplicated
    H1s, outer fences, and complete-document suffixes do not consume a full
    regeneration when a safe local repair exists.
-5. A retry with a durable complete draft gets one whole-draft repair attempt.
+6. A retry with a durable complete draft gets one whole-draft repair attempt.
    If it fails, the pipeline falls back to sectional generation.
-6. Service recovery prefers `02-polished.md` or `01-generated.md`; it never
+7. Service recovery prefers `02-polished.md` or `01-generated.md`; it never
    mistakes one successful section for the complete paper.
 
 ## Review and quality gates

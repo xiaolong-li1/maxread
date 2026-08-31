@@ -257,12 +257,19 @@ def figure_placeholders(figures: List[Tuple[Path, str]]) -> List[Tuple[str, Path
     return inserts
 
 
-def figure_prompt_lines(inserts: List[Tuple[str, Path, str]], visual_descriptions: Optional[Dict[str, str]] = None) -> List[str]:
+def figure_prompt_lines(
+    inserts: List[Tuple[str, Path, str]],
+    visual_descriptions: Optional[Dict[str, str]] = None,
+    owner_sections: Optional[Dict[str, str]] = None,
+) -> List[str]:
     lines = []
     visual_descriptions = visual_descriptions or {}
     for marker, path, caption in inserts:
         visual = visual_descriptions.get(marker, "").strip()
         suffix = f" visual：{visual}" if visual else ""
+        owner = str((owner_sections or {}).get(marker) or "")
+        if owner:
+            suffix += f" owner_section：{owner}（不可修改）"
         if str(caption or "").startswith("并列图组"):
             suffix += " layout：panel 说明已内嵌，正文只写图组共同结论"
         lines.append(f"- {marker} 文件：{path.as_posix()} caption：{caption or path.stem}{suffix}")
@@ -272,11 +279,14 @@ def figure_prompt_lines(inserts: List[Tuple[str, Path, str]], visual_description
 def compose_related_figure_groups(
     inserts: List[Tuple[str, Path, str]],
     visual_descriptions: Optional[Dict[str, str]] = None,
+    owner_sections: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[Tuple[str, Path, str]], Dict[str, str]]:
     """Combine adjacent, semantically related figures into readable pairs."""
     visuals = dict(visual_descriptions or {})
     output: List[Tuple[str, Path, str]] = []
     grouped_visuals: Dict[str, str] = {}
+    owners = dict(owner_sections or {})
+    grouped_owners: Dict[str, str] = {}
     index = 0
     while index < len(inserts):
         current = inserts[index]
@@ -284,12 +294,21 @@ def compose_related_figure_groups(
             output.append(current)
             if current[0] in visuals:
                 grouped_visuals[current[0]] = visuals[current[0]]
+            if current[0] in owners:
+                grouped_owners[current[0]] = owners[current[0]]
             break
         following = inserts[index + 1]
-        if not _should_group_related_figures(current, following, visuals):
+        if not _should_group_related_figures(
+            current,
+            following,
+            visuals,
+            owners if owner_sections is not None else None,
+        ):
             output.append(current)
             if current[0] in visuals:
                 grouped_visuals[current[0]] = visuals[current[0]]
+            if current[0] in owners:
+                grouped_owners[current[0]] = owners[current[0]]
             index += 1
             continue
         marker_a, path_a, caption_a = current
@@ -305,6 +324,8 @@ def compose_related_figure_groups(
             output.append(current)
             if marker_a in visuals:
                 grouped_visuals[marker_a] = visuals[marker_a]
+            if marker_a in owners:
+                grouped_owners[marker_a] = owners[marker_a]
             index += 1
             continue
         marker_index = re.search(r"\[MaxReadFigure:(\d+):", marker_a)
@@ -315,7 +336,12 @@ def compose_related_figure_groups(
         grouped_visuals[marker] = (
             f"(a) {visuals.get(marker_a, caption_a)}；(b) {visuals.get(marker_b, caption_b)}"
         )[:480]
+        if owner_sections is not None:
+            grouped_owners[marker] = owners[marker_a]
         index += 2
+    if owner_sections is not None:
+        owner_sections.clear()
+        owner_sections.update(grouped_owners)
     return output, grouped_visuals
 
 
@@ -326,11 +352,23 @@ _RELATED_FIGURE_STOPWORDS = {
 }
 
 
-def _should_group_related_figures(a, b, visuals: Dict[str, str]) -> bool:
+def _should_group_related_figures(
+    a,
+    b,
+    visuals: Dict[str, str],
+    owner_sections: Optional[Dict[str, str]] = None,
+) -> bool:
     marker_a, path_a, caption_a = a
     marker_b, path_b, caption_b = b
     if _is_reconstructed_latex_figure(Path(path_a)) or _is_reconstructed_latex_figure(Path(path_b)):
         return False
+    if owner_sections is not None:
+        owner_a = str(owner_sections.get(marker_a) or "")
+        owner_b = str(owner_sections.get(marker_b) or "")
+        # Unknown ownership is a hard no-merge. A later heuristic may place an
+        # individual image, but it must never create a cross-section composite.
+        if not owner_a or not owner_b or owner_a != owner_b:
+            return False
     target_a = _figure_section_target(Path(path_a), caption_a, visuals.get(marker_a, ""))
     target_b = _figure_section_target(Path(path_b), caption_b, visuals.get(marker_b, ""))
     if target_a and target_b and target_a != target_b:
@@ -544,8 +582,9 @@ def ensure_priority_figure_markers(
     inserts: List[Tuple[str, Path, str]],
     max_missing: int = 2,
     visual_descriptions: Optional[Dict[str, str]] = None,
+    owner_sections: Optional[Dict[str, str]] = None,
 ) -> str:
-    """Insert missing high-value overview/method figures near method text before review."""
+    """Insert missing high-value figures only inside their immutable owner section."""
     if not inserts or max_missing <= 0:
         return markdown
     visual_descriptions = visual_descriptions or {}
@@ -557,16 +596,22 @@ def ensure_priority_figure_markers(
     if not missing:
         return markdown
     lines = markdown.rstrip().splitlines()
-    insert_at = _priority_figure_insert_index(lines)
-    block: List[str] = []
+    inserted = 0
     for marker, path, caption in missing[:max_missing]:
-        if block:
-            block.append("")
-        block.append("这张图概括了论文中最关键的流程或方法结构。")
-        block.append(marker)
+        owner = str((owner_sections or {}).get(marker) or "")
+        target = owner or _figure_section_target(path, caption, visual_descriptions.get(marker, ""))
+        if target not in {"method", "experiments", "analysis"}:
+            continue
+        insert_at = _section_insert_index(lines, target) if owner else _priority_figure_insert_index(lines)
+        if insert_at is None:
+            continue
+        block = ["", _figure_lead_sentence(target), marker]
         if caption:
             block.append(f"图题：{_short_caption(caption)}")
-    return "\n".join(lines[:insert_at] + [""] + block + [""] + lines[insert_at:]).strip() + "\n"
+        block.append("")
+        lines = lines[:insert_at] + block + lines[insert_at:]
+        inserted += 1
+    return "\n".join(lines).strip() + "\n" if inserted else markdown
 
 
 def _priority_figure_insert_index(lines: List[str]) -> int:
@@ -1549,15 +1594,25 @@ def _strip_latex_for_text(body: str) -> str:
 
 
 def prepare_key_figures(bundle: PaperBundle, max_figures: Optional[int] = None) -> List[Tuple[Path, str]]:
+    return [
+        (path, caption)
+        for path, caption, _owner in prepare_key_figures_with_owners(bundle, max_figures=max_figures)
+    ]
+
+
+def prepare_key_figures_with_owners(
+    bundle: PaperBundle,
+    max_figures: Optional[int] = None,
+) -> List[Tuple[Path, str, str]]:
     if not bundle.source_dir:
         return []
     output_dir = bundle.source_dir.parent / "rendered_figures"
     output_dir.mkdir(parents=True, exist_ok=True)
     grouped = _grouped_figure_items(bundle, output_dir)
     skipped_assets = {path.resolve() for path, _caption in grouped.get("skip", [])}
-    candidates: List[Tuple[Tuple[int, int, str], Path, str]] = []
-    for path, caption, rank in grouped.get("figures", []):
-        candidates.append((rank, path, caption))
+    candidates: List[Tuple[Tuple[int, int, str], Path, str, str]] = []
+    for path, caption, rank, owner_section in grouped.get("figures", []):
+        candidates.append((rank, path, caption, owner_section))
 
     assets = _ranked_figure_assets(bundle)
     assets = [
@@ -1572,31 +1627,40 @@ def prepare_key_figures(bundle: PaperBundle, max_figures: Optional[int] = None) 
         figure = _figure_for_asset(path, bundle.source_figures, bundle.source_dir)
         if not caption or _is_non_content_asset(path, caption, figure):
             continue
-        candidates.append((_figure_rank(path, figure), path, caption))
+        candidates.append((
+            _figure_rank(path, figure),
+            path,
+            caption,
+            str(getattr(figure, "owner_section", "") or "") if figure else "",
+        ))
 
     candidates.sort(key=lambda item: item[0])
-    unique_candidates: List[Tuple[Path, str]] = []
+    unique_candidates: List[Tuple[Path, str, str]] = []
     seen_paths = set()
-    for _rank, path, caption in candidates:
+    for _rank, path, caption, owner_section in candidates:
         resolved = path.resolve()
         if resolved in seen_paths:
             continue
         seen_paths.add(resolved)
-        unique_candidates.append((path, caption))
+        unique_candidates.append((path, caption, owner_section))
     limit = len(unique_candidates) if max_figures is None else max(0, int(max_figures))
-    return _render_key_figure_candidates(unique_candidates, output_dir, limit)
+    return _render_key_figure_candidates_with_owners(unique_candidates, output_dir, limit)
 
 
-def _render_key_figure_candidates(candidates: List[Tuple[Path, str]], output_dir: Path, max_figures: int) -> List[Tuple[Path, str]]:
+def _render_key_figure_candidates_with_owners(
+    candidates: List[Tuple[Path, str, str]],
+    output_dir: Path,
+    max_figures: int,
+) -> List[Tuple[Path, str, str]]:
     if not candidates or max_figures <= 0:
         return []
     workers = _figure_render_workers()
     if workers <= 1 or len(candidates) == 1:
-        figures: List[Tuple[Path, str]] = []
-        for path, caption in candidates:
+        figures: List[Tuple[Path, str, str]] = []
+        for path, caption, owner_section in candidates:
             rendered = _render_asset(path, output_dir)
             if rendered:
-                figures.append((rendered, caption))
+                figures.append((rendered, caption, owner_section))
             if len(figures) >= max_figures:
                 break
         return figures
@@ -1605,7 +1669,7 @@ def _render_key_figure_candidates(candidates: List[Tuple[Path, str]], output_dir
     with ThreadPoolExecutor(max_workers=min(workers, len(candidates))) as executor:
         future_to_index = {
             executor.submit(_render_asset, path, output_dir): index
-            for index, (path, _caption) in enumerate(candidates)
+            for index, (path, _caption, _owner) in enumerate(candidates)
         }
         for future in as_completed(future_to_index):
             index = future_to_index[future]
@@ -1614,11 +1678,11 @@ def _render_key_figure_candidates(candidates: List[Tuple[Path, str]], output_dir
             except Exception:
                 rendered_by_index[index] = None
 
-    figures: List[Tuple[Path, str]] = []
-    for index, (_path, caption) in enumerate(candidates):
+    figures: List[Tuple[Path, str, str]] = []
+    for index, (_path, caption, owner_section) in enumerate(candidates):
         rendered = rendered_by_index.get(index)
         if rendered:
-            figures.append((rendered, caption))
+            figures.append((rendered, caption, owner_section))
         if len(figures) >= max_figures:
             break
     return figures
@@ -1637,6 +1701,7 @@ def ensure_referenced_figure_markers(
     inserts: List[Tuple[str, Path, str]],
     max_missing: int = 1,
     visual_descriptions: Optional[Dict[str, str]] = None,
+    owner_sections: Optional[Dict[str, str]] = None,
 ) -> str:
     """Only rescue one missing method overview figure; avoid unreadable figure piles."""
     if not inserts or max_missing <= 0:
@@ -1654,7 +1719,11 @@ def ensure_referenced_figure_markers(
     lines = markdown.rstrip().splitlines()
     inserted = 0
     for marker, path, caption in missing[:max_missing]:
-        insert_at = _section_insert_index(lines, "method")
+        owner = str((owner_sections or {}).get(marker) or "")
+        target = owner or _figure_section_target(path, caption, visual_descriptions.get(marker, ""))
+        if target != "method":
+            continue
+        insert_at = _section_insert_index(lines, target)
         if insert_at is None:
             continue
         block = [
@@ -1669,6 +1738,61 @@ def ensure_referenced_figure_markers(
     if inserted == 0:
         return markdown
     return "\n".join(lines).strip() + "\n"
+
+
+def enforce_figure_owner_sections(
+    markdown: str,
+    inserts: List[Tuple[str, Path, str]],
+    owner_sections: Optional[Dict[str, str]] = None,
+) -> str:
+    """Move only marker/caption blocks that escaped their immutable owner section."""
+    owners = owner_sections or {}
+    if not owners:
+        return markdown
+    lines = str(markdown or "").rstrip().splitlines()
+    captions = {marker: caption for marker, _path, caption in inserts}
+    changed = False
+    for marker, owner in list(owners.items()):
+        if owner not in {"method", "experiments", "analysis"}:
+            continue
+        marker_index = next((index for index, line in enumerate(lines) if line.strip() == marker), None)
+        if marker_index is None or _owner_for_line(lines, marker_index) == owner:
+            continue
+        if _section_insert_index(lines, owner) is None:
+            continue
+        end = marker_index + 1
+        while end < len(lines) and not lines[end].strip():
+            end += 1
+        caption_line = ""
+        if end < len(lines) and (
+            _is_figure_caption_line(lines[end]) or _is_compiled_figure_caption(lines[end])
+        ):
+            caption_line = lines[end].strip()
+            end += 1
+        del lines[marker_index:end]
+        insert_at = _section_insert_index(lines, owner)
+        if insert_at is None:  # guarded above; retain a defensive fallback
+            insert_at = len(lines)
+        if not caption_line:
+            caption_line = f"图题：{captions.get(marker) or '论文关键图'}"
+        block = ["", _figure_lead_sentence(owner), marker, caption_line, ""]
+        lines[insert_at:insert_at] = block
+        changed = True
+    return "\n".join(lines).strip() + "\n" if changed else markdown
+
+
+def _owner_for_line(lines: List[str], line_index: int) -> str:
+    for index in range(min(line_index, len(lines) - 1), -1, -1):
+        heading = lines[index].strip()
+        if re.match(r"^##\s+3(?:[.、]|\s)", heading):
+            return "method"
+        if re.match(r"^##\s+4(?:[.、]|\s)", heading):
+            return "experiments"
+        if re.match(r"^##\s+5(?:[.、]|\s)", heading):
+            return "analysis"
+        if re.match(r"^##\s+[1267](?:[.、]|\s)", heading):
+            return "other"
+    return ""
 
 
 def _marker_count(markdown: str) -> int:
@@ -1757,17 +1881,23 @@ def _next_top_level_heading_index(lines: List[str], start: int) -> Optional[int]
 def _grouped_figure_items(bundle: PaperBundle, output_dir: Path) -> dict[str, list]:
     if not bundle.source_dir:
         return {"figures": [], "skip": []}
-    by_key: dict[tuple[str, int, str, str], List[PaperFigure]] = defaultdict(list)
+    by_key: dict[tuple[str, int, str, str, str], List[PaperFigure]] = defaultdict(list)
     for figure in bundle.source_figures:
         if _is_appendix_asset(bundle.source_dir / figure.asset, figure):
             continue
         if not figure.label or not figure.caption:
             continue
-        by_key[(figure.tex_file, figure.figure_index, figure.label, figure.caption)].append(figure)
+        by_key[(
+            figure.tex_file,
+            figure.figure_index,
+            figure.label,
+            figure.caption,
+            figure.owner_section,
+        )].append(figure)
 
-    figures: List[Tuple[Path, str, Tuple[int, int, str]]] = []
+    figures: List[Tuple[Path, str, Tuple[int, int, str], str]] = []
     skip: List[Tuple[Path, str]] = []
-    for (_tex_file, _figure_index, label, caption), group in by_key.items():
+    for (_tex_file, _figure_index, label, caption, owner_section), group in by_key.items():
         if len(group) < 2:
             continue
         items: List[Tuple[Path, PaperFigure]] = []
@@ -1793,7 +1923,7 @@ def _grouped_figure_items(bundle: PaperBundle, output_dir: Path) -> dict[str, li
         if composed:
             ranks = [_figure_rank(path, figure) for path, figure in items]
             rank = min(ranks) if ranks else (20, 0, str(composed))
-            figures.append((composed, caption, rank))
+            figures.append((composed, caption, rank, owner_section))
             skip.extend((bundle.source_dir / figure.asset, caption) for _path, figure in items)
     return {"figures": figures, "skip": skip}
 

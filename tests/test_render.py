@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure
-from maxread.render import compiled_figure_captions, compose_related_figure_groups, constrain_rendered_image, display_caption, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, normalize_figure_captions, polish_markdown, prepare_key_figures, remove_false_material_warning, _figure_section_target, _pretty_grid_label, _render_asset
+from maxread.render import compiled_figure_captions, compose_related_figure_groups, constrain_rendered_image, display_caption, enforce_figure_owner_sections, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, normalize_figure_captions, polish_markdown, prepare_key_figures, prepare_key_figures_with_owners, remove_false_material_warning, _figure_section_target, _pretty_grid_label, _render_asset
 
 
 def test_polish_markdown_converts_math():
@@ -1057,6 +1057,30 @@ def test_prepare_key_figures_keeps_all_body_figures_and_excludes_appendix(tmp_pa
     assert {path.name for path, _caption in figures} == {"method.png", "result.png"}
 
 
+def test_prepare_key_figures_preserves_owner_sidecar(tmp_path):
+    from PIL import Image
+
+    source_dir = tmp_path / "source"
+    (source_dir / "figures").mkdir(parents=True)
+    Image.new("RGB", (120, 80), "white").save(source_dir / "figures/method.png")
+    bundle = _bundle(
+        source_dir=source_dir,
+        source_assets=["figures/method.png"],
+        source_figures=[
+            PaperFigure(
+                asset="figures/method.png",
+                caption="Method overview.",
+                owner_section="method",
+                owner_evidence="reference:fig:method:Method",
+            )
+        ],
+    )
+
+    prepared = prepare_key_figures_with_owners(bundle)
+
+    assert [(path.name, owner) for path, _caption, owner in prepared] == [("method.png", "method")]
+
+
 def test_compose_related_figure_groups_places_similar_figures_side_by_side(tmp_path):
     from PIL import Image
 
@@ -1081,6 +1105,64 @@ def test_compose_related_figure_groups_places_similar_figures_side_by_side(tmp_p
     assert grouped[0][0] in grouped_visuals
     with Image.open(grouped[0][1]) as image:
         assert image.width > image.height
+
+
+def test_related_figures_require_same_nonempty_immutable_owner(tmp_path):
+    from PIL import Image
+
+    left = tmp_path / "pipeline_a.png"
+    right = tmp_path / "pipeline_b.png"
+    Image.new("RGB", (320, 240), "white").save(left)
+    Image.new("RGB", (320, 240), "white").save(right)
+    inserts = [
+        ("[MaxReadFigure:1:a]", left, "Pipeline architecture overview."),
+        ("[MaxReadFigure:2:b]", right, "Pipeline architecture details."),
+    ]
+    visuals = {inserts[0][0]: "模型流程", inserts[1][0]: "模型流程细节"}
+
+    different = {inserts[0][0]: "method", inserts[1][0]: "experiments"}
+    grouped, _ = compose_related_figure_groups(inserts, visuals, owner_sections=different)
+    assert grouped == inserts
+    assert different == {inserts[0][0]: "method", inserts[1][0]: "experiments"}
+
+    unknown = {inserts[0][0]: "method", inserts[1][0]: ""}
+    grouped, _ = compose_related_figure_groups(inserts, visuals, owner_sections=unknown)
+    assert grouped == inserts
+
+    same = {inserts[0][0]: "method", inserts[1][0]: "method"}
+    grouped, _ = compose_related_figure_groups(inserts, visuals, owner_sections=same)
+    assert len(grouped) == 1
+    assert same == {grouped[0][0]: "method"}
+
+
+def test_owner_compiler_moves_marker_from_results_back_to_method():
+    marker = "[MaxReadFigure:1:pipeline]"
+    markdown = f"""# T
+
+## 3. 方法框架
+
+方法总览。
+
+## 4. 实验结果
+
+实验正文。
+
+{marker}
+图题：方法架构图
+
+## 5. 消融与补充分析
+
+消融正文。
+"""
+
+    repaired = enforce_figure_owner_sections(
+        markdown,
+        [(marker, Path("pipeline.png"), "方法架构图")],
+        {marker: "method"},
+    )
+
+    assert repaired.index(marker) < repaired.index("## 4. 实验结果")
+    assert repaired.count(marker) == 1
 
 
 def test_compose_related_figure_groups_keeps_unrelated_figures_separate(tmp_path):

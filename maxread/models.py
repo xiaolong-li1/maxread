@@ -17,6 +17,8 @@ class PaperFigure:
     row: int = 0
     col: int = 0
     is_appendix: bool = False
+    owner_section: str = ""
+    owner_evidence: str = ""
 
 
 @dataclass

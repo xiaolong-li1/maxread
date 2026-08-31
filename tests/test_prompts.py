@@ -45,6 +45,18 @@ def test_paper_prompt_requires_method_fidelity():
     assert "彼此正交的设计轴" in FINAL_SYSTEM_PROMPT
 
 
+def test_generation_prompt_marks_figure_owner_as_immutable(tmp_path):
+    marker = "[MaxReadFigure:1:pipeline]"
+    prompt = build_final_user_prompt(
+        _bundle(),
+        [(marker, tmp_path / "pipeline.png", "Method architecture")],
+        {marker: "模型流程"},
+        figure_owners={marker: "method"},
+    )
+
+    assert "owner_section：method（不可修改）" in prompt
+
+
 def test_paper_prompt_keeps_boundary_checks_selective_and_readable():
     prompt = build_final_user_prompt(_bundle())
 

@@ -108,12 +108,14 @@ def build_final_user_prompt(
     bundle: PaperBundle,
     figure_inserts: List[Tuple[str, Path, str]] | None = None,
     figure_visuals: Dict[str, str] | None = None,
+    figure_owners: Dict[str, str] | None = None,
     editorial_guidance: str = "",
 ) -> str:
     evidence, instructions = _build_final_prompt_parts(
         bundle,
         figure_inserts=figure_inserts,
         figure_visuals=figure_visuals,
+        figure_owners=figure_owners,
         editorial_guidance=editorial_guidance,
     )
     return evidence + "\n\n" + instructions
@@ -123,12 +125,14 @@ def build_paper_evidence_prefix(
     bundle: PaperBundle,
     figure_inserts: List[Tuple[str, Path, str]] | None = None,
     figure_visuals: Dict[str, str] | None = None,
+    figure_owners: Dict[str, str] | None = None,
     editorial_guidance: str = "",
 ) -> str:
     evidence, _instructions = _build_final_prompt_parts(
         bundle,
         figure_inserts=figure_inserts,
         figure_visuals=figure_visuals,
+        figure_owners=figure_owners,
         editorial_guidance=editorial_guidance,
     )
     return evidence
@@ -138,6 +142,7 @@ def _build_final_prompt_parts(
     bundle: PaperBundle,
     figure_inserts: List[Tuple[str, Path, str]] | None = None,
     figure_visuals: Dict[str, str] | None = None,
+    figure_owners: Dict[str, str] | None = None,
     editorial_guidance: str = "",
 ) -> tuple[str, str]:
     metadata = bundle.metadata
@@ -160,7 +165,9 @@ PDF text excerpt（仅在 TeX source 不可用时启用）：
     selected_tables = select_key_source_tables(bundle.source_tables)
     source_tables = "\n\n".join(f"[Table {i}]\n{item}" for i, item in enumerate(selected_tables, start=1)) or "- 无"
     source_table_summary = f"原文解析到 {len(bundle.source_tables)} 张表，本次选择 {len(selected_tables)} 张关键表。"
-    figure_markers = _figure_marker_text(figure_inserts or [], figure_visuals or {})
+    figure_markers = _figure_marker_text(
+        figure_inserts or [], figure_visuals or {}, figure_owners or {}
+    )
     figure_pairs = _figure_pair_text(bundle)
     figure_refs = _figure_reference_text(bundle)
     guidance = str(editorial_guidance or "").strip() or "- 无"
@@ -409,10 +416,14 @@ def build_section_user_prompt(
     )
 
 
-def _figure_marker_text(figure_inserts: List[Tuple[str, Path, str]], figure_visuals: Dict[str, str] | None = None) -> str:
+def _figure_marker_text(
+    figure_inserts: List[Tuple[str, Path, str]],
+    figure_visuals: Dict[str, str] | None = None,
+    figure_owners: Dict[str, str] | None = None,
+) -> str:
     if not figure_inserts:
         return "- 无"
-    return "\n".join(figure_prompt_lines(figure_inserts, figure_visuals or {}))
+    return "\n".join(figure_prompt_lines(figure_inserts, figure_visuals or {}, figure_owners or {}))
 
 
 def _figure_pair_text(bundle: PaperBundle) -> str:
@@ -421,7 +432,8 @@ def _figure_pair_text(bundle: PaperBundle) -> str:
     lines = []
     for figure in [item for item in bundle.source_figures if not getattr(item, "is_appendix", False)][:60]:
         label = f" label={figure.label}" if figure.label else ""
-        lines.append(f"- asset={figure.asset}{label} file={figure.tex_file} caption={figure.caption}")
+        owner = f" owner={figure.owner_section} evidence={figure.owner_evidence}" if figure.owner_section else " owner=unknown"
+        lines.append(f"- asset={figure.asset}{label} file={figure.tex_file}{owner} caption={figure.caption}")
     return "\n".join(lines)
 
 

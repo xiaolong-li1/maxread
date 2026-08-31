@@ -4,7 +4,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_generated_paper_title, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _published_document_title_from_payload, _replace_paper_method_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _write_paper_artifact
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_generated_paper_title, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _published_document_title_from_payload, _replace_paper_method_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _sectional_material_assignments, _write_paper_artifact
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 from maxread.workflow import WorkflowEvent, WorkflowState
@@ -43,6 +43,19 @@ def test_project_summary_prefers_generated_one_sentence_positioning():
 """
 
     assert _extract_project_summary(markdown, "abstract fallback") == "通过稀疏路由减少长视频生成成本"
+
+
+def test_sectional_assignment_uses_immutable_owner_over_caption_keywords():
+    marker = "[MaxReadFigure:1:pipeline]"
+    assignments, _tables = _sectional_material_assignments(
+        [(marker, Path("pipeline.png"), "Architecture followed by a refiner to improve visual quality")],
+        {marker: "图中展示模型架构与视觉质量提升"},
+        [],
+        owner_sections={marker: "method"},
+    )
+
+    assert assignments["method"] == [marker]
+    assert assignments["experiments"] == []
 
 
 def test_generated_title_replaces_arxiv_placeholder_with_english_title():

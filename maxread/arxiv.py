@@ -638,6 +638,9 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
             if _is_subfigure_block(block):
                 caption = _last_caption(block)
                 label = _last_label(block) or _first_label(block)
+                owner_section, owner_evidence = _figure_owner_section(
+                    text, block_at, label, is_appendix=is_appendix
+                )
                 panel_captions = _subfigure_panel_captions(block)
                 segment_figures = 0
                 for asset_index, (asset, row, col) in enumerate(_includegraphics_assets_with_layout(block, tex_path.parent, source_dir)):
@@ -653,6 +656,8 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
                             row=row,
                             col=col,
                             is_appendix=is_appendix,
+                            owner_section=owner_section,
+                            owner_evidence=owner_evidence,
                         )
                     )
                     segment_figures += 1
@@ -662,6 +667,9 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
                     figure_index += 1
                 continue
             for segment, caption, label in _figure_segments(block):
+                owner_section, owner_evidence = _figure_owner_section(
+                    text, block_at, label, is_appendix=is_appendix
+                )
                 segment_figures = 0
                 panel_captions = _graphics_panel_captions(segment)
                 for asset_index, (asset, row, col) in enumerate(_includegraphics_assets_with_layout(segment, tex_path.parent, source_dir)):
@@ -677,6 +685,8 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
                             row=row,
                             col=col,
                             is_appendix=is_appendix,
+                            owner_section=owner_section,
+                            owner_evidence=owner_evidence,
                         )
                     )
                     segment_figures += 1
@@ -685,6 +695,68 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
                 if segment_figures:
                     figure_index += 1
     return figures
+
+
+_SECTION_COMMAND_RE = re.compile(
+    r"\\(?:part|chapter|section|subsection|subsubsection)\*?\s*\{",
+    flags=re.I,
+)
+
+
+def _figure_owner_section(
+    tex_text: str,
+    block_at: int,
+    label: str,
+    *,
+    is_appendix: bool = False,
+) -> tuple[str, str]:
+    if is_appendix:
+        return "appendix", "appendix-boundary"
+    clean_label = str(label or "").strip()
+    if clean_label:
+        reference = re.compile(
+            rf"\\(?:ref|autoref|cref|Cref)\s*\{{{re.escape(clean_label)}\}}"
+        )
+        for match in reference.finditer(tex_text):
+            owner, title = _section_owner_at(tex_text, match.start())
+            if owner:
+                return owner, f"reference:{clean_label}:{title}"
+    owner, title = _section_owner_at(tex_text, max(0, int(block_at)))
+    return (owner, f"environment:{title}") if owner else ("", "unresolved")
+
+
+def _section_owner_at(tex_text: str, position: int) -> tuple[str, str]:
+    headings: list[str] = []
+    for match in _SECTION_COMMAND_RE.finditer(tex_text, 0, max(0, int(position))):
+        title = _balanced_brace_content(tex_text, match.end() - 1)
+        if title:
+            headings.append(_clean_latex_text(_norm(title)))
+    for title in reversed(headings):
+        owner = _classify_section_owner(title)
+        if owner:
+            return owner, title
+    return "", ""
+
+
+def _classify_section_owner(title: str) -> str:
+    value = str(title or "").casefold()
+    if any(token in value for token in (
+        "ablation", "analysis", "discussion", "limitation", "failure", "sensitivity",
+        "消融", "分析", "讨论", "局限", "失败", "敏感性",
+    )):
+        return "analysis"
+    if any(token in value for token in (
+        "experiment", "evaluation", "result", "benchmark", "comparison", "empirical",
+        "实验", "评测", "结果", "基准", "对比",
+    )):
+        return "experiments"
+    if any(token in value for token in (
+        "method", "approach", "architecture", "framework", "model", "pipeline",
+        "implementation", "training", "inference", "data construction", "dataset construction",
+        "方法", "架构", "框架", "模型", "流程", "实现", "训练", "推理", "数据构建",
+    )):
+        return "method"
+    return ""
 
 
 def _is_subfigure_block(block: str) -> bool:
