@@ -110,6 +110,7 @@ def trigger_mail_scan(account_id: str) -> dict[str, Any]:
             "--property=CPUQuota=60%",
             "--property=MemoryMax=700M",
             "--property=RuntimeMaxSec=1800",
+            "--setenv=HOME=/root",
             str(script),
             clean,
         ]

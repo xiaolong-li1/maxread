@@ -5,6 +5,7 @@ ROOT="${MAXREAD_ROOT:-/opt/maxread}"
 MAIL_ROOT="$ROOT/features/mail_ingestion"
 ACCOUNT="${1:-all}"
 LOCK_FILE="/run/maxread-recruiting-manual.lock"
+export HOME="${MAXREAD_SERVICE_HOME:-/root}"
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then

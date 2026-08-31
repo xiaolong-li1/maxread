@@ -115,6 +115,7 @@ def test_manual_scan_accepts_only_configured_accounts_and_records_unit(tmp_path,
 
     assert result["account"] == "bohan-zhuang"
     assert str(script) in commands[0]
+    assert "--setenv=HOME=/root" in commands[0]
     assert (root / "data/mail-control.json").exists()
     try:
         mail_admin.trigger_mail_scan("not-configured")
