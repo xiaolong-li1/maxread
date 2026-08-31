@@ -538,6 +538,8 @@
       tourStep: 0,
       tourSteps: [],
       tourTarget: null,
+      tourTransitionToken: 0,
+      tourTransitioning: false,
       projectMoveBusy: false,
       collapsedCategories: new Set(storedCollapsedCategories),
     };
@@ -998,7 +1000,7 @@
     function positionTourCoach() {
       const target = state.tourTarget;
       const coach = $('tour-coach');
-      if (!target || coach.classList.contains('hidden')) return;
+      if (!target || state.tourTransitioning || coach.classList.contains('hidden')) return;
       const rect = target.getBoundingClientRect();
       const coachRect = coach.getBoundingClientRect();
       const gap = 14;
@@ -1011,8 +1013,43 @@
       coach.style.top = `${Math.max(margin, top)}px`;
     }
 
-    function showTourStep(scroll = true) {
+    function finishTourStep(step, target, token, firstStep) {
+      if (token !== state.tourTransitionToken) return;
       clearTourTarget();
+      const freshTarget = document.contains(target) ? target : visibleTourTarget(step.selector);
+      if (!freshTarget) { showTourStep(false); return; }
+      state.tourTarget = freshTarget;
+      freshTarget.classList.add('tour-target');
+      $('tour-backdrop').classList.remove('hidden');
+      if (firstStep) {
+        $('tour-title').textContent = step.title;
+        $('tour-text').textContent = step.text;
+        $('tour-coach').classList.remove('hidden');
+        state.tourTransitioning = false;
+        updateTourControls();
+        positionTourCoach();
+        return;
+      }
+      $('tour-coach').classList.remove('hidden');
+      state.tourTransitioning = false;
+      positionTourCoach();
+      setTimeout(() => {
+        if (token !== state.tourTransitionToken) return;
+        $('tour-title').textContent = step.title;
+        $('tour-text').textContent = step.text;
+        updateTourControls();
+        positionTourCoach();
+      }, 140);
+    }
+
+    function updateTourControls() {
+      $('tour-counter').textContent = `MAX 使用向导 · ${state.tourStep + 1}/${state.tourSteps.length}`;
+      $('tour-previous').disabled = state.tourTransitioning || state.tourStep === 0;
+      $('tour-next').disabled = state.tourTransitioning;
+      $('tour-next').textContent = state.tourStep === state.tourSteps.length - 1 ? '完成' : '下一步';
+    }
+
+    function showTourStep(scroll = true) {
       const step = state.tourSteps[state.tourStep];
       if (!step) { stopPageTour(); return; }
       const target = visibleTourTarget(step.selector);
@@ -1021,17 +1058,19 @@
         showTourStep(scroll);
         return;
       }
-      state.tourTarget = target;
-      target.classList.add('tour-target');
-      $('tour-title').textContent = step.title;
-      $('tour-text').textContent = step.text;
-      $('tour-counter').textContent = `MAX 使用向导 · ${state.tourStep + 1}/${state.tourSteps.length}`;
-      $('tour-previous').disabled = state.tourStep === 0;
-      $('tour-next').textContent = state.tourStep === state.tourSteps.length - 1 ? '完成' : '下一步';
+      const firstStep = $('tour-coach').classList.contains('hidden');
+      const token = ++state.tourTransitionToken;
+      const shouldMove = Boolean(scroll && state.tourTarget && state.tourTarget !== target);
+      state.tourTransitioning = shouldMove;
+      if (shouldMove) {
+        $('tour-previous').disabled = true;
+        $('tour-next').disabled = true;
+      } else {
+        updateTourControls();
+      }
       $('tour-backdrop').classList.remove('hidden');
-      $('tour-coach').classList.remove('hidden');
       if (scroll) target.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'nearest'});
-      setTimeout(positionTourCoach, scroll ? 280 : 0);
+      setTimeout(() => finishTourStep(step, target, token, firstStep), shouldMove ? 420 : 0);
     }
 
     function startPageTour() {
@@ -1051,6 +1090,8 @@
     }
 
     function stopPageTour() {
+      state.tourTransitionToken += 1;
+      state.tourTransitioning = false;
       clearTourTarget();
       $('tour-backdrop').classList.add('hidden');
       $('tour-coach').classList.add('hidden');
@@ -1058,11 +1099,13 @@
     }
 
     function previousTourStep() {
+      if (state.tourTransitioning) return;
       if (state.tourStep > 0) state.tourStep -= 1;
       showTourStep();
     }
 
     function nextTourStep() {
+      if (state.tourTransitioning) return;
       if (state.tourStep >= state.tourSteps.length - 1) { stopPageTour(); return; }
       state.tourStep += 1;
       showTourStep();

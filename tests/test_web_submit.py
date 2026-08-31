@@ -741,6 +741,10 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "toggleCategory(" in WEB_SUBMIT_HTML
     assert "带我看页面" in WEB_SUBMIT_HTML
     assert "startPageTour" in WEB_SUBMIT_HTML
+    assert "tourTransitioning" in WEB_SUBMIT_HTML
+    assert "finishTourStep" in WEB_SUBMIT_HTML
+    assert "shouldMove ? 420 : 0" in WEB_SUBMIT_HTML
+    assert "if (state.tourTransitioning) return" in WEB_SUBMIT_HTML
     assert 'data-guide="submit"' in WEB_SUBMIT_HTML
     assert 'data-guide="project-pet"' in WEB_SUBMIT_HTML
     assert 'data-guide="organize"' in WEB_SUBMIT_HTML
