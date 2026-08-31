@@ -70,6 +70,18 @@ def test_mail_status_reports_process_and_business_health_without_secrets(tmp_pat
     assert "secret-must-not-leak" not in str(status)
 
 
+def test_mail_status_treats_active_manual_scan_as_expected_takeover(tmp_path, monkeypatch):
+    root, _db = _fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.setattr(mail_admin, "_systemd_show", lambda unit: {"ActiveState": "inactive", "MainPID": "0"})
+    monkeypatch.setattr(mail_admin, "_control_status", lambda _root: {"active": True, "account": "all"})
+
+    status = mail_admin.mail_admin_status()
+
+    assert status["business_state"] == "scanning"
+    assert status["control"] == {"active": True, "account": "all"}
+
+
 def test_mail_config_update_is_atomic_and_restarts_units(tmp_path, monkeypatch):
     root, _db = _fixture(tmp_path)
     timer = tmp_path / "systemd/interval.conf"
@@ -121,6 +133,9 @@ def test_mail_admin_page_uses_reverse_proxy_relative_api_paths():
     assert "api('/api/admin/mail" not in html
     assert 'href="admin?next=mail"' in html
     assert "登录成功后会自动返回本页" in html
+    assert "手动扫描中" in html
+    assert "手动扫描接管" in html
+    assert "结束后自动恢复常驻任务" in html
 
 
 def test_systemd_cst_timestamp_is_exposed_as_shanghai_iso():

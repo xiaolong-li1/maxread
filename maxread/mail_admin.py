@@ -29,7 +29,9 @@ def mail_admin_status() -> dict[str, Any]:
     control = _control_status(mail_root)
     latest = runs[0] if runs else {}
     business_state = "healthy"
-    if str(service.get("ActiveState") or "") != "active":
+    if control.get("active"):
+        business_state = "scanning"
+    elif str(service.get("ActiveState") or "") != "active":
         business_state = "down"
     elif latest and int(latest.get("failed_threads") or 0) > 0:
         business_state = "degraded"
