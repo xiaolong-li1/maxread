@@ -752,7 +752,10 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert ".category-list[hidden]" in WEB_SUBMIT_HTML
     assert "完成后进入未分类" in WEB_SUBMIT_HTML
     assert "animateProjectMoves" in WEB_SUBMIT_HTML
-    assert "归档中" in WEB_SUBMIT_HTML
+    assert "篇 →" in WEB_SUBMIT_HTML
+    assert "已到 ${category}" in WEB_SUBMIT_HTML
+    assert "data-category=\"${esc(category)}\"" in WEB_SUBMIT_HTML
+    assert "projectMoveBusy" in WEB_SUBMIT_HTML
     assert 'id="progress-panel"' not in WEB_SUBMIT_HTML
     assert 'class="project-progress"' in WEB_SUBMIT_HTML
     assert 'class="retry-button"' in WEB_SUBMIT_HTML

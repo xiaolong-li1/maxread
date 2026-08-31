@@ -320,10 +320,11 @@
     .pet-sprite.thinking { background-position: 66.666% 0; }
     .pet-sprite.done { background-position: 100% 0; animation: pet-done 0.75s ease-in-out 2; }
     .pet-label { margin-top: -3px; color: var(--muted); font-size: 11px; }
-    .max-mover { position: fixed; z-index: 45; width: 54px; height: 72px; pointer-events: none; filter: drop-shadow(0 9px 12px rgba(39, 58, 45, 0.18)); }
+    .max-mover { position: fixed; z-index: 45; width: 62px; height: 82px; pointer-events: none; filter: drop-shadow(0 9px 12px rgba(39, 58, 45, 0.18)); }
     .max-mover .pet-sprite { background-position: 33.333% 0; animation: pet-work 0.7s ease-in-out infinite; }
-    .max-mover span { position: absolute; top: 68px; left: 50%; padding: 3px 6px; color: var(--green); background: var(--paper); border: 1px solid var(--line); border-radius: 5px; font-size: 10px; white-space: nowrap; transform: translateX(-50%); }
+    .max-mover span { position: absolute; top: 78px; left: 50%; padding: 4px 7px; color: var(--green); background: var(--paper); border: 1px solid #bad4c8; border-radius: 6px; box-shadow: 0 8px 22px rgba(27, 53, 39, .13); font-size: 11px; font-weight: 650; white-space: nowrap; transform: translateX(-50%); }
     .project-arrived .project-card { animation: project-arrived 0.85s ease-out; }
+    .category-arrived { animation: category-arrived 1.15s ease-out; }
     .empty { padding: 38px 2px; color: var(--muted); }
     .pet-panel {
       position: fixed;
@@ -405,6 +406,7 @@
     @keyframes pet-work { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
     @keyframes pet-done { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(4deg) scale(1.04); } }
     @keyframes project-arrived { 0% { border-color: #7cb49c; box-shadow: 0 0 0 3px rgba(40, 119, 91, 0.13); } 100% { border-color: var(--line); box-shadow: none; } }
+    @keyframes category-arrived { 0%, 45% { color: var(--green); background: var(--green-soft); box-shadow: 0 0 0 5px var(--green-soft); } 100% { color: var(--muted); background: transparent; box-shadow: none; } }
     @keyframes thinking { 0%, 70%, 100% { opacity: .35; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
     @media (max-width: 680px) {
       .shell { width: calc(100% - 24px); padding-top: 18px; }
@@ -536,6 +538,7 @@
       tourStep: 0,
       tourSteps: [],
       tourTarget: null,
+      projectMoveBusy: false,
       collapsedCategories: new Set(storedCollapsedCategories),
     };
     const $ = id => document.getElementById(id);
@@ -699,7 +702,7 @@
           const toolbar = category === '已完成未分类' && state.me?.bound
             ? `<div class="unclassified-toolbar" data-guide="organize"><label class="select-all"><input type="checkbox" ${projects.length && selectedCount === projects.length ? 'checked' : ''} onchange="toggleAllUnclassified(this.checked)" />全选</label><button class="organize-button" ${selectedCount ? '' : 'disabled'} onclick="organizeSelectedProjects()" title="只整理勾选的未分类项目"><span class="icon"><svg viewBox="0 0 24 24"><path d="m12 3-1.9 4.1L6 9l4.1 1.9L12 15l1.9-4.1L18 9l-4.1-1.9Z"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4"/></svg></span><span id="organize-label">自动归类所选${selectedCount ? ` (${selectedCount})` : ''}</span></button></div>`
             : '';
-          return `<section class="category-group"><div class="category-head-row"><button class="category-heading ${collapsed ? 'collapsed' : ''}" data-guide="category-heading" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button>${toolbar}</div><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
+          return `<section class="category-group" data-category="${esc(category)}"><div class="category-head-row"><button class="category-heading ${collapsed ? 'collapsed' : ''}" data-guide="category-heading" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button>${toolbar}</div><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
         }).join('');
       }
       if (state.petProject) {
@@ -710,6 +713,7 @@
     }
 
     async function refreshProjects() {
+      if (state.projectMoveBusy) return;
       try {
         const previousRows = [...document.querySelectorAll('.project-row')];
         const previousCategories = new Map(previousRows.map(row => [row.dataset.source, row.dataset.category]));
@@ -753,44 +757,58 @@
       return [...document.querySelectorAll('.project-row')].find(row => row.dataset.source === sourceId);
     }
 
-    function animateProjectMoves(projects, previousRects) {
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-      projects.forEach((project, index) => {
-        const row = projectRow(project.source_id);
-        const before = previousRects.get(project.source_id);
-        if (!row) return;
-        const after = row.getBoundingClientRect();
-        row.classList.add('project-arrived');
-        setTimeout(() => row.classList.remove('project-arrived'), 1000);
-        if (!before) return;
-        const dx = before.left - after.left;
-        const dy = before.top - after.top;
-        row.style.transition = 'none';
-        row.style.transform = `translate(${dx}px, ${dy}px)`;
-        row.style.opacity = '0.68';
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          row.style.transition = `transform 1200ms cubic-bezier(.2,.8,.2,1) ${index * 120}ms, opacity 900ms ease ${index * 120}ms`;
-          row.style.transform = 'translate(0, 0)';
-          row.style.opacity = '1';
-        }));
-        setTimeout(() => {
-          row.style.removeProperty('transition');
-          row.style.removeProperty('transform');
-          row.style.removeProperty('opacity');
-        }, 1450 + index * 120);
-        const helper = document.createElement('div');
-        helper.className = 'max-mover';
-        helper.innerHTML = '<div class="pet-sprite"></div><span>归档中</span>';
-        helper.style.left = `${Math.max(8, before.right - 54)}px`;
-        helper.style.top = `${Math.max(8, before.top)}px`;
-        document.body.appendChild(helper);
-        helper.style.transform = 'translate(0, 0) scale(.9)';
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          helper.style.transition = `transform 1600ms cubic-bezier(.2,.75,.2,1) ${index * 120}ms`;
-          helper.style.transform = `translate(${after.right - before.right}px, ${after.top - before.top}px) scale(1)`;
-        }));
-        setTimeout(() => helper.remove(), 1750 + index * 120);
+    const movePause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+    async function animateProjectMoves(projects, previousRects) {
+      if (!projects.length) return;
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const groups = new Map();
+      projects.forEach(project => {
+        if (!groups.has(project.category)) groups.set(project.category, []);
+        groups.get(project.category).push(project);
       });
+      state.projectMoveBusy = true;
+      try {
+        for (const [category, items] of groups) {
+          const categoryGroup = [...document.querySelectorAll('.category-group')].find(group => group.dataset.category === category);
+          const heading = categoryGroup?.querySelector('.category-heading');
+          if (!heading) continue;
+          if (reduced) {
+            heading.classList.add('category-arrived');
+            items.forEach(item => projectRow(item.source_id)?.classList.add('project-arrived'));
+            await movePause(750);
+          } else {
+            const before = items.map(item => previousRects.get(item.source_id)).find(Boolean);
+            const helper = document.createElement('div');
+            helper.className = 'max-mover';
+            helper.innerHTML = `<div class="pet-sprite"></div><span>${items.length > 1 ? `${items.length} 篇 → ` : '→ '}${esc(category)}</span>`;
+            const startLeft = Math.min(window.innerWidth - 78, Math.max(12, Number(before?.right || window.innerWidth / 2) - 62));
+            const startTop = Math.min(window.innerHeight - 118, Math.max(16, Number(before?.top || window.innerHeight / 2)));
+            helper.style.left = `${startLeft}px`;
+            helper.style.top = `${startTop}px`;
+            document.body.appendChild(helper);
+            heading.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'nearest'});
+            await movePause(520);
+            const destination = heading.getBoundingClientRect();
+            const endLeft = Math.min(window.innerWidth - 78, Math.max(12, destination.right - 70));
+            const endTop = Math.min(window.innerHeight - 118, Math.max(16, destination.top - 28));
+            helper.style.transition = 'left 1250ms cubic-bezier(.2,.78,.2,1), top 1250ms cubic-bezier(.2,.78,.2,1), transform 1250ms ease';
+            helper.style.left = `${endLeft}px`;
+            helper.style.top = `${endTop}px`;
+            helper.style.transform = 'scale(1.06)';
+            await movePause(1280);
+            heading.classList.add('category-arrived');
+            items.forEach(item => projectRow(item.source_id)?.classList.add('project-arrived'));
+            helper.querySelector('span').textContent = `已到 ${category}`;
+            await movePause(850);
+            helper.remove();
+          }
+          heading.classList.remove('category-arrived');
+          items.forEach(item => projectRow(item.source_id)?.classList.remove('project-arrived'));
+        }
+      } finally {
+        state.projectMoveBusy = false;
+      }
     }
 
     function toggleProjectSelection(sourceId, selected) {
