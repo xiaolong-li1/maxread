@@ -454,7 +454,8 @@ class RecruitingPipelineTest(unittest.TestCase):
             self.assertNotIn("vew37TarSs", content)
             self.assertIn("vewaFIevDP", content)
             self.assertIn("vewVVbQsCs", content)
-            self.assertIn("vewmpcpnxQ", content)
+            self.assertNotIn("最近一周其他邮件", content)
+            self.assertNotIn("vewmpcpnxQ", content)
             self.assertNotIn("实习生：0 人", content)
 
     def test_weekly_report_uses_native_clickable_links(self) -> None:

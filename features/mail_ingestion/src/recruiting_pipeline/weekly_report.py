@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 
 BASE_URL = "https://ccnsbbr30xgq.feishu.cn/base/S4v4bdOCuaWvAQs90vCcek4anHh?table=tblJtH3AVWn0Gar8&view=vewhN2XnwI"
 RECENT_URL = "https://ccnsbbr30xgq.feishu.cn/base/S4v4bdOCuaWvAQs90vCcek4anHh?table=tblJtH3AVWn0Gar8&view=vewVVbQsCs"
-OTHER_RECENT_URL = "https://ccnsbbr30xgq.feishu.cn/base/S4v4bdOCuaWvAQs90vCcek4anHh?table=tblJtH3AVWn0Gar8&view=vewmpcpnxQ"
 TOPIC_URLS = {
     "MLSys": "https://ccnsbbr30xgq.feishu.cn/base/S4v4bdOCuaWvAQs90vCcek4anHh?table=tblJtH3AVWn0Gar8&view=vewaFIevDP",
     "Agentic Infrastructure": "https://ccnsbbr30xgq.feishu.cn/base/S4v4bdOCuaWvAQs90vCcek4anHh?table=tblJtH3AVWn0Gar8&view=vewclBCsP4",
@@ -34,16 +33,6 @@ def render_weekly_report(db_path: Path, now: datetime | None = None) -> tuple[st
         if parsed and parsed >= start:
             rows.append((parsed, fields, status or "未筛选", doc_url or ""))
     rows.sort(key=lambda item: item[0], reverse=True)
-    recent_other = 0
-    for fields_json, latest_time, base_record_id, row_status in conn.execute(
-        "select fields_json,latest_time,base_record_id,status from recruiting_threads"
-    ):
-        fields = json.loads(fields_json)
-        if fields.get("mail_type") != "other" or not base_record_id or row_status == "inactive":
-            continue
-        parsed = _parse_time(latest_time)
-        if parsed and parsed >= start:
-            recent_other += 1
     all_rows = []
     for fields_json, latest_time, status, doc_url, base_record_id, row_status in conn.execute(
         "select fields_json,latest_time,screening_status,doc_url,base_record_id,status from recruiting_threads"
@@ -65,7 +54,6 @@ def render_weekly_report(db_path: Path, now: datetime | None = None) -> tuple[st
         "",
         f"**[候选人池]({BASE_URL})**　全部候选人。",
         f"**[最近一周候选人]({RECENT_URL})**　按最新邮件时间倒序排列。",
-        f"**[最近一周其他邮件]({OTHER_RECENT_URL})**　{recent_other} 封，按最新邮件时间倒序排列。",
         "",
         "### 各方向候选池",
         *[f"- **[{topic}]({url})**" for topic, url in TOPIC_URLS.items()],
