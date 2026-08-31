@@ -215,7 +215,14 @@ def _systemd_show(unit: str) -> dict[str, str]:
         if "=" in line:
             key, value = line.split("=", 1)
             values[key] = value
+    for key in ("ActiveEnterTimestamp", "NextElapseUSecRealtime", "LastTriggerUSec"):
+        values[key + "ISO"] = _systemd_time_iso(values.get(key, ""))
     return values
+
+
+def _systemd_time_iso(value: str) -> str:
+    match = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})", str(value or ""))
+    return f"{match.group(1)}T{match.group(2)}+08:00" if match else ""
 
 
 def _control_status(mail_root: Path) -> dict[str, Any]:

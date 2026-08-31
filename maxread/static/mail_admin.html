@@ -122,13 +122,14 @@
     function render(data){
       const latest=data.runs?.[0]||{}; const state=data.business_state||'down';
       $('status').className=`status ${state}`;$('status-label').textContent=state==='healthy'?'运行正常':state==='degraded'?'进程正常，业务降级':'服务异常';
-      $('status-detail').textContent=latest.started_at?`最近运行 ${fmt(latest.started_at)}`:'暂无运行记录';
+      const changed=Number(latest.new_threads||0)+Number(latest.updated_threads||0); const latestFailed=Number(latest.failed_threads||0);
+      $('status-detail').textContent=latest.started_at?`最近运行 ${fmt(latest.started_at)}${latestFailed?` · ${latestFailed}/${changed||latestFailed} 失败`:''}`:'暂无运行记录';
       const active=Boolean(data.control?.active);$('control-state').textContent=active?`后台任务：${data.control.account||'all'}`:'当前没有手动扫描';$('scan-all').disabled=active;
       $('accounts').innerHTML=(data.accounts||[]).map(a=>`<div class="account"><div><div class="address">${esc(a.address)}</div><div class="muted">${esc(a.id)}</div></div><div><span class="muted">邮件</span><br><strong>${Number(a.messages||0)}</strong></div><div><span class="muted">最近扫描</span><br>${esc(fmt(a.last_scan))}</div><div><span class="muted">最新来信</span><br>${esc(fmt(a.latest_mail))}</div><button ${active?'disabled':''} onclick="scanMailbox('${esc(a.id)}')">立即扫描</button></div>`).join('')||'<div class="empty">未发现邮箱配置</div>';
       const serviceActive=data.service?.ActiveState==='active';$('service-pill').outerHTML=pill(serviceActive?'active':data.service?.ActiveState||'unknown',!serviceActive,false).replace('<span','<span id="service-pill"');
-      $('service-metrics').innerHTML=metric('PID',data.service?.MainPID||'—')+metric('重启次数',data.service?.NRestarts||0)+metric('周报下次',fmt(data.report_timer?.NextElapseUSecRealtime));
-      const failed=Number(latest.failed_threads||0);$('run-pill').outerHTML=pill(latest.status||'暂无',latest.status==='failed',failed>0).replace('<span','<span id="run-pill"');
-      $('run-metrics').innerHTML=metric('活动线程',data.thread_stats?.active||0)+metric('提取失败',data.thread_stats?.extract_failed||0)+metric('最近失败',failed);
+      $('service-metrics').innerHTML=metric('PID',data.service?.MainPID||'—')+metric('重启次数',data.service?.NRestarts||0)+metric('周报下次',fmt(data.report_timer?.NextElapseUSecRealtimeISO));
+      const failed=Number(latest.failed_threads||0); const runLabel=latest.status==='completed'&&failed?'部分失败':latest.status||'暂无';$('run-pill').outerHTML=pill(runLabel,latest.status==='failed',failed>0).replace('<span','<span id="run-pill"');
+      $('run-metrics').innerHTML=metric('邮件会话',data.thread_stats?.active||0)+metric('提取失败待重试',data.thread_stats?.extract_failed||0)+metric('本轮失败',failed);
       $('scan-interval').value=data.config?.scan_interval_minutes||1440;$('report-interval').value=data.config?.report_interval_hours||168;
       $('run-count').textContent=`${(data.runs||[]).length} 条`;
       $('runs').innerHTML=(data.runs||[]).map(r=>`<tr><td>${esc(fmt(r.started_at))}</td><td>${pill(r.status,r.status==='failed'||r.status==='abandoned',Number(r.failed_threads)>0)}</td><td>${Number(r.scanned_messages||0)}</td><td>${Number(r.new_threads||0)}</td><td>${Number(r.updated_threads||0)}</td><td>${Number(r.failed_threads||0)}</td><td>${esc(duration(r.started_at,r.finished_at))}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">暂无运行</td></tr>';

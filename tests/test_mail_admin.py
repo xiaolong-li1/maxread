@@ -119,3 +119,7 @@ def test_mail_admin_page_uses_reverse_proxy_relative_api_paths():
     assert "api('api/admin/mail/scan'" in html
     assert "api('api/admin/mail/config'" in html
     assert "api('/api/admin/mail" not in html
+
+
+def test_systemd_cst_timestamp_is_exposed_as_shanghai_iso():
+    assert mail_admin._systemd_time_iso("Mon 2026-09-07 07:00:00 CST") == "2026-09-07T07:00:00+08:00"
