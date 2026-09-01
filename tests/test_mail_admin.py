@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from pathlib import Path
 
 from maxread import mail_admin
@@ -115,7 +116,7 @@ def test_manual_scan_accepts_only_configured_accounts_and_records_unit(tmp_path,
 
     assert result["account"] == "bohan-zhuang"
     assert str(script) in commands[0]
-    assert "--setenv=HOME=/root" in commands[0]
+    assert any(item.startswith("--setenv=HOME=") for item in commands[0])
     assert (root / "data/mail-control.json").exists()
     try:
         mail_admin.trigger_mail_scan("not-configured")
@@ -141,3 +142,45 @@ def test_mail_admin_page_uses_reverse_proxy_relative_api_paths():
 
 def test_systemd_cst_timestamp_is_exposed_as_shanghai_iso():
     assert mail_admin._systemd_time_iso("Mon 2026-09-07 07:00:00 CST") == "2026-09-07T07:00:00+08:00"
+
+
+def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
+    requests = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def fake_urlopen(request, timeout=0):
+        requests.append((request.full_url, request.method, request.headers, request.data, timeout))
+        return Response({"ok": True, "remote_execution": True})
+
+    monkeypatch.setenv("MAXREAD_MAIL_REMOTE_URL", "http://127.0.0.1:18766")
+    monkeypatch.setenv("MAXREAD_MAIL_REMOTE_TOKEN", "secret-token")
+    monkeypatch.setattr(mail_admin.urllib.request, "urlopen", fake_urlopen)
+
+    assert mail_admin.mail_admin_status()["remote_execution"] is True
+    assert mail_admin.trigger_mail_scan("all")["ok"] is True
+    assert mail_admin.update_mail_admin_config(60, 168)["ok"] is True
+    assert [item[0] for item in requests] == [
+        "http://127.0.0.1:18766/status",
+        "http://127.0.0.1:18766/scan",
+        "http://127.0.0.1:18766/config",
+    ]
+    assert all(item[2]["Authorization"] == "Bearer secret-token" for item in requests)
+
+
+def test_user_systemd_prefix_is_used_on_compute_worker(monkeypatch):
+    monkeypatch.setenv("MAXREAD_MAIL_SYSTEMD_USER", "1")
+    assert mail_admin._systemctl("restart", "recruiting-pipeline.service") == [
+        "systemctl", "--user", "restart", "recruiting-pipeline.service",
+    ]

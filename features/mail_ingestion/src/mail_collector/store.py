@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS messages (
     likely_candidate INTEGER NOT NULL,
     candidate_reasons_json TEXT NOT NULL,
     raw_path TEXT NOT NULL,
+    artifacts_released_at TEXT,
     scanned_at TEXT NOT NULL,
     UNIQUE(mailbox, source_uid)
 );
@@ -79,6 +80,9 @@ class Store:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)").fetchall()}
+            if "artifacts_released_at" not in columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN artifacts_released_at TEXT")
 
     def get_sync_state(self, mailbox: str) -> SyncState:
         self.initialize()

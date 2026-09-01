@@ -43,6 +43,48 @@ class RecruitingPipelineTest(unittest.TestCase):
 
         self.assertEqual(headers.message_id, "<m@example.com>")
 
+    def test_processed_message_releases_payload_but_keeps_thread_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db = root / "mail.sqlite3"
+            message_dir = root / "messages/INBOX/1"
+            message_dir.mkdir(parents=True)
+            raw = message_dir / "message.eml"
+            raw.write_bytes(
+                b"From: Candidate <candidate@example.com>\r\n"
+                b"To: lab@example.com\r\n"
+                b"Message-ID: <m@example.com>\r\n"
+                b"References: <root@example.com>\r\n\r\n"
+                + b"large body" * 1000
+            )
+            body = message_dir / "body.txt"
+            body.write_text("large body", encoding="utf-8")
+            attachment = message_dir / "01-resume.pdf"
+            attachment.write_bytes(b"pdf bytes")
+            external = message_dir / "external-attachments/external.pdf"
+            external.parent.mkdir()
+            external.write_bytes(b"external bytes")
+            with sqlite3.connect(db) as conn:
+                conn.execute("create table messages(id integer primary key,raw_path text,artifacts_released_at text)")
+                conn.execute("create table attachments(message_record_id integer,local_path text,skipped_reason text)")
+                conn.execute("insert into messages values(1,?,null)", (str(raw),))
+                conn.execute("insert into attachments values(1,?,null)", (str(attachment),))
+            store = PipelineStore(db)
+            store.initialize()
+            store.upsert_message(1, "thread", "incoming", "INBOX")
+            store.mark_message_processed(1)
+
+            self.assertEqual(store.release_processed_artifacts(), 1)
+
+            self.assertLess(raw.stat().st_size, 300)
+            self.assertEqual(read_headers(raw).message_id, "<m@example.com>")
+            self.assertFalse(body.exists())
+            self.assertFalse(attachment.exists())
+            self.assertFalse(external.exists())
+            with sqlite3.connect(db) as conn:
+                self.assertIsNotNone(conn.execute("select artifacts_released_at from messages where id=1").fetchone()[0])
+                self.assertIsNone(conn.execute("select local_path from attachments where message_record_id=1").fetchone()[0])
+
     def test_thread_latest_time_handles_mixed_timezone_dates(self) -> None:
         first = StoredMessage(1, "1", "INBOX", "s", "", "a@example.com", "2026-08-29T10:00:00", "", Path("/tmp/1"))
         second = StoredMessage(2, "2", "INBOX", "s", "", "a@example.com", "2026-08-29T19:00:00+08:00", "", Path("/tmp/2"))

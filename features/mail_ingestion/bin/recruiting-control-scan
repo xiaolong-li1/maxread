@@ -4,8 +4,12 @@ set -euo pipefail
 ROOT="${MAXREAD_ROOT:-/opt/maxread}"
 MAIL_ROOT="$ROOT/features/mail_ingestion"
 ACCOUNT="${1:-all}"
-LOCK_FILE="/run/maxread-recruiting-manual.lock"
+LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/maxread-recruiting-manual.lock"
 export HOME="${MAXREAD_SERVICE_HOME:-/root}"
+SYSTEMCTL=(systemctl)
+if [[ "${MAXREAD_MAIL_SYSTEMD_USER:-0}" == "1" ]]; then
+  SYSTEMCTL+=(--user)
+fi
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -14,11 +18,11 @@ if ! flock -n 9; then
 fi
 
 restore_service() {
-  systemctl start recruiting-pipeline.service || true
+  "${SYSTEMCTL[@]}" start recruiting-pipeline.service || true
 }
 trap restore_service EXIT
 
-systemctl stop recruiting-pipeline.service
+"${SYSTEMCTL[@]}" stop recruiting-pipeline.service
 cd "$ROOT"
 
 if [[ "$ACCOUNT" == "all" ]]; then

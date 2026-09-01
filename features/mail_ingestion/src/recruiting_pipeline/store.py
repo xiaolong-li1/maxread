@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
 from collections import defaultdict
 from datetime import timedelta
@@ -89,6 +91,9 @@ class PipelineStore:
                 conn.execute("ALTER TABLE recruiting_threads ADD COLUMN screening_status TEXT NOT NULL DEFAULT '未筛选'")
             if "interview_result" not in columns:
                 conn.execute("ALTER TABLE recruiting_threads ADD COLUMN interview_result TEXT NOT NULL DEFAULT '未开始'")
+            message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+            if message_columns and "artifacts_released_at" not in message_columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN artifacts_released_at TEXT")
 
     def start_run(self, run_id: str) -> None:
         now = datetime.now(UTC).isoformat()
@@ -201,6 +206,50 @@ class PipelineStore:
         with self.connect() as conn:
             conn.execute("UPDATE recruiting_messages SET processed_at=? WHERE message_record_id=?", (datetime.now(UTC).isoformat(), message_id))
 
+    def release_processed_artifacts(self) -> int:
+        """Release bulky local payloads only after their durable thread commit."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select m.id,m.raw_path from messages m
+                join recruiting_messages r on r.message_record_id=m.id
+                where r.processed_at is not null and m.artifacts_released_at is null
+                order by m.id
+                """
+            ).fetchall()
+        released = 0
+        for row in rows:
+            if self._release_message_artifacts(int(row["id"]), Path(str(row["raw_path"]))):
+                released += 1
+        return released
+
+    def _release_message_artifacts(self, message_id: int, raw_path: Path) -> bool:
+        with self.connect() as conn:
+            attachments = [
+                Path(str(row["local_path"]))
+                for row in conn.execute(
+                    "select local_path from attachments where message_record_id=? and local_path is not null",
+                    (message_id,),
+                ).fetchall()
+            ]
+        try:
+            if raw_path.exists():
+                _compact_rfc822_headers(raw_path)
+            for path in attachments:
+                path.unlink(missing_ok=True)
+            (raw_path.parent / "body.txt").unlink(missing_ok=True)
+            shutil.rmtree(raw_path.parent / "external-attachments", ignore_errors=True)
+        except OSError:
+            return False
+        now = datetime.now(UTC).isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                "update attachments set local_path=null,skipped_reason=coalesce(skipped_reason,'processed_cleanup') where message_record_id=?",
+                (message_id,),
+            )
+            conn.execute("update messages set artifacts_released_at=? where id=?", (now, message_id))
+        return True
+
     def uploaded_attachment_digests(self, thread_key: str) -> set[str]:
         self.initialize()
         with self.connect() as conn:
@@ -309,6 +358,19 @@ def _parse_pipeline_time(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
     return parsed.astimezone(ZoneInfo("Asia/Shanghai"))
+
+
+def _compact_rfc822_headers(path: Path) -> None:
+    payload = path.read_bytes()
+    separators = [index for marker in (b"\r\n\r\n", b"\n\n") if (index := payload.find(marker)) >= 0]
+    if not separators:
+        raise OSError(f"message headers are incomplete: {path}")
+    end = min(separators)
+    compact = payload[:end].rstrip(b"\r\n") + b"\r\n\r\n"
+    temporary = path.with_name(path.name + ".headers.tmp")
+    temporary.write_bytes(compact)
+    os.chmod(temporary, path.stat().st_mode & 0o777)
+    os.replace(temporary, path)
 
 
 def _safe_source_uid(value: str) -> str:

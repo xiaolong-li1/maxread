@@ -63,6 +63,7 @@ class PipelineSettings:
     mark_interview_assigned: bool
     notify_enabled: bool
     notify_chat_id: str
+    clean_processed_artifacts: bool
     mailbox_env_files: tuple[Path, ...] = ()
     mailbox_addresses: tuple[str, ...] = ()
     team_addresses: tuple[str, ...] = ()
@@ -151,6 +152,7 @@ class PipelineSettings:
             mark_interview_assigned=boolean("RECRUITING_MARK_INTERVIEW_ASSIGNED", True),
             notify_enabled=boolean("RECRUITING_NOTIFY_ENABLED", False),
             notify_chat_id=value("RECRUITING_NOTIFY_CHAT_ID"),
+            clean_processed_artifacts=boolean("RECRUITING_CLEAN_PROCESSED_ARTIFACTS", True),
             mailbox_env_files=account_envs,
             mailbox_addresses=account_addresses,
             team_addresses=team_addresses,

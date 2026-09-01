@@ -1,0 +1,18 @@
+[Unit]
+Description=MaxRead remote recruiting mail control endpoint
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/lixiaolong/projects/maxread
+EnvironmentFile=/home/lixiaolong/projects/maxread/.env
+Environment=MAXREAD_MAIL_ROOT=/home/lixiaolong/projects/maxread/features/mail_ingestion
+Environment=MAXREAD_ROOT=/home/lixiaolong/projects/maxread
+Environment=MAXREAD_MAIL_SYSTEMD_USER=1
+ExecStart=/home/lixiaolong/projects/maxread/.venv/bin/python -m maxread.mail_remote_server --host 127.0.0.1 --port 18766
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -6,6 +6,8 @@ import re
 import sqlite3
 import subprocess
 import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,8 @@ MAIL_ADMIN_HTML = (Path(__file__).resolve().parent / "static" / "mail_admin.html
 
 
 def mail_admin_status() -> dict[str, Any]:
+    if _remote_url():
+        return _remote_request("/status")
     mail_root = _mail_root()
     primary_env = mail_root / "data/accounts/zip-lab.env"
     env = _read_env(primary_env)
@@ -60,6 +64,14 @@ def update_mail_admin_config(scan_interval_minutes: int, report_interval_hours: 
         raise ValueError("自动扫描间隔必须在 5 分钟到 7 天之间")
     if not 1 <= report_hours <= 720:
         raise ValueError("周报发布间隔必须在 1 小时到 30 天之间")
+    if _remote_url():
+        return _remote_request(
+            "/config",
+            {
+                "scan_interval_minutes": scan_minutes,
+                "report_interval_hours": report_hours,
+            },
+        )
     mail_root = _mail_root()
     env_path = mail_root / "data/accounts/zip-lab.env"
     _update_env(
@@ -69,19 +81,21 @@ def update_mail_admin_config(scan_interval_minutes: int, report_interval_hours: 
             "RECRUITING_REPORT_INTERVAL_HOURS": str(report_hours),
         },
     )
-    dropin = Path(os.environ.get(
-        "MAXREAD_MAIL_REPORT_TIMER_DROPIN",
-        "/etc/systemd/system/recruiting-weekly-report.timer.d/interval.conf",
-    ))
+    default_dropin = (
+        Path.home() / ".config/systemd/user/recruiting-weekly-report.timer.d/interval.conf"
+        if _user_systemd()
+        else Path("/etc/systemd/system/recruiting-weekly-report.timer.d/interval.conf")
+    )
+    dropin = Path(os.environ.get("MAXREAD_MAIL_REPORT_TIMER_DROPIN", str(default_dropin)))
     dropin.parent.mkdir(parents=True, exist_ok=True)
     _atomic_text(
         dropin,
         "[Timer]\nOnCalendar=\nOnUnitActiveSec=" + str(report_hours) + "h\nPersistent=true\nAccuracySec=5m\n",
         mode=0o644,
     )
-    _run(["systemctl", "daemon-reload"])
-    _run(["systemctl", "restart", DEFAULT_PIPELINE_SERVICE])
-    _run(["systemctl", "restart", DEFAULT_REPORT_TIMER])
+    _run(_systemctl("daemon-reload"))
+    _run(_systemctl("restart", DEFAULT_PIPELINE_SERVICE))
+    _run(_systemctl("restart", DEFAULT_REPORT_TIMER))
     return {
         "ok": True,
         "scan_interval_minutes": scan_minutes,
@@ -91,6 +105,8 @@ def update_mail_admin_config(scan_interval_minutes: int, report_interval_hours: 
 
 def trigger_mail_scan(account_id: str) -> dict[str, Any]:
     clean = str(account_id or "").strip().lower()
+    if _remote_url():
+        return _remote_request("/scan", {"account": clean})
     mail_root = _mail_root()
     allowed = {"all", *(item["id"] for item in _mail_accounts(mail_root, _mail_db_path(mail_root)))}
     if clean not in allowed:
@@ -102,19 +118,25 @@ def trigger_mail_scan(account_id: str) -> dict[str, Any]:
     script = mail_root / "bin/recruiting-control-scan"
     if not script.exists():
         raise RuntimeError("邮件扫描控制脚本尚未部署")
-    result = _run(
+    command = ["systemd-run"]
+    if _user_systemd():
+        command.append("--user")
+    command.extend(
         [
-            "systemd-run",
             f"--unit={unit.removesuffix('.service')}",
             "--description=MaxRead manual recruiting mailbox scan",
             "--property=CPUQuota=60%",
             "--property=MemoryMax=700M",
             "--property=RuntimeMaxSec=1800",
-            "--setenv=HOME=/root",
+            f"--setenv=HOME={Path.home()}",
+            f"--setenv=MAXREAD_ROOT={Path(os.environ.get('MAXREAD_ROOT', '/opt/maxread'))}",
+            f"--setenv=MAXREAD_SERVICE_HOME={Path.home()}",
+            f"--setenv=MAXREAD_MAIL_SYSTEMD_USER={'1' if _user_systemd() else '0'}",
             str(script),
             clean,
         ]
     )
+    result = _run(command)
     state = {
         "unit": unit,
         "account": clean,
@@ -207,10 +229,10 @@ def _mail_database_status(db_path: Path) -> tuple[list[dict], dict[str, int], li
 
 def _systemd_show(unit: str) -> dict[str, str]:
     try:
-        output = _run([
-            "systemctl", "show", unit,
+        output = _run(_systemctl(
+            "show", unit,
             "--property=ActiveState,SubState,MainPID,ActiveEnterTimestamp,NRestarts,NextElapseUSecRealtime,LastTriggerUSec,Result,ExecMainStatus",
-        ])
+        ))
     except Exception as exc:
         return {"ActiveState": "unknown", "error": str(exc)[:240]}
     values = {}
@@ -284,3 +306,40 @@ def _run(argv: list[str]) -> str:
     if completed.returncode != 0:
         raise RuntimeError((completed.stderr or completed.stdout or "command failed").strip()[:1000])
     return completed.stdout.strip()
+
+
+def _user_systemd() -> bool:
+    return str(os.environ.get("MAXREAD_MAIL_SYSTEMD_USER", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _systemctl(*args: str) -> list[str]:
+    return ["systemctl", *(["--user"] if _user_systemd() else []), *args]
+
+
+def _remote_url() -> str:
+    return str(os.environ.get("MAXREAD_MAIL_REMOTE_URL", "")).strip().rstrip("/")
+
+
+def _remote_request(path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    url = _remote_url() + path
+    token = str(os.environ.get("MAXREAD_MAIL_REMOTE_TOKEN", "")).strip()
+    if not token:
+        raise RuntimeError("MAXREAD_MAIL_REMOTE_TOKEN is required")
+    data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method="GET" if payload is None else "POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"remote mail worker HTTP {exc.code}: {detail}") from exc
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"remote mail worker unavailable: {exc}") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("remote mail worker returned invalid JSON")
+    return result

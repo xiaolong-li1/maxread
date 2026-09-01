@@ -34,6 +34,7 @@ class RunStats:
     failed_threads: int = 0
     documents_created: int = 0
     documents_updated: int = 0
+    artifacts_released: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -132,6 +133,8 @@ class RecruitingRunner:
                     "mail_type": thread.fields.mail_type,
                     "error": progress_error,
                 }, ensure_ascii=False), flush=True)
+            if self.settings.clean_processed_artifacts:
+                stats.artifacts_released = self.store.release_processed_artifacts()
             run_counts = {key: value for key, value in stats.as_dict().items() if key in {"scanned_messages", "new_threads", "updated_threads", "failed_threads"}}
             self.store.finish_run(run_id, "completed", **run_counts, error="")
             return {"ok": True, **stats.as_dict()}
