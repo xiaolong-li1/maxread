@@ -259,6 +259,30 @@ def test_method_validation_still_blocks_undisclosed_source_conflict():
     assert result.issues[0].category == "factual_risk"
 
 
+def test_method_validation_keeps_medium_math_boundary_as_nonblocking_warning():
+    class BoundaryWarningLLM:
+        def responses_text(self, _system, _user, **_kwargs):
+            return json.dumps(
+                {
+                    "passed": False,
+                    "findings": [
+                        {
+                            "category": "math",
+                            "severity": "medium",
+                            "detail": "K=1 时奖励公式需要单独定义。",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+    result = validate_method_consistency(BoundaryWarningLLM(), "# T\n\n原文公式。")
+
+    assert result.passed is True
+    assert result.issues[0].severity == "medium"
+    assert "只有与 source 直接矛盾" in METHOD_VALIDATION_SYSTEM_PROMPT
+
+
 def test_paper_prompt_keeps_program_identifiers_out_of_latex():
     prompt = build_final_user_prompt(_bundle())
 

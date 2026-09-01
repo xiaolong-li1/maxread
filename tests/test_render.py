@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure
-from maxread.render import compiled_figure_captions, compose_related_figure_groups, constrain_rendered_image, display_caption, enforce_figure_owner_sections, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, normalize_figure_captions, polish_markdown, prepare_key_figures, prepare_key_figures_with_owners, remove_false_material_warning, _figure_section_target, _pretty_grid_label, _render_asset
+from maxread.render import compiled_figure_captions, compose_related_figure_groups, constrain_rendered_image, display_caption, enforce_figure_owner_sections, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, native_image_caption, normalize_figure_captions, polish_markdown, prepare_key_figures, prepare_key_figures_with_owners, remove_false_material_warning, _figure_section_target, _pretty_grid_label, _render_asset
 
 
 def test_polish_markdown_converts_math():
@@ -246,6 +246,16 @@ def test_polish_markdown_keeps_backticked_structured_math_out_of_text_flow_rule(
 
     assert "→" not in out
     assert r"\rightarrow" in out
+
+
+def test_native_image_caption_compiles_formula_markup_to_plain_text():
+    caption = r"图 2　左侧 <latex>q_i \cdot k_j</latex> 加偏置；<latex>\mathrm{m}</latex> 是固定标量。"
+
+    out = native_image_caption(caption)
+
+    assert out == "图 2　左侧 q_i · k_j 加偏置；m 是固定标量。"
+    assert "<latex>" not in out
+    assert r"\mathrm" not in out
 
 
 def test_polish_markdown_normalizes_common_paper_macros():

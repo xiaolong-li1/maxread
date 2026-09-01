@@ -298,6 +298,25 @@ class MethodValidationFailLLM(FakeLLM):
         return super().responses_text(system, user, **kwargs)
 
 
+class MethodValidationMediumLLM(FakeLLM):
+    def responses_text(self, system, user, **kwargs):
+        if "方法一致性验收员" in system:
+            return json.dumps(
+                {
+                    "passed": False,
+                    "findings": [
+                        {
+                            "category": "math",
+                            "severity": "medium",
+                            "detail": "边界条件值得披露，但不改变正文方法结论。",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        return super().responses_text(system, user, **kwargs)
+
+
 class FakeArxivNoSource(FakeArxiv):
     def fetch(self, paper_id):
         bundle = super().fetch(paper_id)
@@ -786,6 +805,26 @@ def test_pipeline_blocks_document_creation_when_method_revalidation_fails(tmp_pa
     assert "method-audit:math:high" in result.error
     assert feishu.published == []
     assert workflow_state == WorkflowState.QUALITY_FAILED
+    store.close()
+
+
+def test_pipeline_publishes_with_medium_method_audit_warning(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    feishu = FakeFeishu()
+    pipeline = MaxReadPipeline(
+        store,
+        FakeArxiv(),
+        feishu,
+        MethodValidationMediumLLM(),
+        require_source=True,
+    )
+
+    result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
+
+    assert result.error == ""
+    assert result.doc_url == "https://tenant.feishu.cn/docx/doc123"
+    assert feishu.published == ["doc123"]
+    assert "method-audit:math:medium" in store.get_paper("2604.12946").error
     store.close()
 
 

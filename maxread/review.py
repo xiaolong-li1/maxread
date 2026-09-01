@@ -231,7 +231,7 @@ METHOD_VALIDATION_SYSTEM_PROMPT = r"""你是 MaxRead 的方法一致性验收员
 3. 不得因为缺少符号账本、作用域矩阵、额外反例或未选择的表而判失败。
 4. 区分定义结论、观测、作者假设、实验支持和因果证明。
 5. 检查已选择的关键表是否忠实；未选 source/附录表不构成缺失。
-6. 文章自己的推导或转述存在未解决的 math/factual_risk medium/high 时必须令 passed=false。
+6. 只有与 source 直接矛盾、足以改变方法含义或关键结论的 high 问题才令 passed=false。medium 只表示值得披露或人工复核的边界提醒，必须保留 finding 但令 passed=true。
 7. 若矛盾来自论文 source 自身（例如定义无法复算原表），且稿件已经明确披露、没有擅自修正并说明以原表报告值为准，应标为 source_inconsistency/medium 并允许 passed=true；只有稿件隐瞒、误引或凭空消解 source 矛盾时才阻断。
 """
 
@@ -279,8 +279,8 @@ def validate_method_consistency(
                 issue = ReviewIssue("source_inconsistency", "medium", detail)
                 downgraded_source_conflict = True
             issues.append(issue)
-    blocking = any(issue.severity in {"medium", "high"} and issue.category in {"math", "factual_risk", "table", "other"} for issue in issues)
-    passed = not blocking and (bool(payload.get("passed")) or downgraded_source_conflict)
+    blocking = any(issue.severity == "high" for issue in issues)
+    passed = not blocking
     return MethodValidationResult(passed=passed, issues=issues, raw=raw)
 
 

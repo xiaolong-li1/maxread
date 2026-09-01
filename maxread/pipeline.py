@@ -425,11 +425,16 @@ class MaxReadPipeline:
                                 indent=2,
                             ),
                         )
+                    review_warnings.extend(
+                        f"method-audit:{issue.category}:{issue.severity}:{issue.detail}"
+                        for issue in validation.issues
+                        if issue.severity == "medium"
+                    )
                     if not validation.passed:
                         blocking = "; ".join(
                             f"method-audit:{issue.category}:{issue.severity}:{issue.detail}"
                             for issue in validation.issues
-                            if issue.severity in {"medium", "high"}
+                            if issue.severity == "high"
                         ) or "method-audit:other:high:method consistency validation failed"
                         # Method validation runs while the durable workflow is
                         # still in reviewing. Enter the quality gate before

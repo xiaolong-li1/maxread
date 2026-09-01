@@ -233,11 +233,17 @@ def _looks_like_math_code(text: str) -> bool:
 def _strip_math_code_for_text(text: str) -> str:
     value = html.unescape(str(text or "")).strip()
     replacements = {
+        r"\Longrightarrow": " ⇒ ",
+        r"\Rightarrow": " ⇒ ",
+        r"\longrightarrow": " → ",
+        r"\rightarrow": " → ",
         r"\leq": "<=",
         r"\le": "<=",
         r"\geq": ">=",
         r"\ge": ">=",
         r"\pm": "+/-",
+        r"\cdot": " · ",
+        r"\times": " × ",
         r"\cup": " union ",
         r"\cap": " intersection ",
         r"\in": " in ",
@@ -246,6 +252,11 @@ def _strip_math_code_for_text(text: str) -> str:
     }
     for command, replacement in replacements.items():
         value = re.sub(re.escape(command) + r"(?![A-Za-z])", replacement, value)
+    value = re.sub(
+        r"[\\](?:mathcal|mathbf|mathrm|mathbb|mathsf|mathit)\s*\{([^{}]*)\}",
+        r"\1",
+        value,
+    )
     value = re.sub(
         r"\\(?:mathcal|mathbf|mathrm|mathbb|mathsf|mathit)\s*",
         "",
@@ -793,6 +804,24 @@ def display_caption(caption: str, image_path: Path | str | None = None, max_char
     if len(label) > max_chars:
         label = label[:max_chars].rstrip() + "..."
     return label or "图"
+
+
+def native_image_caption(caption: str) -> str:
+    """Compile formula markup to readable text for Feishu image captions."""
+    text = html.unescape(str(caption or ""))
+
+    def formula(match: re.Match[str]) -> str:
+        body = _strip_math_code_for_text(match.group(1))
+        body = re.sub(r"\\([A-Za-z]+)", r"\1", body)
+        body = body.replace("{", "").replace("}", "")
+        return body
+
+    text = re.sub(r"<latex>(.*?)</latex>", formula, text, flags=re.S | re.I)
+    text = re.sub(r"</?[A-Za-z][^>]*>", "", text)
+    text = _sanitize_visible_text_macros(text)
+    text = re.sub(r"\\([A-Za-z]+)", r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"^(图\s+\d+)\s+", lambda match: match.group(1) + "　", text)
 
 
 def _caption_label(text: str) -> str:

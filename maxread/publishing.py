@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Protocol
 
-from .render import constrain_rendered_image, display_caption
+from .render import constrain_rendered_image, display_caption, native_image_caption
 
 
 class ImageDocClient(Protocol):
@@ -42,7 +42,7 @@ def publish_marker_image(
     """Upload an image, move it to its marker block, and roll back on failure."""
     original = Path(image_path)
     safe_path = prepare_feishu_image(original)
-    display = caption.strip() if _is_compiled_caption(caption) else display_caption(caption, safe_path)
+    display = native_image_caption(caption) if _is_compiled_caption(caption) else display_caption(caption, safe_path)
     result = ImagePublishResult(marker=marker, image_path=safe_path)
     width, height = image_display_size(safe_path)
 
