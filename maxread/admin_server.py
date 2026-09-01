@@ -737,6 +737,12 @@ def _attach_user_names(settings: Settings, rows, store=None):
         message_id = str(row.get("message_id") or "").strip()
         if row.get("sender_id") in remaining and message_id.startswith("om_") and message_id not in message_ids:
             message_ids.append(message_id)
+    accounts = store.list_web_accounts() if store else []
+    for account in accounts:
+        sender_id = str(account.get("feishu_open_id") or "").strip()
+        message_id = str(account.get("binding_message_id") or "").strip()
+        if sender_id in remaining and message_id.startswith("om_") and message_id not in message_ids:
+            message_ids.append(message_id)
     if message_ids:
         try:
             result = subprocess.run(
@@ -774,6 +780,17 @@ def _attach_user_names(settings: Settings, rows, store=None):
                         store.update_web_identity_display_name(sender_id, display_name)
         except Exception:
             pass
+    if store:
+        for account in accounts:
+            sender_id = str(account.get("feishu_open_id") or "").strip()
+            if not sender_id or sender_id in names:
+                continue
+            public_id = str(account.get("public_id") or "").strip()
+            display_name = str(account.get("display_name") or "").strip()
+            if not display_name or display_name in {"飞书用户", "未解析用户", "游客"}:
+                suffix = public_id.removeprefix("web_")[-6:] or sender_id[-6:]
+                display_name = f"网页用户 · {suffix}"
+            names[sender_id] = display_name
     for row in rows:
         row["sender_name"] = names.get(row.get("sender_id", ""), "")
     return rows
@@ -1199,7 +1216,7 @@ function table(headers, rows, className='') {
   const tableClass = className ? ` class="${esc(className)}-table"` : '';
   return `<div class="card wide${cardClass}"><table${tableClass}><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
-function userCell(r) { const name = r.sender_name || '未解析用户'; const id = r.sender_id || ''; return `<strong>${esc(name)}</strong><br><span class="mono muted">${esc(id)}</span>`; }
+function userCell(r) { const name = r.sender_name || '飞书用户'; const id = r.sender_id || ''; return `<strong>${esc(name)}</strong><br><span class="mono muted">${esc(id)}</span>`; }
 function small(v) { return `<span class="mono">${esc(v)}</span>`; }
 Promise.all([loadUsers(), loadAdminStatus()]).finally(refreshAll);
 </script>

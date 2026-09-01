@@ -118,6 +118,7 @@ class Store:
                 account_type text not null default 'guest',
                 feishu_open_id text not null default '',
                 display_name text not null default '游客',
+                binding_message_id text not null default '',
                 created_at datetime not null default current_timestamp,
                 last_seen_at datetime not null default current_timestamp,
                 bound_at datetime
@@ -356,6 +357,7 @@ class Store:
         self._ensure_column("queue_jobs", "auto_retry_count", "integer not null default 0")
         self._ensure_column("queue_jobs", "rebuild_pipeline", "integer not null default 0")
         self._ensure_column("queue_jobs", "retry_feedback", "text not null default ''")
+        self._ensure_column("web_identities", "binding_message_id", "text not null default ''")
         self._ensure_column("papers", "project_summary", "text not null default ''")
         self._ensure_column("web_project_preferences", "category_source", "text not null default ''")
         self._ensure_column("feedback", "feedback_source", "text not null default ''")
@@ -671,6 +673,20 @@ class Store:
         )
         self.conn.commit()
 
+    def update_web_identity_binding_message(self, feishu_open_id: str, message_id: str) -> None:
+        clean_open_id = str(feishu_open_id or "").strip()
+        clean_message_id = str(message_id or "").strip()
+        if not clean_open_id or not clean_message_id.startswith("om_"):
+            return
+        self.conn.execute(
+            """
+            update web_identities set binding_message_id=?,last_seen_at=current_timestamp
+            where feishu_open_id=?
+            """,
+            (clean_message_id, clean_open_id),
+        )
+        self.conn.commit()
+
     @staticmethod
     def web_identity_sender(identity) -> str:
         open_id = str(identity.get("feishu_open_id") or "").strip()
@@ -765,7 +781,7 @@ class Store:
     def list_web_accounts(self, limit: int = 200):
         rows = self.conn.execute(
             """
-            select w.public_id, w.account_type, w.feishu_open_id, w.display_name,
+            select w.public_id, w.account_type, w.feishu_open_id, w.display_name, w.binding_message_id,
                    w.created_at, w.last_seen_at,
                    (select count(*) from usage_events ue
                     where ue.chat_type = 'web' and ue.chat_id = 'web:' || w.public_id) as submission_count
@@ -1221,7 +1237,8 @@ class Store:
                 "select display_name from user_identity_cache where sender_id = ?",
                 (clean_open_id,),
             ).fetchone()
-            display_name = str(cached_name["display_name"] if cached_name else "").strip() or "飞书用户"
+            fallback_name = f"网页用户 · {str(row['public_id'])[-6:]}"
+            display_name = str(cached_name["display_name"] if cached_name else "").strip() or fallback_name
             self.conn.execute(
                 """
                 update web_identities

@@ -16,6 +16,7 @@ TOPIC_URLS = {
     "Kernel Efficiency": "https://ccnsbbr30xgq.feishu.cn/base/S4v4bdOCuaWvAQs90vCcek4anHh?table=tblJtH3AVWn0Gar8&view=vewJL5BjVw",
     "World Model": "https://ccnsbbr30xgq.feishu.cn/base/S4v4bdOCuaWvAQs90vCcek4anHh?table=tblJtH3AVWn0Gar8&view=vewVuhfX3m",
 }
+PORTAL_URL = "https://xiaolong-dev.me/maxread/mail"
 
 
 def render_weekly_report(db_path: Path, now: datetime | None = None) -> tuple[str, str]:
@@ -50,18 +51,9 @@ def render_weekly_report(db_path: Path, now: datetime | None = None) -> tuple[st
         "",
         f"候选池 **{len(all_rows)} 人**　·　未筛选 **{counts['未筛选']} 人**　·　最近一周新增 **{len(rows)} 人**",
         "",
-        "### 候选池入口",
         "",
-        f"**[候选人池]({BASE_URL})**　全部候选人。",
-        f"**[最近一周候选人]({RECENT_URL})**　按最新邮件时间倒序排列。",
-        "",
-        "### 各方向候选池",
-        *[f"- **[{topic}]({url})**" for topic, url in TOPIC_URLS.items()],
+        f"**[打开招聘邮件页面]({PORTAL_URL})**　查看候选池、最近一周、其他邮件和各方向表格。",
     ]
-    lines.extend([
-        "",
-        "> 多 topic 候选人会出现在多个方向池，但底层记录、状态和材料文档只有一份。",
-    ])
     period_key = start.astimezone().strftime("%Y%m%d")
     return "\n".join(lines), period_key
 

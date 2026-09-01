@@ -184,3 +184,9 @@ def test_user_systemd_prefix_is_used_on_compute_worker(monkeypatch):
     assert mail_admin._systemctl("restart", "recruiting-pipeline.service") == [
         "systemctl", "--user", "restart", "recruiting-pipeline.service",
     ]
+
+
+def test_mail_admin_page_keeps_base_links_behind_authenticated_status_api():
+    html = mail_admin.MAIL_ADMIN_HTML
+    assert "table-links" in html
+    assert "S4v4bdOCuaWvAQs90vCcek4anHh" not in html

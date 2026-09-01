@@ -51,51 +51,63 @@ def main() -> int:
     try:
         _phase("playwright-start")
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-background-timer-throttling",
-                    "--disable-renderer-backgrounding",
-                ],
-            )
-            page = browser.new_page(
-                viewport={"width": max(1024, args.viewport_width), "height": max(720, args.viewport_height)},
-                locale="zh-CN",
-                device_scale_factor=1,
-            )
-            page.set_default_timeout(5_000)
-            _phase("navigate")
-            page.goto(args.url, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(3_000)
+            browser = None
+            context = None
+            page = None
             try:
-                page.locator(EDITOR_SELECTORS).first.wait_for(state="attached", timeout=20_000)
-            except Exception:
-                pass
-            report["url"] = page.url
-            try:
-                report["title"] = page.locator("title").text_content(timeout=5_000) or ""
-            except Exception:
-                report["title"] = ""
-            if "accounts.feishu" in page.url or ("登录" in report["title"] and not _has_document_editor(page)):
-                report["status"] = "auth_required"
-                report["findings"].append(_finding("auth-required", "high", "文档访问跳转到登录页"))
-            else:
-                _phase("inspect")
-                _inspect_document_cdp(
-                    page,
-                    output_dir,
-                    report,
-                    max(1, args.max_sections),
-                    expected_images=max(0, args.expected_images),
-                    expected_formulas=max(0, args.expected_formulas),
-                    expected_tables=max(0, args.expected_tables),
+                browser = playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-background-timer-throttling",
+                        "--disable-renderer-backgrounding",
+                    ],
                 )
-            _emit_report(output_dir, report)
-            emitted = True
-            browser.close()
-            _phase("complete")
+                context = browser.new_context(
+                    viewport={"width": max(1024, args.viewport_width), "height": max(720, args.viewport_height)},
+                    locale="zh-CN",
+                    device_scale_factor=1,
+                )
+                page = context.new_page()
+                page.set_default_timeout(5_000)
+                _phase("navigate")
+                page.goto(args.url, wait_until="domcontentloaded", timeout=60_000)
+                page.wait_for_timeout(3_000)
+                try:
+                    page.locator(EDITOR_SELECTORS).first.wait_for(state="attached", timeout=20_000)
+                except Exception:
+                    pass
+                report["url"] = page.url
+                try:
+                    report["title"] = page.locator("title").text_content(timeout=5_000) or ""
+                except Exception:
+                    report["title"] = ""
+                if "accounts.feishu" in page.url or ("登录" in report["title"] and not _has_document_editor(page)):
+                    report["status"] = "auth_required"
+                    report["findings"].append(_finding("auth-required", "high", "文档访问跳转到登录页"))
+                else:
+                    _phase("inspect")
+                    _inspect_document_cdp(
+                        page,
+                        output_dir,
+                        report,
+                        max(1, args.max_sections),
+                        expected_images=max(0, args.expected_images),
+                        expected_formulas=max(0, args.expected_formulas),
+                        expected_tables=max(0, args.expected_tables),
+                    )
+                _emit_report(output_dir, report)
+                emitted = True
+                _phase("complete")
+            finally:
+                for resource in (page, context, browser):
+                    if resource is None:
+                        continue
+                    try:
+                        resource.close()
+                    except Exception:
+                        pass
     except Exception as exc:
         if not emitted:
             report["status"] = "error"

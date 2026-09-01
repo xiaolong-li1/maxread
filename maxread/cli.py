@@ -525,6 +525,10 @@ def _handle_web_binding_event(settings: Settings, store: Store, feishu: FeishuCl
         return False
     identity = claim_binding_code(store, match.group(1), str(getattr(event, "sender_id", "") or ""))
     if identity:
+        store.update_web_identity_binding_message(
+            str(getattr(event, "sender_id", "") or ""),
+            str(getattr(event, "message_id", "") or ""),
+        )
         rows = _attach_user_names(settings, [{"sender_id": str(getattr(event, "sender_id", "") or "")}])
         display_name = str(rows[0].get("sender_name") or "").strip()
         if display_name:

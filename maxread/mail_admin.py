@@ -8,15 +8,27 @@ import subprocess
 import uuid
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_MAIL_ROOT = Path("/opt/maxread/features/mail_ingestion")
 DEFAULT_PIPELINE_SERVICE = "recruiting-pipeline.service"
 DEFAULT_REPORT_TIMER = "recruiting-weekly-report.timer"
 MAIL_ADMIN_HTML = (Path(__file__).resolve().parent / "static" / "mail_admin.html").read_text(encoding="utf-8")
+MAIL_BASE_ROOT = "https://ccnsbbr30xgq.feishu.cn/base/S4v4bdOCuaWvAQs90vCcek4anHh?table=tblJtH3AVWn0Gar8"
+MAIL_PUBLIC_LINKS = (
+    ("候选人池", "全部候选人及当前筛选状态", "vewhN2XnwI", "primary"),
+    ("未筛选", "等待初筛的候选人", "vew37TarSs", "primary"),
+    ("最近一周新增候选人", "按最新邮件时间倒序", "vewVVbQsCs", "primary"),
+    ("其他邮件", "非候选邮件的独立归档", "vewmpcpnxQ", "secondary"),
+    ("MLSys", "训练与系统方向", "vewaFIevDP", "topic"),
+    ("Agentic Infrastructure", "Agent 与基础设施方向", "vewclBCsP4", "topic"),
+    ("Kernel Efficiency", "算子与内核方向", "vewJL5BjVw", "topic"),
+    ("World Model", "世界模型方向", "vewVuhfX3m", "topic"),
+)
 
 
 def mail_admin_status() -> dict[str, Any]:
@@ -54,7 +66,73 @@ def mail_admin_status() -> dict[str, Any]:
             "report_interval_hours": _report_interval_hours(env),
             "scan_limit": _safe_int(env.get("MAIL_SCAN_LIMIT"), 100),
         },
+        "overview": mail_public_summary(),
     }
+
+
+def mail_public_summary() -> dict[str, Any]:
+    db_path = _mail_db_path(_mail_root())
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    cutoff = now - timedelta(days=7)
+    candidate_total = 0
+    other_total = 0
+    recent_candidates = 0
+    statuses: dict[str, int] = {}
+    latest_time = ""
+    if db_path.exists():
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as connection:
+            connection.row_factory = sqlite3.Row
+            try:
+                rows = connection.execute(
+                    "select fields_json,latest_time,screening_status,status from recruiting_threads"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            for row in rows:
+                try:
+                    fields = json.loads(str(row["fields_json"] or "{}"))
+                except json.JSONDecodeError:
+                    fields = {}
+                if str(row["status"] or "") == "inactive":
+                    continue
+                current_time = str(row["latest_time"] or "")
+                latest_time = max(latest_time, current_time)
+                if str(fields.get("mail_type") or "other") == "other":
+                    other_total += 1
+                    continue
+                candidate_total += 1
+                status = str(row["screening_status"] or "未筛选")
+                statuses[status] = statuses.get(status, 0) + 1
+                parsed = _parse_datetime(current_time)
+                if parsed is not None and parsed >= cutoff:
+                    recent_candidates += 1
+    return {
+        "ok": True,
+        "updated_at": latest_time,
+        "metrics": {
+            "candidate_total": candidate_total,
+            "unscreened": statuses.get("未筛选", 0),
+            "recent_candidates": recent_candidates,
+            "other_total": other_total,
+        },
+        "status_counts": statuses,
+        "links": [
+            {"title": title, "description": description, "url": f"{MAIL_BASE_ROOT}&view={view}", "group": group}
+            for title, description, view, group in MAIL_PUBLIC_LINKS
+        ],
+    }
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    return parsed.astimezone(ZoneInfo("Asia/Shanghai"))
 
 
 def update_mail_admin_config(scan_interval_minutes: int, report_interval_hours: int) -> dict[str, Any]:

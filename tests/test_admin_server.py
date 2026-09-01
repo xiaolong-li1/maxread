@@ -130,6 +130,55 @@ def test_attach_user_names_falls_back_to_message_sender_evidence(tmp_path):
     assert "+messages-mget" in calls[1]
 
 
+def test_bound_web_identity_gets_stable_alias_until_real_name_is_observed(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    identity = store.get_or_create_web_identity("session", "web_8907e6c7ecb4")
+    store.issue_web_binding_code(int(identity["id"]), "code", 10)
+    bound = store.claim_web_binding_code("code", "ou_unknown")
+    assert bound is not None
+
+    def fake_run(_cmd, **_kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="not visible")
+
+    original_run = admin_server.subprocess.run
+    admin_server.subprocess.run = fake_run
+    try:
+        rows = _attach_user_names(SimpleNamespace(lark_cli="lark-cli"), [{"sender_id": "ou_unknown"}], store)
+    finally:
+        admin_server.subprocess.run = original_run
+        store.close()
+
+    assert rows[0]["sender_name"] == "网页用户 · c7ecb4"
+
+
+def test_binding_message_is_used_to_recover_real_name(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    identity = store.get_or_create_web_identity("session", "web_123456")
+    store.issue_web_binding_code(int(identity["id"]), "code", 10)
+    store.claim_web_binding_code("code", "ou_bound")
+    store.update_web_identity_binding_message("ou_bound", "om_binding")
+
+    def fake_run(cmd, **_kwargs):
+        if "+search-user" in cmd:
+            return SimpleNamespace(returncode=1, stdout="", stderr="not visible")
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"data":{"messages":[{"sender":{"id":"ou_bound","name":"真实姓名"}}]}}',
+            stderr="",
+        )
+
+    original_run = admin_server.subprocess.run
+    admin_server.subprocess.run = fake_run
+    try:
+        rows = _attach_user_names(SimpleNamespace(lark_cli="lark-cli"), [{"sender_id": "ou_bound"}], store)
+    finally:
+        admin_server.subprocess.run = original_run
+
+    assert rows[0]["sender_name"] == "真实姓名"
+    assert store.get_user_names(["ou_bound"])["ou_bound"] == "真实姓名"
+    store.close()
+
+
 def test_architecture_spec_covers_states_and_scenarios_follow_real_transitions():
     spec = architecture_spec()
     state_ids = {item["id"] for item in spec["states"]}

@@ -810,7 +810,7 @@ def test_feishu_binding_command_claims_code_and_replies(tmp_path):
     feishu = Feishu()
     event = SimpleNamespace(
         event_id="evt-bind",
-        message_id="om-bind",
+        message_id="om_bind",
         chat_type="p2p",
         sender_id="ou_feishu_user",
         content=binding["command"],
@@ -819,6 +819,7 @@ def test_feishu_binding_command_claims_code_and_replies(tmp_path):
     assert _handle_web_binding_event(SimpleNamespace(lark_cli="missing-lark-cli"), store, feishu, event) is True
     assert "已绑定" in feishu.replies[0][1]
     assert store.get_web_identity(identity["session_hash"])["feishu_open_id"] == "ou_feishu_user"
+    assert store.get_web_identity(identity["session_hash"])["binding_message_id"] == "om_bind"
     store.close()
 
 
