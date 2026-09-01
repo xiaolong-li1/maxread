@@ -174,7 +174,7 @@ def test_web_watcher_updates_usage_without_feishu_side_effects(tmp_path):
     store.close()
 
 
-def test_bound_feishu_watcher_is_replied_and_mirrored_to_web(tmp_path):
+def test_bound_feishu_watcher_is_replied_without_entering_web_chat(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     _token, identity = new_web_identity(store)
     binding = issue_binding_code(store, identity)
@@ -191,9 +191,7 @@ def test_bound_feishu_watcher_is_replied_and_mirrored_to_web(tmp_path):
 
     assert len(feishu.replies) == 1
     messages = store.list_web_messages(bound)
-    assert messages[-1]["kind"] == "result"
-    assert messages[-1]["channel"] == "system"
-    assert messages[-1]["doc_url"] == "https://tenant/doc"
+    assert messages == []
     store.close()
 
 

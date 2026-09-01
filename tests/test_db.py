@@ -178,7 +178,6 @@ def test_legacy_cache_refresh_reuses_terminal_queue_job(tmp_path):
     )
     store.claim_next_queue_job(worker_id="worker-a")
     store.complete_queue_job(first["job_id"], "https://old-doc", "Old title")
-    store.conn.execute("update job_watchers set notified=1 where job_id=?", (first["job_id"],))
     store.upsert_paper("2604.12946", "legacy", doc_url="https://old-doc", doc_token="old-doc")
 
     second_usage = store.add_usage_event(

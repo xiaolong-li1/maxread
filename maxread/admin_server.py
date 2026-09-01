@@ -486,7 +486,15 @@ class AdminHandler(BaseHTTPRequestHandler):
         retry_match = re.fullmatch(r"/api/jobs/(\d+)/retry", parsed.path)
         if retry_match:
             job_id = int(retry_match.group(1))
-            ok = self._with_store(lambda store: store.retry_queue_job(job_id))
+            ok = self._with_store(
+                lambda store: store.retry_queue_job(
+                    job_id,
+                    reason="admin dashboard retry",
+                    event_type="admin_retry",
+                    suppress_progress_notifications=True,
+                    reset_watcher_notifications=False,
+                )
+            )
             self._json_response({"ok": ok, "job_id": job_id})
             return
         self._error(HTTPStatus.NOT_FOUND, "not found")

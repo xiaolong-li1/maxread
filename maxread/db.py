@@ -1080,22 +1080,13 @@ class Store:
         return int(row["n"] if row else 0)
 
     def _conversation_for_watcher(self, watcher):
-        if str(watcher.get("chat_type") or "").lower() == "web":
-            row = self.conn.execute(
-                "select conversation_id from web_messages where external_id = ?",
-                (str(watcher.get("message_id") or ""),),
-            ).fetchone()
-            return int(row["conversation_id"]) if row else 0
-        sender_id = str(watcher.get("sender_id") or "").strip()
-        if not sender_id:
+        if str(watcher.get("chat_type") or "").lower() != "web":
             return 0
-        identity = self.conn.execute(
-            "select * from web_identities where feishu_open_id = ? order by bound_at asc, id asc limit 1",
-            (sender_id,),
+        row = self.conn.execute(
+            "select conversation_id from web_messages where external_id = ?",
+            (str(watcher.get("message_id") or ""),),
         ).fetchone()
-        if identity is None:
-            return 0
-        return int(self.ensure_web_conversation(dict(identity))["id"])
+        return int(row["conversation_id"]) if row else 0
 
     def update_web_job_progress(self, watcher, job_id: int, source_id: str, content: str, status: str) -> None:
         conversation_id = self._conversation_for_watcher(watcher)
@@ -1184,29 +1175,6 @@ class Store:
             channel="system",
             actor_type="system",
         )
-
-    def mirror_feishu_message(
-        self,
-        feishu_open_id: str,
-        external_id: str,
-        role: str,
-        content: str,
-        *,
-        kind: str = "message",
-    ) -> bool:
-        identity = self.conn.execute(
-            "select * from web_identities where feishu_open_id = ? order by bound_at asc, id asc limit 1",
-            (str(feishu_open_id or "").strip(),),
-        ).fetchone()
-        if identity is None:
-            return False
-        conversation = self.ensure_web_conversation(dict(identity))
-        self.append_web_message(
-            int(conversation["id"]), external_id, role, content,
-            kind=kind, channel="feishu", actor_type="user" if role == "user" else "system",
-            actor_id=str(feishu_open_id or ""),
-        )
-        return True
 
     def issue_web_binding_code(self, web_identity_id: int, code_hash: str, ttl_minutes: int = 10) -> None:
         self.conn.execute("begin immediate")
@@ -1664,6 +1632,10 @@ class Store:
                     ).fetchone()
                 if reusable is not None:
                     job_id = int(reusable["id"])
+                    self.conn.execute(
+                        "update job_watchers set notified=1 where job_id=?",
+                        (job_id,),
+                    )
                     self.conn.execute(
                         """
                         update queue_jobs set
@@ -2310,6 +2282,9 @@ class Store:
         event_type: str = "retry",
         suppress_progress_notifications: bool = False,
         rebuild_pipeline: bool = True,
+        watcher_chat_type: str = "",
+        watcher_chat_id: str = "",
+        reset_watcher_notifications: bool = True,
     ) -> bool:
         self.conn.execute("begin immediate")
         try:
@@ -2352,18 +2327,32 @@ class Store:
                     int(job_id),
                 ),
             )
-            self.conn.execute("update job_watchers set notified = 0 where job_id = ?", (int(job_id),))
-            self.conn.execute(
-                """
-                update usage_events
-                set status = 'queued', error = '', updated_at = current_timestamp
-                where id in (
-                    select usage_event_id from job_watchers
-                    where job_id = ? and usage_event_id != 0
+            if reset_watcher_notifications:
+                clean_chat_type = str(watcher_chat_type or "").strip().lower()
+                clean_chat_id = str(watcher_chat_id or "").strip()
+                watcher_filter = "job_id = ?"
+                watcher_params: list[object] = [int(job_id)]
+                if clean_chat_type:
+                    watcher_filter += " and lower(chat_type) = ?"
+                    watcher_params.append(clean_chat_type)
+                if clean_chat_id:
+                    watcher_filter += " and chat_id = ?"
+                    watcher_params.append(clean_chat_id)
+                self.conn.execute(
+                    f"update job_watchers set notified = 0 where {watcher_filter}",
+                    watcher_params,
                 )
-                """,
-                (int(job_id),),
-            )
+                self.conn.execute(
+                    f"""
+                    update usage_events
+                    set status = 'queued', error = '', updated_at = current_timestamp
+                    where id in (
+                        select usage_event_id from job_watchers
+                        where {watcher_filter} and usage_event_id != 0
+                    )
+                    """,
+                    watcher_params,
+                )
             self._insert_transition_event(job_id, result, reason)
             self.conn.execute(
                 "insert into job_events (job_id, event_type, detail) values (?, ?, ?)",

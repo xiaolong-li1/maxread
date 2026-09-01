@@ -356,6 +356,7 @@ def auto_retry_queue_job(settings, store: Store, job, error: str, worker_id: str
         event_type="auto_retry",
         suppress_progress_notifications=bool(job.get("suppress_progress_notifications")),
         rebuild_pipeline=False if resume_published else bool(current.get("rebuild_pipeline")),
+        reset_watcher_notifications=not bool(job.get("suppress_progress_notifications")),
     )
 
 
@@ -695,13 +696,6 @@ def enqueue_event_items(
             store.update_usage_event(usage_id, "watching")
             lines.append(f"- {item.label}：已经在队列/处理中，完成后会通知你。")
     _reply(feishu, event.message_id, "\n".join(lines), f"queue:{event.event_id}")
-    store.mirror_feishu_message(
-        str(getattr(event, "sender_id", "") or ""),
-        f"feishu-ack:{getattr(event, 'event_id', '')}",
-        "assistant",
-        "\n".join(lines),
-        kind="queue_ack",
-    )
 
 
 def _queue_eta_text(position: int, workers: int, recent_duration_seconds: int = 300) -> str:

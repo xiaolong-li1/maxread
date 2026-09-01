@@ -210,8 +210,10 @@ def retry_web_job(settings, store: Store, identity, job_id: int) -> dict:
         target_id,
         reason=f"web retry requested by {actor_type}:{actor_id}",
         event_type="web_retry",
-        suppress_progress_notifications=False,
+        suppress_progress_notifications=True,
         rebuild_pipeline=not resume_published,
+        watcher_chat_type="web",
+        watcher_chat_id=f"web:{identity['public_id']}",
     )
     if not ok:
         raise ValueError("任务状态已变化，请刷新后再试")

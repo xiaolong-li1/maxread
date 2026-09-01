@@ -267,8 +267,10 @@ class WebPetAgent:
                 job_id,
                 reason=f"project agent retry requested by {self.scope.actor_type}:{self.scope.actor_id}",
                 event_type="project_agent_retry",
-                suppress_progress_notifications=False,
+                suppress_progress_notifications=True,
                 rebuild_pipeline=not resume,
+                watcher_chat_type="web",
+                watcher_chat_id=f"web:{self.scope.public_id}",
             )
             return "已重新加入队列，并保留历史检查结果避免重复犯错。" if ok else "任务状态刚刚发生变化，我没有重复操作。"
         if status == "running" and only != "retry":

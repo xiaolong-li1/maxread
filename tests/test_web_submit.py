@@ -291,10 +291,58 @@ def test_retry_button_api_resumes_published_visual_failure(tmp_path):
     job = next(item for item in store.list_queue_jobs() if item["id"] == queued["job_id"])
     assert job["status"] == "queued"
     assert job["rebuild_pipeline"] == 0
+    assert job["suppress_progress_notifications"] == 1
     task_messages = [item for item in store.list_web_messages(identity) if item["source_id"] == "2608.25927"]
     assert len(task_messages) == 1
     assert task_messages[0]["status"] == "queued"
     assert not any(item["kind"] == "retry_request" for item in store.list_web_messages(identity))
+    store.close()
+
+
+def test_web_retry_does_not_reopen_historical_feishu_watcher(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    identity = claim_binding_code(store, issue_binding_code(store, guest)["code"], "ou_bound")
+    feishu_usage = store.add_usage_event(
+        "evt-feishu", "om_feishu", "oc_feishu", "p2p", "ou_bound",
+        "paper", "2108.12409", "url", status="queued",
+    )
+    queued = store.enqueue_job(
+        "paper", "2108.12409", "url", "evt-feishu", "om_feishu",
+        "oc_feishu", "p2p", "ou_bound", feishu_usage,
+    )
+    web_usage = store.add_usage_event(
+        "evt-web", "web-message:1", f"web:{identity['public_id']}", "web", "ou_bound",
+        "paper", "2108.12409", "url", status="queued",
+    )
+    conversation = store.ensure_web_conversation(identity)
+    store.append_web_message(conversation["id"], "web-message:1", "user", "2108.12409")
+    same = store.enqueue_job(
+        "paper", "2108.12409", "url", "evt-web", "web-message:1",
+        f"web:{identity['public_id']}", "web", "ou_bound", web_usage,
+    )
+    assert same["job_id"] == queued["job_id"]
+    store.fail_queue_job(queued["job_id"], "visual-qa:high:raw-formatting")
+    store.update_usage_event(feishu_usage, "failed", error="visual-qa:high:raw-formatting")
+    store.update_usage_event(web_usage, "failed", error="visual-qa:high:raw-formatting")
+    store.conn.execute("update job_watchers set notified=1 where job_id=?", (queued["job_id"],))
+    store.conn.commit()
+
+    result = retry_web_job(SimpleNamespace(queue_workers=3), store, identity, queued["job_id"])
+
+    assert result["ok"] is True
+    watchers = [
+        dict(row) for row in store.conn.execute(
+            "select chat_type,chat_id,notified from job_watchers where job_id=? order by id",
+            (queued["job_id"],),
+        ).fetchall()
+    ]
+    assert watchers == [
+        {"chat_type": "p2p", "chat_id": "oc_feishu", "notified": 1},
+        {"chat_type": "web", "chat_id": f"web:{identity['public_id']}", "notified": 0},
+    ]
+    assert store.get_queue_job(queued["job_id"])["suppress_progress_notifications"] == 1
+    assert store.list_usage_events(limit=10)[1]["status"] == "failed"
     store.close()
 
 
@@ -745,21 +793,6 @@ def test_binding_merges_guest_messages_into_existing_feishu_conversation(tmp_pat
     messages = store.list_web_messages(bound_second)
     assert [message["content"] for message in messages] == ["来自第一台设备", "绑定前的游客消息"]
     assert store.ensure_web_conversation(bound_first)["id"] == store.ensure_web_conversation(bound_second)["id"]
-    store.close()
-
-
-def test_bound_feishu_messages_are_mirrored_into_web_conversation(tmp_path):
-    store = Store(tmp_path / "maxread.sqlite3")
-    _token, identity = new_web_identity(store)
-    binding = issue_binding_code(store, identity)
-    bound = claim_binding_code(store, binding["code"], "ou_feishu_user")
-
-    assert store.mirror_feishu_message("ou_feishu_user", "feishu:1", "user", "2608.25927") is True
-    assert store.mirror_feishu_message("ou_unknown", "feishu:2", "user", "nothing") is False
-    messages = store.list_web_messages(bound)
-    assert len(messages) == 1
-    assert messages[0]["channel"] == "feishu"
-    assert messages[0]["content"] == "2608.25927"
     store.close()
 
 

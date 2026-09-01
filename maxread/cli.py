@@ -316,13 +316,6 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
         elif getattr(event, "mentioned_bot", False):
             _reply_group_intro(article_pipeline.feishu, event)
         return
-    store.mirror_feishu_message(
-        str(getattr(event, "sender_id", "") or ""),
-        f"feishu-user:{getattr(event, 'message_id', '')}",
-        "user",
-        plain_message_text(str(getattr(event, "content", "") or "")),
-        kind="submission",
-    )
     enqueue_event_items(
         settings,
         store,
