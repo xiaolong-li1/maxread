@@ -102,6 +102,28 @@ class RecruitingPipelineTest(unittest.TestCase):
                 self.assertIsNotNone(conn.execute("select artifacts_released_at from messages where id=1").fetchone()[0])
                 self.assertIsNone(conn.execute("select local_path from attachments where message_record_id=1").fetchone()[0])
 
+    def test_duplicate_message_id_in_second_mailbox_inherits_processed_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "mail.sqlite3"
+            with sqlite3.connect(db) as conn:
+                conn.execute("create table messages(id integer primary key,message_id text,raw_path text,artifacts_released_at text)")
+                conn.execute("create table attachments(message_record_id integer,local_path text,skipped_reason text)")
+                conn.executemany(
+                    "insert into messages values(?,?,?,null)",
+                    [(1, "<same@example.com>", "/tmp/1.eml"), (2, "<same@example.com>", "/tmp/2.eml")],
+                )
+            store = PipelineStore(db)
+            store.initialize()
+            store.upsert_message(1, "thread", "incoming", "INBOX")
+            store.upsert_message(2, "thread", "incoming", "Archive")
+            store.mark_message_processed(1)
+
+            self.assertEqual(store.mark_duplicate_messages_processed(), 1)
+            with sqlite3.connect(db) as conn:
+                self.assertIsNotNone(
+                    conn.execute("select processed_at from recruiting_messages where message_record_id=2").fetchone()[0]
+                )
+
     def test_thread_latest_time_handles_mixed_timezone_dates(self) -> None:
         first = StoredMessage(1, "1", "INBOX", "s", "", "a@example.com", "2026-08-29T10:00:00", "", Path("/tmp/1"))
         second = StoredMessage(2, "2", "INBOX", "s", "", "a@example.com", "2026-08-29T19:00:00+08:00", "", Path("/tmp/2"))

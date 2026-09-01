@@ -223,6 +223,31 @@ class PipelineStore:
                 released += 1
         return released
 
+    def mark_duplicate_messages_processed(self) -> int:
+        """Close physical mailbox copies once the canonical Message-ID succeeded."""
+        now = datetime.now(UTC).isoformat()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                update recruiting_messages as pending
+                set processed_at=?
+                where pending.processed_at is null
+                  and exists (
+                    select 1
+                    from messages current_message
+                    join messages completed_message
+                      on completed_message.message_id=current_message.message_id
+                     and completed_message.id<>current_message.id
+                    join recruiting_messages completed
+                      on completed.message_record_id=completed_message.id
+                     and completed.processed_at is not null
+                    where current_message.id=pending.message_record_id
+                  )
+                """,
+                (now,),
+            )
+            return int(cursor.rowcount)
+
     def _release_message_artifacts(self, message_id: int, raw_path: Path) -> bool:
         with self.connect() as conn:
             attachments = [
