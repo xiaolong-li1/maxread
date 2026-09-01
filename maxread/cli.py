@@ -22,6 +22,7 @@ from .openai_client import OpenAIClient
 from .pipeline import MaxReadPipeline
 from .remote_worker import run_remote_paper_worker
 from .models import PaperRef
+from .retry_policy import retry_requires_rebuild
 from .sources import WebRef, extract_supported_inputs, is_supported_web_article_url
 from .web_article import WebArticleClient
 from .visual_qa import VisualQAController
@@ -411,19 +412,7 @@ def _handle_retry_event(settings: Settings, store: Store, feishu: FeishuClient, 
 
 
 def _retry_requires_rebuild(job: dict) -> bool:
-    """Reuse a published checkpoint only for delivery infrastructure faults."""
-    error = str(job.get("error") or "").lower()
-    has_published_checkpoint = bool(str(job.get("checkpoint_json") or "").strip() or str(job.get("doc_url") or "").strip())
-    if not has_published_checkpoint:
-        return True
-    delivery_infrastructure_markers = (
-        "visual-qa:remote-error",
-        "visual-qa:recheck-error",
-        "visual runner failed",
-        "browser timeout",
-        "login.feishu.cn/accounts/trap",
-    )
-    return not any(marker in error for marker in delivery_infrastructure_markers)
+    return retry_requires_rebuild(job)
 
 
 def _is_valid_retry_source(job: dict) -> bool:

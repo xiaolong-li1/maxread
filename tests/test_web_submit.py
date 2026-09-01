@@ -8,6 +8,7 @@ from maxread.project_metadata import UNCLASSIFIED_CATEGORY, is_placeholder_proje
 from maxread.web_submit import (
     WEB_SUBMIT_HTML,
     claim_binding_code,
+    create_web_project_category,
     issue_binding_code,
     new_web_identity,
     organize_web_projects,
@@ -297,6 +298,34 @@ def test_retry_button_api_resumes_published_visual_failure(tmp_path):
     store.close()
 
 
+def test_retry_button_rebuilds_published_document_for_deterministic_format_failure(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, identity = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3)
+    queued = submit_web_papers(settings, store, identity, "2108.12409")["items"][0]
+    error = (
+        "post-publish:quality:format:xml:high:raw-tex-formatting-command; "
+        "visual-qa:high:raw-formatting:页面显示了格式化控制字符：\\mathrm "
+        "[screenshot=/home/user/.local/share/maxread-browser/runs/example.png]"
+    )
+    store.conn.execute(
+        "update queue_jobs set status='failed', workflow_state='quality_failed', stage='failed', "
+        "doc_url='https://tenant/doc', checkpoint_json='{}', error=? where id=?",
+        (error, queued["job_id"]),
+    )
+    store.conn.commit()
+
+    result = retry_web_job(settings, store, identity, queued["job_id"])
+
+    assert result["ok"] is True
+    assert result["resume_published"] is False
+    job = store.get_queue_job(queued["job_id"])
+    assert job["rebuild_pipeline"] == 1
+    assert job["checkpoint_json"] == ""
+    assert "raw-tex-formatting-command" in job["retry_feedback"]
+    store.close()
+
+
 def test_retry_old_owned_project_is_not_limited_by_recent_project_page(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     _token, identity = new_web_identity(store)
@@ -329,11 +358,11 @@ def test_retry_old_owned_project_is_not_limited_by_recent_project_page(tmp_path)
     result = retry_web_job(settings, store, identity, target["job_id"])
 
     assert result["ok"] is True
-    assert result["resume_published"] is True
+    assert result["resume_published"] is False
     row = store.get_queue_job(target["job_id"])
     assert row["status"] == "queued"
-    assert row["checkpoint_json"] == '{"doc_url":"https://tenant/doc"}'
-    assert row["rebuild_pipeline"] == 0
+    assert row["checkpoint_json"] == ""
+    assert row["rebuild_pipeline"] == 1
     store.close()
 
 
@@ -422,6 +451,39 @@ def test_project_favorite_and_manual_category_are_identity_scoped(tmp_path):
     assert project["favorite"] is True
     assert project["category"] == "机器人"
     assert project["category_source"] == "manual"
+    store.close()
+
+
+def test_bound_identity_can_create_and_use_private_custom_category(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="")
+    submit_web_papers(settings, store, guest, "2608.25927")
+    identity = claim_binding_code(store, issue_binding_code(store, guest)["code"], "ou_custom_category")
+
+    created = create_web_project_category(store, identity, "位置编码")
+    update_web_project(store, identity, "2608.25927", "category", "位置编码")
+    store.conn.execute(
+        "update queue_jobs set status='done', workflow_state='completed', stage='done' where source_id=?",
+        ("2608.25927",),
+    )
+    store.conn.commit()
+    payload = progress_payload(settings, store, identity)
+
+    assert created == {"ok": True, "category": "位置编码", "created": True}
+    assert "位置编码" in payload["categories"]
+    assert payload["recent"][0]["category"] == "位置编码"
+
+    _other_token, other = new_web_identity(store)
+    assert "位置编码" not in progress_payload(settings, store, other)["categories"]
+    store.close()
+
+
+def test_guest_cannot_create_custom_category(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    with pytest.raises(ValueError, match="绑定飞书账号"):
+        create_web_project_category(store, guest, "位置编码")
     store.close()
 
 
@@ -735,6 +797,8 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "/api/web/pet/chat" in WEB_SUBMIT_HTML
     assert "/api/web/project-action" in WEB_SUBMIT_HTML
     assert "/api/web/organize" in WEB_SUBMIT_HTML
+    assert "/api/web/categories" in WEB_SUBMIT_HTML
+    assert "新建自定义分类" in WEB_SUBMIT_HTML
     assert "自动归类所选" in WEB_SUBMIT_HTML
     assert "toggleProjectSelection" in WEB_SUBMIT_HTML
     assert "toggleAllUnclassified" in WEB_SUBMIT_HTML

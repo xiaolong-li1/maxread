@@ -375,6 +375,10 @@
     .expires { margin-top: 10px; color: var(--muted); font-size: 12px; }
     .bound-box { margin-top: 20px; padding: 14px; background: var(--green-soft); border: 1px solid #cfe0d8; border-radius: 7px; }
     .error { min-height: 22px; margin-top: 10px; color: var(--red); font-size: 13px; }
+    .category-form { display: grid; gap: 10px; margin-top: 18px; }
+    .category-form label { color: var(--muted); font-size: 12px; }
+    .category-form input { width: 100%; height: 42px; padding: 0 11px; color: var(--text); background: #fff; border: 1px solid var(--line); border-radius: 7px; outline: 0; }
+    .category-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
     .admin-switch { display: grid; gap: 8px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
     .admin-switch label { color: var(--muted); font-size: 12px; }
     .admin-switch select { width: 100%; height: 40px; padding: 0 10px; background: #fff; border: 1px solid var(--line); border-radius: 7px; }
@@ -474,6 +478,7 @@
           <div class="project-tools" data-guide="project-tools">
             <div class="project-search"><span class="icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span><input id="project-search" type="search" placeholder="搜索标题或 arXiv ID" oninput="setSearch(this.value)" /></div>
             <select class="category-filter" id="category-filter" aria-label="分类筛选" onchange="setCategoryFilter(this.value)"><option value="all">全部分类</option></select>
+            <button class="icon-button" id="custom-category-button" hidden aria-label="新建自定义分类" title="新建自定义分类" onclick="openCategoryDialog()"><span class="icon"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span></button>
             <div class="filters" role="tablist" aria-label="项目筛选">
               <button class="active" data-filter="all" onclick="setFilter('all')">全部</button>
               <button data-filter="favorite" onclick="setFilter('favorite')">收藏</button>
@@ -513,6 +518,7 @@
   </aside>
 
   <dialog id="account-dialog"><div class="dialog-body"><div class="dialog-head"><h2 id="account-title">绑定飞书账号</h2><button class="close" aria-label="关闭" onclick="closeAccount()"><span class="icon"><svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></span></button></div><div id="account-content"></div><div class="error" id="binding-error"></div></div></dialog>
+  <dialog id="category-dialog"><div class="dialog-body"><div class="dialog-head"><h2>新建分类</h2><button class="close" aria-label="关闭" onclick="closeCategoryDialog()"><span class="icon"><svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></span></button></div><div class="category-form"><label for="category-name">分类名称</label><input id="category-name" maxlength="20" autocomplete="off" placeholder="例如：位置编码" onkeydown="if(event.key === 'Enter'){event.preventDefault(); createCustomCategory();}" /><div class="error" id="category-error"></div><div class="category-form-actions"><button class="action-link" onclick="closeCategoryDialog()">取消</button><button class="organize-button" id="create-category-button" onclick="createCustomCategory()">创建分类</button></div></div></div></dialog>
   <div class="toast" id="toast"></div>
 
   <script>
@@ -602,6 +608,7 @@
       button.classList.toggle('bound', state.me.bound);
       button.querySelector('.account-label').textContent = state.me.acting_as ? `管理员 · ${state.me.display_name}` : (state.me.bound ? state.me.display_name : '游客');
       $('identity-note').textContent = state.me.acting_as ? `正在查看 ${state.me.display_name} 的项目` : `仅显示 ${state.me.display_name || '当前账号'} 的项目`;
+      $('custom-category-button').hidden = !state.me.bound;
     }
 
     async function loadAdminContext() {
@@ -863,6 +870,34 @@
         await projectAction(sourceId, 'category', category);
         await refreshProjects();
       } catch (error) { toast(error.message); }
+    }
+
+    function openCategoryDialog() {
+      if (!state.me?.bound) { toast('绑定飞书账号后才能新建分类'); return; }
+      $('category-name').value = '';
+      $('category-error').textContent = '';
+      $('category-dialog').showModal();
+      setTimeout(() => $('category-name').focus(), 0);
+    }
+
+    function closeCategoryDialog() { $('category-dialog').close(); }
+
+    async function createCustomCategory() {
+      const name = $('category-name').value.trim();
+      const button = $('create-category-button');
+      if (!name) { $('category-error').textContent = '请输入分类名称'; return; }
+      button.disabled = true;
+      $('category-error').textContent = '';
+      try {
+        const result = await api('/api/web/categories', {method: 'POST', body: JSON.stringify({name})});
+        closeCategoryDialog();
+        toast(result.created ? `已创建“${result.category}”` : `“${result.category}”已经存在`);
+        await refreshProjects();
+      } catch (error) {
+        $('category-error').textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
     }
 
     async function deleteProject(sourceId) {

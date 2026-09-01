@@ -451,6 +451,19 @@ def test_automatic_retry_can_resume_published_checkpoint(tmp_path):
     store.close()
 
 
+def test_retry_persists_previous_error_as_generation_feedback(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "msg", "chat", "group", "sender", "paper", "2108.12409", "url")
+    queued = store.enqueue_job("paper", "2108.12409", "url", "evt", "msg", "chat", "group", "sender", usage_id)
+    store.fail_queue_job(queued["job_id"], "raw caption command: \\mathrm")
+
+    assert store.retry_queue_job(queued["job_id"], rebuild_pipeline=True) is True
+    row = store.get_queue_job(queued["job_id"])
+    assert row["error"] == ""
+    assert row["retry_feedback"] == "raw caption command: \\mathrm"
+    store.close()
+
+
 def test_store_requeues_operator_recovered_cancelled_job_silently(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     usage_id = store.add_usage_event(

@@ -93,6 +93,7 @@ class MaxReadPipeline:
         resume_published_checkpoint: str = "",
         force_rebuild: bool = False,
         editorial_guidance: str = "",
+        retry_feedback: str = "",
     ) -> ProcessResult:
         record = self.store.get_paper(ref.paper_id)
         if not force and record and record.status == "done" and record.doc_url:
@@ -158,6 +159,16 @@ class MaxReadPipeline:
                 ),
             )
             retry_context = _load_retry_context(bundle)
+            durable_feedback = [
+                str(record.error if record else "").strip(),
+                str(retry_feedback or "").strip(),
+            ]
+            retry_context = RetryContext(
+                previous_markdown=retry_context.previous_markdown,
+                feedback=_dedupe_feedback(
+                    list(retry_context.feedback) + [item for item in durable_feedback if item]
+                )[-16:],
+            )
             _remove_paper_artifact(bundle, "08-failure.txt")
             if self.require_source and not bundle.source_text:
                 message = _source_required_message(ref.paper_id, bundle.parse_warnings)

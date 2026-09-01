@@ -20,6 +20,7 @@ from .feishu import FeishuClient, progress_emoji_type
 from .models import FeishuEvent, PaperRef
 from .openai_client import OpenAIClient
 from .pipeline import MaxReadPipeline
+from .retry_policy import should_resume_published
 from .sources import WebRef
 from .web_article import WebArticleClient
 from .visual_qa import VisualQAController
@@ -198,6 +199,7 @@ class QueueManager:
                     resume_published_url=str(job.get("doc_url") or ""),
                     resume_published_checkpoint=str(job.get("checkpoint_json") or ""),
                     force_rebuild=bool(job.get("rebuild_pipeline")),
+                    retry_feedback=str(job.get("retry_feedback") or ""),
                 )
                 record = store.get_paper(source_id)
                 title = record.title if record else ""
@@ -344,17 +346,9 @@ def auto_retry_queue_job(settings, store: Store, job, error: str, worker_id: str
         return False
     if not store.fail_queue_job(job["id"], error, worker_id=worker_id):
         return False
-    resume_published = bool(checkpoint) and any(
-        marker in str(error or "").lower()
-        for marker in (
-            "visual-qa",
-            "browser",
-            "export",
-            "pdf",
-            "post-publish",
-            "remote-error",
-            "infrastructure",
-        )
+    resume_published = should_resume_published(
+        error,
+        has_checkpoint=bool(checkpoint or str(current.get("doc_url") or "").strip()),
     )
     return store.retry_queue_job(
         job["id"],
@@ -598,7 +592,9 @@ def _is_auto_retryable_error(error: str) -> bool:
         "model fetch",
         "remote-error",
         "infrastructure:export-pending",
-        "browser",
+        "browser timeout",
+        "browser timed out",
+        "browser crashed",
         "ssh",
         "invalid-json",
         "invalid json",

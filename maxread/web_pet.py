@@ -9,6 +9,7 @@ from pathlib import Path
 from .db import Store
 from .openai_client import OpenAIClient
 from .project_metadata import PROJECT_CATEGORIES, UNCLASSIFIED_CATEGORY, auto_project_category, is_placeholder_project_title, load_generated_project_summary
+from .retry_policy import retry_requires_rebuild
 
 
 PROGRESS_STATES = {
@@ -261,10 +262,7 @@ class WebPetAgent:
         job_id = int(job["id"])
         status = str(job.get("status") or "")
         if status == "failed" and only != "recover":
-            error = str(job.get("error") or "")
-            resume = bool(str(job.get("checkpoint_json") or "").strip()) and (
-                "visual-qa:remote-error" in error or "Feishu PDF export failed" in error
-            )
+            resume = not retry_requires_rebuild(job)
             ok = self.store.retry_queue_job(
                 job_id,
                 reason=f"project agent retry requested by {self.scope.actor_type}:{self.scope.actor_id}",
@@ -394,7 +392,12 @@ def progress_payload(settings, store: Store, identity) -> dict:
         "active": active,
         "recent": payload,
         "service": store.get_service_status(),
-        "categories": ["进行中", UNCLASSIFIED_CATEGORY, *PROJECT_CATEGORIES],
+        "categories": [
+            "进行中",
+            UNCLASSIFIED_CATEGORY,
+            *PROJECT_CATEGORIES,
+            *store.web_project_categories(identity),
+        ],
     }
 
 

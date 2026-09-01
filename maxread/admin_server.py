@@ -32,6 +32,7 @@ from .remote_worker import (
 from .web_submit import (
     WEB_SESSION_COOKIE,
     WEB_SUBMIT_HTML,
+    create_web_project_category,
     issue_binding_code,
     new_web_identity,
     organize_web_projects,
@@ -395,6 +396,19 @@ class AdminHandler(BaseHTTPRequestHandler):
                         identity,
                         progress_payload(self.server.settings, store, identity).get("recent", []),
                         payload.get("source_ids") if isinstance(payload.get("source_ids"), list) else [],
+                    )
+                )
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/web/categories":
+            payload = self._read_json()
+            try:
+                self._web_json(
+                    lambda store, identity: create_web_project_category(
+                        store,
+                        identity,
+                        str(payload.get("name") or ""),
                     )
                 )
             except ValueError as exc:

@@ -347,6 +347,7 @@ class RemotePaperWorker:
                 resume_published_url=str(job.get("doc_url") or ""),
                 resume_published_checkpoint=str(job.get("checkpoint_json") or ""),
                 force_rebuild=bool(job.get("rebuild_pipeline")),
+                retry_feedback=str(job.get("retry_feedback") or ""),
             )
             record = local_store.get_paper(source_id)
             issues = [

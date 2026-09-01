@@ -341,6 +341,10 @@ def test_transient_failure_is_requeued_once_without_becoming_user_visible_failur
     manager.settings = type("Settings", (), {"auto_retry_attempts": 1})()
 
     assert _is_auto_retryable_error("visual-qa:remote-error:browser timeout") is True
+    assert _is_auto_retryable_error(
+        "visual-qa:high:raw-formatting: \\mathrm "
+        "[screenshot=/home/user/.local/share/maxread-browser/runs/example.png]"
+    ) is False
     assert _is_auto_retryable_error("source_missing: TeX source unavailable") is False
     assert _is_auto_retryable_error("quality:formula:xml:high:unsupported-paper-macro") is False
     assert _is_auto_retryable_error("生成格式不完整，未发布文档") is True

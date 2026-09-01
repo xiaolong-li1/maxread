@@ -186,6 +186,16 @@ class Store:
             create index if not exists web_project_preferences_owner_idx
                 on web_project_preferences(owner_key, deleted_at, favorite, updated_at);
 
+            create table if not exists web_project_categories (
+                owner_key text not null,
+                name text not null,
+                created_at datetime not null default current_timestamp,
+                primary key (owner_key, name)
+            );
+
+            create index if not exists web_project_categories_owner_idx
+                on web_project_categories(owner_key, created_at, name);
+
             create table if not exists service_status (
                 id integer primary key check (id = 1),
                 mode text not null default 'operational',
@@ -253,7 +263,8 @@ class Store:
                 recovery_reason text not null default '',
                 recovery_attempts integer not null default 0,
                 auto_retry_count integer not null default 0,
-                rebuild_pipeline integer not null default 0
+                rebuild_pipeline integer not null default 0,
+                retry_feedback text not null default ''
             );
 
             create table if not exists job_watchers (
@@ -344,6 +355,7 @@ class Store:
         self._ensure_column("queue_jobs", "recovery_attempts", "integer not null default 0")
         self._ensure_column("queue_jobs", "auto_retry_count", "integer not null default 0")
         self._ensure_column("queue_jobs", "rebuild_pipeline", "integer not null default 0")
+        self._ensure_column("queue_jobs", "retry_feedback", "text not null default ''")
         self._ensure_column("papers", "project_summary", "text not null default ''")
         self._ensure_column("web_project_preferences", "category_source", "text not null default ''")
         self._ensure_column("feedback", "feedback_source", "text not null default ''")
@@ -934,6 +946,24 @@ class Store:
         )
         self.conn.commit()
         return {"source_id": clean_source, "category": clean_category}
+
+    def web_project_categories(self, identity) -> list[str]:
+        owner_key = self.web_conversation_owner(identity)
+        rows = self.conn.execute(
+            "select name from web_project_categories where owner_key=? order by created_at, name",
+            (owner_key,),
+        ).fetchall()
+        return [str(row["name"]) for row in rows]
+
+    def create_web_project_category(self, identity, name: str) -> dict:
+        owner_key = self.web_conversation_owner(identity)
+        clean_name = str(name or "").strip()[:30]
+        self.conn.execute(
+            "insert or ignore into web_project_categories (owner_key, name) values (?, ?)",
+            (owner_key, clean_name),
+        )
+        self.conn.commit()
+        return {"category": clean_name, "created": bool(self.conn.execute("select changes()").fetchone()[0])}
 
     def set_web_project_auto_categories(self, identity, assignments: dict[str, str]) -> int:
         owner_key = self.web_conversation_owner(identity)
@@ -1644,6 +1674,7 @@ class Store:
                             state_version=state_version+1, last_event='cache_refresh',
                             checkpoint_json='', suppress_progress_notifications=?,
                             recovery_reason='', recovery_attempts=0, rebuild_pipeline=1,
+                            retry_feedback='',
                             auto_retry_count=0, updated_at=current_timestamp
                         where id=?
                         """,
@@ -2295,6 +2326,11 @@ class Store:
                 reason,
                 int(row["state_version"] or 0) + 1,
             )
+            feedback_parts = [
+                str(row["retry_feedback"] or "").strip(),
+                str(row["error"] or "").strip(),
+            ]
+            retry_feedback = "\n".join(dict.fromkeys(part for part in feedback_parts if part))[-6000:]
             self.conn.execute(
                 """
                 update queue_jobs
@@ -2304,7 +2340,7 @@ class Store:
                     suppress_progress_notifications = ?, recovery_reason = '', recovery_attempts = 0,
                     auto_retry_count = case when ? then auto_retry_count + 1 else 0 end,
                     checkpoint_json = case when ? then '' else checkpoint_json end,
-                    rebuild_pipeline = ?
+                    rebuild_pipeline = ?, retry_feedback = ?
                 where id = ? and workflow_state = 'queued'
                 """,
                 (
@@ -2312,6 +2348,7 @@ class Store:
                     1 if str(event_type or "") == "auto_retry" else 0,
                     1 if rebuild_pipeline else 0,
                     1 if rebuild_pipeline else 0,
+                    retry_feedback,
                     int(job_id),
                 ),
             )
