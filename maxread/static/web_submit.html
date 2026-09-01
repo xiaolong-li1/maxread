@@ -181,6 +181,20 @@
       border: 1px solid var(--line);
       border-radius: 7px;
     }
+    .category-create-button {
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 9px;
+      color: var(--muted);
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .category-create-button:disabled { opacity: 0.5; cursor: not-allowed; }
     .organize-button {
       height: 36px;
       display: inline-flex;
@@ -467,8 +481,8 @@
       <section class="submit-box" aria-label="提交论文" data-guide="submit">
         <div class="submit-input">
           <span class="icon link-icon"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg></span>
-          <textarea id="paper-input" rows="2" placeholder="粘贴 arXiv 链接或论文 ID"></textarea>
-          <div class="submit-meta" id="submit-meta">支持 arXiv、HuggingFace Papers 和 papers.cool</div>
+          <textarea id="paper-input" rows="2" placeholder="粘贴论文链接或 arXiv ID"></textarea>
+          <div class="submit-meta" id="submit-meta">支持 arXiv、Hugging Face、GitHub PDF 和 papers.cool</div>
         </div>
         <button class="submit-button" id="submit-button" onclick="submitPapers()"><span class="icon"><svg viewBox="0 0 24 24"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="M12 13 19 5"/></svg></span>开始阅读</button>
       </section>
@@ -478,7 +492,7 @@
           <div class="project-tools" data-guide="project-tools">
             <div class="project-search"><span class="icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span><input id="project-search" type="search" placeholder="搜索标题或 arXiv ID" oninput="setSearch(this.value)" /></div>
             <select class="category-filter" id="category-filter" aria-label="分类筛选" onchange="setCategoryFilter(this.value)"><option value="all">全部分类</option></select>
-            <button class="icon-button" id="custom-category-button" hidden aria-label="新建自定义分类" title="新建自定义分类" onclick="openCategoryDialog()"><span class="icon"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span></button>
+            <button class="category-create-button" id="custom-category-button" disabled data-guide="custom-category" aria-label="新建自定义分类" title="绑定飞书账号后可新建个人分类" onclick="openCategoryDialog()"><span class="icon"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span><span>新建分类</span></button>
             <div class="filters" role="tablist" aria-label="项目筛选">
               <button class="active" data-filter="all" onclick="setFilter('all')">全部</button>
               <button data-filter="favorite" onclick="setFilter('favorite')">收藏</button>
@@ -608,7 +622,9 @@
       button.classList.toggle('bound', state.me.bound);
       button.querySelector('.account-label').textContent = state.me.acting_as ? `管理员 · ${state.me.display_name}` : (state.me.bound ? state.me.display_name : '游客');
       $('identity-note').textContent = state.me.acting_as ? `正在查看 ${state.me.display_name} 的项目` : `仅显示 ${state.me.display_name || '当前账号'} 的项目`;
-      $('custom-category-button').hidden = !state.me.bound;
+      const categoryButton = $('custom-category-button');
+      categoryButton.disabled = !state.me.bound;
+      categoryButton.title = state.me.bound ? '新建只属于当前账号的分类' : '绑定飞书账号后可新建个人分类';
     }
 
     async function loadAdminContext() {
@@ -997,6 +1013,11 @@
         selector: '[data-guide="organize"]',
         title: '完成后再批量归类',
         text: '已完成论文先进入“已完成未分类”。先勾选要整理的卡片或点“全选”，再点“自动归类所选”。这个功能需要先绑定飞书账号。',
+      },
+      {
+        selector: '[data-guide="custom-category"]',
+        title: '建立自己的论文分类',
+        text: '绑定飞书后，点“新建分类”输入名称，例如“位置编码”或“量化 Kernel”。分类只属于你的账号；手动分类不会被自动整理覆盖，自动整理也不会擅自创建新分类。',
       },
       {
         selector: '[data-guide="category-heading"]',

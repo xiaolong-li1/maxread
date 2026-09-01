@@ -25,7 +25,6 @@ ORGANIZE_SYSTEM_PROMPT = """你是 MaxRead 论文项目整理器。输入是当�
 请把每篇论文归入且只归入一个给定分类，并让同一批次的相近主题尽量聚在同一类。
 只输出 JSON：{"assignments":[{"source_id":"原值","category":"给定分类"}]}。
 不得改写 source_id，不得创造分类，不要解释或输出代码围栏。
-分类：推理与系统、训练与优化、Agent 与检索、视觉与多模态、生成模型、3D 与世界模型、机器人、其他。
 只有确实不属于 AI/计算机主题时才使用“其他”。
 """
 
@@ -300,6 +299,8 @@ def organize_web_projects(
         )
         for item in candidates
     }
+    custom_categories = store.web_project_categories(identity)
+    organizer_categories = list(dict.fromkeys([*PROJECT_CATEGORIES, *custom_categories]))
     used_ai = False
     api_key = str(getattr(settings, "openai_api_key", "") or "").strip()
     if api_key:
@@ -322,11 +323,18 @@ def organize_web_projects(
                 api_mode=getattr(settings, "openai_api_mode", "responses"),
             )
             raw = client.responses_text(
-                ORGANIZE_SYSTEM_PROMPT,
+                ORGANIZE_SYSTEM_PROMPT
+                + "\n可选分类（只能从中选择）："
+                + "、".join(organizer_categories)
+                + ("\n其中用户自定义分类：" + "、".join(custom_categories) if custom_categories else ""),
                 json.dumps(records, ensure_ascii=False),
                 reasoning_effort="low",
             )
-            model_assignments = _parse_project_assignments(raw, {item["source_id"] for item in records})
+            model_assignments = _parse_project_assignments(
+                raw,
+                {item["source_id"] for item in records},
+                set(organizer_categories),
+            )
             if model_assignments:
                 assignments.update(model_assignments)
                 used_ai = True
@@ -336,7 +344,11 @@ def organize_web_projects(
     return {"ok": True, "updated": updated, "used_ai": used_ai}
 
 
-def _parse_project_assignments(raw: str, allowed_sources: set[str]) -> dict[str, str]:
+def _parse_project_assignments(
+    raw: str,
+    allowed_sources: set[str],
+    allowed_categories: set[str] | None = None,
+) -> dict[str, str]:
     text = str(raw or "").strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -356,7 +368,7 @@ def _parse_project_assignments(raw: str, allowed_sources: set[str]) -> dict[str,
             break
     if payload is None:
         return {}
-    allowed_categories = set(PROJECT_CATEGORIES)
+    allowed_categories = set(allowed_categories or PROJECT_CATEGORIES)
     output = {}
     for item in payload.get("assignments") or []:
         if not isinstance(item, dict):

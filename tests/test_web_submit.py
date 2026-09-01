@@ -7,6 +7,7 @@ from maxread.db import Store
 from maxread.project_metadata import UNCLASSIFIED_CATEGORY, is_placeholder_project_title
 from maxread.web_submit import (
     WEB_SUBMIT_HTML,
+    _parse_project_assignments,
     claim_binding_code,
     create_web_project_category,
     issue_binding_code,
@@ -527,6 +528,16 @@ def test_bound_identity_can_create_and_use_private_custom_category(tmp_path):
     store.close()
 
 
+def test_ai_organizer_can_use_but_not_invent_custom_categories():
+    raw = '{"assignments":[{"source_id":"2410.06205","category":"位置编码"}]}'
+
+    accepted = _parse_project_assignments(raw, {"2410.06205"}, {"位置编码", "其他"})
+    rejected = _parse_project_assignments(raw, {"2410.06205"}, {"其他"})
+
+    assert accepted == {"2410.06205": "位置编码"}
+    assert rejected == {}
+
+
 def test_guest_cannot_create_custom_category(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     _token, guest = new_web_identity(store)
@@ -833,6 +844,10 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert "/api/web/organize" in WEB_SUBMIT_HTML
     assert "/api/web/categories" in WEB_SUBMIT_HTML
     assert "新建自定义分类" in WEB_SUBMIT_HTML
+    assert ">新建分类</span>" in WEB_SUBMIT_HTML
+    assert 'data-guide="custom-category"' in WEB_SUBMIT_HTML
+    assert "categoryButton.disabled = !state.me.bound" in WEB_SUBMIT_HTML
+    assert "自动整理也不会擅自创建新分类" in WEB_SUBMIT_HTML
     assert "自动归类所选" in WEB_SUBMIT_HTML
     assert "toggleProjectSelection" in WEB_SUBMIT_HTML
     assert "toggleAllUnclassified" in WEB_SUBMIT_HTML

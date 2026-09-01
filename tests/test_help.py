@@ -23,6 +23,9 @@ def test_intro_message_says_feedback_is_direct_chat():
     assert "右上角点“游客”" in msg
     assert "私聊我并发送完整指令" in msg
     assert "网页和飞书任务会归到同一个账号" in msg
+    assert "新建分类" in msg
+    assert "不会擅自新建分类或覆盖手动分类" in msg
+    assert "GitHub 技术报告 PDF" in msg
     assert "[在做了]：正在下载" in msg
     assert "[精神补给]：正在读" in msg
     assert "[思考]：正在审阅" in msg
@@ -50,3 +53,5 @@ def test_group_intro_message_explains_group_usage_and_boundaries():
     assert "能力边界" in msg
     assert "https://xiaolong-dev.me/maxread/projects" in msg
     assert "复制绑定指令" in msg
+    assert "新建分类" in msg
+    assert "自动整理不会覆盖手动分类" in msg

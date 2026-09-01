@@ -88,6 +88,10 @@ class WebPetAgent:
     ) -> tuple[str, dict]:
         progress = progress_payload(self.settings, self.store, self.identity)
         self.request_text = str(text or "")
+        if re.search(r"自定义分类|新建分类|创建分类", self.request_text, re.I):
+            if not self.scope.feishu_open_id:
+                return "可以。先点右上角“游客”绑定飞书账号；绑定后，项目区的分类筛选旁会出现“新建分类”。", progress
+            return "可以。点项目区分类筛选旁的“新建分类”，输入名称并创建；完成论文可以在卡片底部手动移入该分类，也可以让“自动归类所选”从你的自定义分类中选择。", progress
         if re.search(r"按钮|页面怎么用|项目台怎么用|一键整理|分类折叠", self.request_text, re.I):
             return button_guide_answer(), progress
         target_id = int(job_id or 0)
@@ -406,7 +410,7 @@ def progress_payload(settings, store: Store, identity) -> dict:
 def button_guide_answer() -> str:
     return (
         "点项目区右上角的问号，我会启动现场使用向导：页面会自动滚到真实控件并高亮，"
-        "依次演示提交论文、查看进度、询问 Max、失败重试、打开文档、批量归类、搜索筛选和绑定飞书账号。"
+        "依次演示提交论文、查看进度、询问 Max、失败重试、打开文档、批量归类、新建个人分类、搜索筛选和绑定飞书账号。"
         "每一步都会明确写出要点哪个按钮，以及点击后会发生什么；不存在的步骤会自动跳过。"
     )
 
