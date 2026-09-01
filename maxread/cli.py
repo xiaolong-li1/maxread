@@ -290,6 +290,8 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
     if not _should_accept_event(event):
         return
 
+    _capture_event_sender_name(store, article_pipeline.feishu, event)
+
     if _handle_web_binding_event(settings, store, article_pipeline.feishu, event):
         return
 
@@ -330,6 +332,59 @@ def _handle_event(pipeline: MaxReadPipeline, article_pipeline: ArticlePipeline, 
         web_refs,
         retry_requested=retry_requested,
     )
+
+
+def _capture_event_sender_name(store: Store, feishu: FeishuClient, event) -> str:
+    """Persist a human name on first contact using event/message evidence."""
+    sender_id = str(getattr(event, "sender_id", "") or "").strip()
+    if not sender_id or sender_id.startswith("guest:"):
+        return ""
+    cached = str(store.get_user_names([sender_id]).get(sender_id, "") or "").strip()
+    if cached and cached not in {"飞书用户", "未解析用户"}:
+        store.update_web_identity_display_name(sender_id, cached)
+        return cached
+
+    name = _event_sender_name(getattr(event, "raw", {}) or {}, sender_id)
+    if not name:
+        try:
+            name = feishu.message_sender_name(
+                str(getattr(event, "message_id", "") or ""),
+                expected_sender_id=sender_id,
+            )
+        except Exception:
+            name = ""
+    name = str(name or "").strip()
+    if not name or name in {"飞书用户", "未解析用户"}:
+        return ""
+    store.save_user_names({sender_id: name})
+    store.update_web_identity_display_name(sender_id, name)
+    return name
+
+
+def _event_sender_name(payload, expected_sender_id: str) -> str:
+    if isinstance(payload, dict):
+        candidate_id = str(
+            payload.get("open_id")
+            or payload.get("sender_id")
+            or payload.get("user_id")
+            or payload.get("id")
+            or ""
+        ).strip()
+        if candidate_id == expected_sender_id:
+            for key in ("sender_name", "localized_name", "display_name", "name", "user_name"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        for value in payload.values():
+            found = _event_sender_name(value, expected_sender_id)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _event_sender_name(value, expected_sender_id)
+            if found:
+                return found
+    return ""
 
 
 def _extract_event_supported_inputs(feishu: FeishuClient, event) -> Tuple[List[PaperRef], List[WebRef]]:

@@ -444,3 +444,24 @@ def test_progress_emoji_mapping():
     assert progress_emoji_type("reviewing") == "THINKING"
     assert progress_emoji_type("writing") == "Typing"
     assert progress_emoji_type("done") == ""
+
+
+def test_message_sender_name_uses_message_evidence_without_contact_scope():
+    class SenderFeishu(FeishuClient):
+        def __init__(self):
+            super().__init__(cli="lark-cli", identity="bot")
+            self.args = []
+
+        def _json(self, args):
+            self.args = args
+            return type("Result", (), {"data": {"data": {"messages": [{
+                "message_id": "om_source",
+                "sender": {"id": "ou_sender", "name": "张三", "sender_type": "user"},
+            }]}}, "stdout": "{}"})()
+
+    client = SenderFeishu()
+
+    assert client.message_sender_name("om_source", "ou_sender") == "张三"
+    assert "+messages-mget" in client.args
+    assert "--no-reactions" in client.args
+    assert client.message_sender_name("web-message:local", "ou_sender") == ""

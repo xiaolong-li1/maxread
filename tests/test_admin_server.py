@@ -100,6 +100,36 @@ def test_attach_user_names_persists_contact_mapping(tmp_path):
     assert calls == [['lark-cli', 'contact', '+search-user', '--as', 'user', '--user-ids', 'ou_1', '--format', 'json']]
 
 
+def test_attach_user_names_falls_back_to_message_sender_evidence(tmp_path):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "+search-user" in cmd:
+            return SimpleNamespace(returncode=1, stdout="", stderr="missing user auth")
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"data":{"messages":[{"message_id":"om_1","sender":{"id":"ou_1","name":"张三"}}]}}',
+            stderr="",
+        )
+
+    original_run = admin_server.subprocess.run
+    admin_server.subprocess.run = fake_run
+    store = Store(tmp_path / "maxread.sqlite3")
+    try:
+        rows = _attach_user_names(
+            SimpleNamespace(lark_cli="lark-cli"),
+            [{"sender_id": "ou_1", "message_id": "om_1"}],
+            store,
+        )
+    finally:
+        admin_server.subprocess.run = original_run
+        store.close()
+
+    assert rows[0]["sender_name"] == "张三"
+    assert "+messages-mget" in calls[1]
+
+
 def test_architecture_spec_covers_states_and_scenarios_follow_real_transitions():
     spec = architecture_spec()
     state_ids = {item["id"] for item in spec["states"]}

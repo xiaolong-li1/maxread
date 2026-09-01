@@ -723,6 +723,49 @@ def _attach_user_names(settings: Settings, rows, store=None):
             store.save_user_names(resolved)
     except Exception:
         pass
+    remaining = {sender_id for sender_id in unresolved_ids if sender_id not in names}
+    message_ids = []
+    for row in rows:
+        message_id = str(row.get("message_id") or "").strip()
+        if row.get("sender_id") in remaining and message_id.startswith("om_") and message_id not in message_ids:
+            message_ids.append(message_id)
+    if message_ids:
+        try:
+            result = subprocess.run(
+                [
+                    settings.lark_cli,
+                    "im",
+                    "+messages-mget",
+                    "--as",
+                    "bot",
+                    "--message-ids",
+                    ",".join(message_ids[:50]),
+                    "--no-reactions",
+                    "--format",
+                    "json",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=CONTACT_LOOKUP_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 0:
+                payload = json.loads(result.stdout or "{}")
+                data = payload.get("data", payload)
+                resolved = {}
+                for message in data.get("messages", []) if isinstance(data, dict) else []:
+                    sender = message.get("sender") or {}
+                    sender_id = str(sender.get("id") or sender.get("open_id") or "")
+                    display_name = str(sender.get("name") or sender.get("display_name") or "").strip()
+                    if sender_id in remaining and display_name:
+                        resolved[sender_id] = display_name
+                names.update(resolved)
+                if store:
+                    store.save_user_names(resolved)
+                    for sender_id, display_name in resolved.items():
+                        store.update_web_identity_display_name(sender_id, display_name)
+        except Exception:
+            pass
     for row in rows:
         row["sender_name"] = names.get(row.get("sender_id", ""), "")
     return rows

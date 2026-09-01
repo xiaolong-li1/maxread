@@ -2,8 +2,28 @@ from unittest.mock import patch
 
 from types import SimpleNamespace
 
-from maxread.cli import _extract_event_supported_inputs, _handle_retry_event, _is_feedback_text, _is_retry_command, _record_feedback, _reply_retry_missing, _retry_related_message_ids, _retry_requires_rebuild, _should_accept_event, main
+from maxread.cli import _capture_event_sender_name, _extract_event_supported_inputs, _handle_retry_event, _is_feedback_text, _is_retry_command, _record_feedback, _reply_retry_missing, _retry_related_message_ids, _retry_requires_rebuild, _should_accept_event, main
 from maxread.db import Store
+
+
+def test_first_feishu_message_persists_sender_name_for_future_web_sessions(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+
+    class Feishu:
+        def message_sender_name(self, message_id, expected_sender_id=""):
+            assert message_id == "om_sender"
+            assert expected_sender_id == "ou_sender"
+            return "张三"
+
+    event = SimpleNamespace(
+        sender_id="ou_sender",
+        message_id="om_sender",
+        raw={"sender": {"sender_id": "ou_sender"}},
+    )
+
+    assert _capture_event_sender_name(store, Feishu(), event) == "张三"
+    assert store.get_user_names(["ou_sender"])["ou_sender"] == "张三"
+    store.close()
 
 
 def test_extract_command_normalizes_papers_cool_arxiv_url(capsys):

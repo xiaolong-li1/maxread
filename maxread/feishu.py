@@ -82,6 +82,38 @@ class FeishuClient:
             args += ["--idempotency-key", idempotency_key]
         return self._json(args).data
 
+    def message_sender_name(self, message_id: str, expected_sender_id: str = "") -> str:
+        """Resolve a sender from the message itself without contact-directory scopes."""
+        clean_message_id = str(message_id or "").strip()
+        clean_sender_id = str(expected_sender_id or "").strip()
+        if not clean_message_id.startswith("om_"):
+            return ""
+        payload = self._json([
+            self.cli,
+            "im",
+            "+messages-mget",
+            "--as",
+            self.identity,
+            "--message-ids",
+            clean_message_id,
+            "--no-reactions",
+            "--format",
+            "json",
+        ]).data
+        data = payload.get("data", payload) if isinstance(payload, dict) else {}
+        messages = data.get("messages", []) if isinstance(data, dict) else []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            sender = message.get("sender") or {}
+            sender_id = str(sender.get("id") or sender.get("open_id") or "").strip()
+            if clean_sender_id and sender_id != clean_sender_id:
+                continue
+            name = str(sender.get("name") or sender.get("display_name") or "").strip()
+            if name:
+                return name
+        return ""
+
     def add_reaction(self, message_id: str, emoji_type: str) -> Dict[str, Any]:
         return self._json([
             self.cli,
