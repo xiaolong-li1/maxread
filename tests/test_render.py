@@ -249,11 +249,11 @@ def test_polish_markdown_keeps_backticked_structured_math_out_of_text_flow_rule(
 
 
 def test_native_image_caption_compiles_formula_markup_to_plain_text():
-    caption = r"图 2　左侧 <latex>q_i \cdot k_j</latex> 加偏置；<latex>\mathrm{m}</latex> 是固定标量。"
+    caption = r"图 2　左侧 <latex>q_i \cdot k_j</latex> 加偏置；<latex>\mathrm{m}</latex> 是固定标量，误差 1\%，长度 \ensuremathL_valid。"
 
     out = native_image_caption(caption)
 
-    assert out == "图 2　左侧 q_i · k_j 加偏置；m 是固定标量。"
+    assert out == "图 2　左侧 q_i · k_j 加偏置；m 是固定标量，误差 1%，长度 L_valid。"
     assert "<latex>" not in out
     assert r"\mathrm" not in out
 
