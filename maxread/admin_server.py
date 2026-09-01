@@ -20,7 +20,7 @@ from .admin_architecture import architecture_html, architecture_spec
 from .config import Settings
 from .db import Store
 from .feedback import count_feedback_by_status, visible_feedback_rows
-from .mail_admin import MAIL_ADMIN_HTML, mail_admin_status, trigger_mail_scan, update_mail_admin_config
+from .mail_admin import MAIL_ADMIN_HTML, mail_admin_records, mail_admin_status, trigger_mail_scan, update_mail_admin_config, update_mail_admin_record
 from .review import visible_review_issues
 from .remote_worker import (
     coordinator_claim,
@@ -231,6 +231,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._json_response(mail_admin_status())
             except Exception as exc:
                 self._error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc)[:500])
+            return
+        if parsed.path == "/api/admin/mail/records":
+            if not self._require_admin():
+                return
+            try:
+                self._json_response(mail_admin_records(parsed.query))
+            except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path == "/api/usage":
             if not self._require_admin():
@@ -453,6 +461,17 @@ class AdminHandler(BaseHTTPRequestHandler):
                     int(payload.get("report_interval_hours") or 0),
                 ))
             except (TypeError, ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/record":
+            payload = self._read_json()
+            try:
+                self._json_response(update_mail_admin_record(
+                    str(payload.get("thread_key") or ""),
+                    payload.get("changes") if isinstance(payload.get("changes"), dict) else {},
+                    str(payload.get("expected_updated_at") or ""),
+                ))
+            except (ValueError, RuntimeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path == "/api/service-status":

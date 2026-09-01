@@ -7,8 +7,9 @@ import os
 import socket
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
-from .mail_admin import mail_admin_status, trigger_mail_scan, update_mail_admin_config
+from .mail_admin import mail_admin_records, mail_admin_status, trigger_mail_scan, update_mail_admin_config, update_mail_admin_record
 
 
 class MailRemoteHandler(BaseHTTPRequestHandler):
@@ -17,29 +18,44 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self._authorized():
             return
-        if self.path == "/health":
+        parsed = urlparse(self.path)
+        if parsed.path == "/health":
             self._json({"ok": True, "execution_host": socket.gethostname()})
             return
-        if self.path == "/status":
+        if parsed.path == "/status":
             payload = mail_admin_status()
             payload["execution_host"] = socket.gethostname()
             payload["remote_execution"] = True
             self._json(payload)
+            return
+        if parsed.path == "/records":
+            try:
+                self._json(mail_admin_records(parsed.query))
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         if not self._authorized():
             return
+        parsed = urlparse(self.path)
         payload = self._body()
         try:
-            if self.path == "/scan":
+            if parsed.path == "/scan":
                 self._json(trigger_mail_scan(str(payload.get("account") or "all")))
                 return
-            if self.path == "/config":
+            if parsed.path == "/config":
                 self._json(update_mail_admin_config(
                     int(payload.get("scan_interval_minutes") or 0),
                     int(payload.get("report_interval_hours") or 0),
+                ))
+                return
+            if parsed.path == "/record":
+                self._json(update_mail_admin_record(
+                    str(payload.get("thread_key") or ""),
+                    payload.get("changes") if isinstance(payload.get("changes"), dict) else {},
+                    str(payload.get("expected_updated_at") or ""),
                 ))
                 return
         except (RuntimeError, ValueError) as exc:

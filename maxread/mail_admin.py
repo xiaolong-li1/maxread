@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+from urllib.parse import parse_qs, urlencode
 
 
 DEFAULT_MAIL_ROOT = Path("/opt/maxread/features/mail_ingestion")
@@ -29,6 +30,8 @@ MAIL_PUBLIC_LINKS = (
     ("Kernel Efficiency", "算子与内核方向", "vewJL5BjVw", "topic"),
     ("World Model", "世界模型方向", "vewVuhfX3m", "topic"),
 )
+SCREENING_STATUSES = ("未筛选", "面试资格", "面试通过", "未通过", "实习生")
+INTERVIEW_RESULTS = ("未开始", "通过", "不通过")
 
 
 def mail_admin_status() -> dict[str, Any]:
@@ -123,6 +126,157 @@ def mail_public_summary() -> dict[str, Any]:
     }
 
 
+def mail_admin_records(query_string: str = "") -> dict[str, Any]:
+    if _remote_url():
+        suffix = f"?{query_string}" if query_string else ""
+        return _remote_request(f"/records{suffix}")
+    query = parse_qs(str(query_string or ""))
+    search = str(query.get("q", [""])[0] or "").strip().casefold()[:120]
+    mail_type = str(query.get("mail_type", ["candidate"])[0] or "candidate").strip()
+    screening = str(query.get("screening", [""])[0] or "").strip()
+    project = str(query.get("project", [""])[0] or "").strip()
+    days = _bounded_int(query.get("days", ["30"])[0], 30, 0, 3650)
+    limit = _bounded_int(query.get("limit", ["30"])[0], 30, 10, 100)
+    offset = _bounded_int(query.get("offset", ["0"])[0], 0, 0, 100_000)
+    if mail_type not in {"all", "candidate", "other"}:
+        raise ValueError("不支持的邮件类型")
+    if screening and screening not in SCREENING_STATUSES:
+        raise ValueError("不支持的筛选状态")
+    cutoff = datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=days) if days else None
+    db_path = _mail_db_path(_mail_root())
+    records: list[dict[str, Any]] = []
+    if db_path.exists():
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                select thread_key,candidate_address,normalized_subject,fields_json,
+                       base_record_id,doc_url,latest_time,last_incoming_time,last_outgoing_time,
+                       status,screening_status,interview_assigned,interview_result,last_error,updated_at
+                from recruiting_threads
+                where status<>'inactive'
+                order by coalesce(latest_time,'') desc,updated_at desc
+                """
+            ).fetchall()
+            for row in rows:
+                item = _mail_record(row)
+                if mail_type != "all" and item["mail_type"] != mail_type:
+                    continue
+                if screening and item["screening_status"] != screening:
+                    continue
+                if project and project not in item["projects"]:
+                    continue
+                parsed = _parse_datetime(item["latest_time"])
+                if cutoff is not None and (parsed is None or parsed < cutoff):
+                    continue
+                if search and search not in item["search_text"]:
+                    continue
+                item.pop("search_text", None)
+                records.append(item)
+    total = len(records)
+    return {
+        "ok": True,
+        "items": records[offset:offset + limit],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "filters": {
+            "screening_statuses": list(SCREENING_STATUSES),
+            "interview_results": list(INTERVIEW_RESULTS),
+            "projects": ["MLSys", "Agentic Infrastructure", "Kernel Efficiency", "World Model"],
+        },
+    }
+
+
+def update_mail_admin_record(thread_key: str, changes: dict[str, Any], expected_updated_at: str = "") -> dict[str, Any]:
+    if _remote_url():
+        return _remote_request(
+            "/record",
+            {"thread_key": thread_key, "changes": changes, "expected_updated_at": expected_updated_at},
+        )
+    clean_key = str(thread_key or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", clean_key):
+        raise ValueError("无效邮件线程")
+    allowed = {"screening_status", "interview_assigned", "interview_result"}
+    requested = {str(key): value for key, value in dict(changes or {}).items() if key in allowed}
+    if not requested:
+        raise ValueError("没有可更新字段")
+    db_path = _mail_db_path(_mail_root())
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("select * from recruiting_threads where thread_key=?", (clean_key,)).fetchone()
+    if row is None:
+        raise ValueError("邮件记录不存在")
+    if expected_updated_at and str(row["updated_at"] or "") != str(expected_updated_at):
+        raise ValueError("记录已被其他操作更新，请刷新后重试")
+    fields = json.loads(str(row["fields_json"] or "{}"))
+    if str(fields.get("mail_type") or "other") == "other":
+        raise ValueError("其他邮件不使用候选筛选状态")
+    old_state = {
+        "screening_status": str(row["screening_status"] or "未筛选"),
+        "interview_assigned": bool(row["interview_assigned"]),
+        "interview_result": str(row["interview_result"] or "未开始"),
+    }
+    new_state = dict(old_state)
+    if "screening_status" in requested:
+        value = str(requested["screening_status"] or "").strip()
+        if value not in SCREENING_STATUSES:
+            raise ValueError("不支持的筛选状态")
+        new_state["screening_status"] = value
+    if "interview_result" in requested:
+        value = str(requested["interview_result"] or "").strip()
+        if value not in INTERVIEW_RESULTS:
+            raise ValueError("不支持的面试结果")
+        new_state["interview_result"] = value
+    if "interview_assigned" in requested:
+        new_state["interview_assigned"] = bool(requested["interview_assigned"])
+    record_id = str(row["base_record_id"] or "").strip()
+    if not record_id:
+        raise ValueError("该记录尚未绑定飞书 Base，不能修改")
+    _update_base_workflow(record_id, new_state)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with sqlite3.connect(db_path, timeout=10) as connection:
+            connection.execute("begin immediate")
+            cursor = connection.execute(
+                """
+                update recruiting_threads
+                set screening_status=?,interview_assigned=?,interview_result=?,updated_at=?
+                where thread_key=? and updated_at=?
+                """,
+                (
+                    new_state["screening_status"],
+                    int(new_state["interview_assigned"]),
+                    new_state["interview_result"],
+                    now,
+                    clean_key,
+                    str(row["updated_at"] or ""),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("记录在写入期间发生变化")
+            connection.execute(
+                """
+                create table if not exists recruiting_admin_actions(
+                    id integer primary key autoincrement,thread_key text not null,
+                    old_json text not null,new_json text not null,created_at text not null
+                )
+                """
+            )
+            connection.execute(
+                "insert into recruiting_admin_actions(thread_key,old_json,new_json,created_at) values(?,?,?,?)",
+                (clean_key, json.dumps(old_state, ensure_ascii=False), json.dumps(new_state, ensure_ascii=False), now),
+            )
+            connection.commit()
+    except Exception as exc:
+        try:
+            _update_base_workflow(record_id, old_state)
+        except Exception:
+            raise RuntimeError(f"本地写入失败且 Base 回滚失败：{exc}") from exc
+        raise
+    return {"ok": True, "thread_key": clean_key, "state": new_state, "updated_at": now}
+
+
 def _parse_datetime(value: str) -> datetime | None:
     if not value:
         return None
@@ -133,6 +287,115 @@ def _parse_datetime(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
     return parsed.astimezone(ZoneInfo("Asia/Shanghai"))
+
+
+def _mail_record(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        fields = json.loads(str(row["fields_json"] or "{}"))
+    except json.JSONDecodeError:
+        fields = {}
+    mail_type = "other" if str(fields.get("mail_type") or "other") == "other" else "candidate"
+    study_parts = [str(fields.get("school") or "unknown")]
+    for key in ("education_stage", "current_grade"):
+        value = str(fields.get(key) or "").strip()
+        if value and value != "unknown":
+            study_parts.append(value)
+    if str(fields.get("entry_year") or "unknown") != "unknown":
+        study_parts.append(f"入学 {fields['entry_year']}")
+    if str(fields.get("expected_grad_year") or "unknown") != "unknown":
+        study_parts.append(f"预计毕业 {fields['expected_grad_year']}")
+    item = {
+        "thread_key": str(row["thread_key"]),
+        "candidate_address": str(row["candidate_address"] or ""),
+        "subject": str(row["normalized_subject"] or ""),
+        "name": str(fields.get("name") or row["candidate_address"] or "unknown"),
+        "mail_type": mail_type,
+        "school": str(fields.get("school") or "unknown"),
+        "study": "｜".join(study_parts),
+        "major": str(fields.get("major") or "unknown"),
+        "academic_display": str(fields.get("academic_display") or "unknown"),
+        "rank": str(fields.get("rank") or "未提供"),
+        "rank_evidence": str(fields.get("rank_evidence") or "未提供"),
+        "projects": [str(value) for value in fields.get("projects") or [] if str(value)],
+        "purpose_summary": str(fields.get("purpose_summary") or ""),
+        "source_accounts": [str(value) for value in fields.get("source_accounts") or [] if str(value)],
+        "is_985": str(fields.get("is_985") or "未知"),
+        "is_c9": str(fields.get("is_c9") or "未知"),
+        "latest_time": str(row["latest_time"] or ""),
+        "has_replied": bool(str(row["last_outgoing_time"] or "")),
+        "screening_status": str(row["screening_status"] or "未筛选"),
+        "interview_assigned": bool(row["interview_assigned"]),
+        "interview_result": str(row["interview_result"] or "未开始"),
+        "doc_url": str(row["doc_url"] or ""),
+        "base_record_id": str(row["base_record_id"] or ""),
+        "last_error": str(row["last_error"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+    item["search_text"] = " ".join(
+        str(value) for value in (
+            item["name"], item["candidate_address"], item["subject"], item["school"],
+            item["study"], item["major"], item["academic_display"], item["rank"],
+            item["purpose_summary"], " ".join(item["projects"]),
+        )
+    ).casefold()
+    return item
+
+
+def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(maximum, int(str(value))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _update_base_workflow(record_id: str, state: dict[str, Any]) -> None:
+    mail_root = _mail_root()
+    primary = _read_env(mail_root / "data/accounts/zip-lab.env")
+    project_root = mail_root.parent.parent
+    project = _read_env(project_root / ".env")
+    values = {**project, **primary}
+    lark_cli = values.get("RECRUITING_LARK_CLI") or values.get("MAXREAD_LARK_CLI") or "lark-cli"
+    base_token = str(values.get("RECRUITING_BASE_TOKEN") or "").strip()
+    table_id = str(values.get("RECRUITING_TABLE_ID") or "").strip()
+    if not base_token or not table_id:
+        raise RuntimeError("招聘 Base 配置不完整")
+    payload = {
+        "update_records": {
+            str(record_id): {
+                "筛选状态": [state["screening_status"]],
+                "是否已分配面试": bool(state["interview_assigned"]),
+                "面试结果": [state["interview_result"]],
+            }
+        }
+    }
+    env = dict(os.environ)
+    node_value = str(values.get("MAXREAD_NODE") or "").strip()
+    if node_value:
+        node = Path(node_value).expanduser()
+        env["PATH"] = f"{node.parent}:{Path(lark_cli).expanduser().parent}:{env.get('PATH', '')}"
+    completed = subprocess.run(
+        [
+            lark_cli, "base", "+record-batch-update",
+            "--base-token", base_token,
+            "--table-id", table_id,
+            "--json", json.dumps(payload, ensure_ascii=False),
+            "--as", values.get("RECRUITING_FEISHU_AS") or values.get("MAXREAD_FEISHU_AS") or "bot",
+        ],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or completed.stdout or "飞书 Base 更新失败").strip()[:500])
+    try:
+        result = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("飞书 Base 返回无效 JSON") from exc
+    if result.get("ok") is False:
+        raise RuntimeError(str(result.get("error") or "飞书 Base 更新失败")[:500])
 
 
 def update_mail_admin_config(scan_interval_minutes: int, report_interval_hours: int) -> dict[str, Any]:

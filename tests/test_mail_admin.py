@@ -190,3 +190,92 @@ def test_mail_admin_page_keeps_base_links_behind_authenticated_status_api():
     html = mail_admin.MAIL_ADMIN_HTML
     assert "table-links" in html
     assert "S4v4bdOCuaWvAQs90vCcek4anHh" not in html
+
+
+def _record_fixture(tmp_path: Path):
+    root = tmp_path / "mail-records"
+    accounts = root / "data/accounts"
+    accounts.mkdir(parents=True)
+    db = accounts / "mail.sqlite3"
+    (accounts / "zip-lab.env").write_text(f"MAIL_DB_PATH={db}\nRECRUITING_BASE_TOKEN=base\nRECRUITING_TABLE_ID=table\n", encoding="utf-8")
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            """
+            create table recruiting_threads(
+              thread_key text primary key,candidate_address text,normalized_subject text,fields_json text,
+              base_record_id text,doc_url text,latest_time text,last_incoming_time text,last_outgoing_time text,
+              status text,screening_status text,interview_assigned integer,interview_result text,
+              last_error text,updated_at text
+            )
+            """
+        )
+        candidate = {
+            "name": "张三", "mail_type": "candidate", "school": "浙江大学", "education_stage": "本科",
+            "current_grade": "大三", "major": "计算机", "academic_display": "4.5/5.0 · Top 5%",
+            "rank": "Top 5%", "rank_evidence": "专业排名前 5%", "projects": ["World Model"],
+            "purpose_summary": "申请目的：世界模型研究", "source_accounts": ["ZIP Lab"], "is_985": "是", "is_c9": "是",
+        }
+        other = {"name": "系统通知", "mail_type": "other", "projects": ["unknown"], "purpose_summary": "安全通知"}
+        connection.execute(
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("a" * 32, "candidate@example.com", "申请", json.dumps(candidate, ensure_ascii=False), "rec1", "https://doc", "2026-09-01T10:00:00+08:00", "", "2026-09-01T11:00:00+08:00", "active", "未筛选", 0, "未开始", "", "v1"),
+        )
+        connection.execute(
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("b" * 32, "notice@example.com", "通知", json.dumps(other, ensure_ascii=False), "rec2", "", "2026-08-31T10:00:00+08:00", "", "", "active", "未筛选", 0, "未开始", "", "v2"),
+        )
+    return root, db
+
+
+def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
+    root, _db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+
+    result = mail_admin.mail_admin_records("mail_type=candidate&q=浙江&project=World+Model&days=0&limit=10")
+
+    assert result["total"] == 1
+    assert result["items"][0]["name"] == "张三"
+    assert result["items"][0]["has_replied"] is True
+    assert result["filters"]["screening_statuses"] == ["未筛选", "面试资格", "面试通过", "未通过", "实习生"]
+
+
+def test_mail_record_update_writes_base_then_sqlite_and_audit(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    calls = []
+    monkeypatch.setattr(mail_admin, "_update_base_workflow", lambda record_id, state: calls.append((record_id, dict(state))))
+
+    result = mail_admin.update_mail_admin_record(
+        "a" * 32,
+        {"screening_status": "面试资格", "interview_assigned": True, "interview_result": "通过"},
+        "v1",
+    )
+
+    assert result["state"] == {"screening_status": "面试资格", "interview_assigned": True, "interview_result": "通过"}
+    assert calls == [("rec1", result["state"])]
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("select screening_status,interview_assigned,interview_result from recruiting_threads where thread_key=?", ("a" * 32,)).fetchone() == ("面试资格", 1, "通过")
+        assert connection.execute("select count(*) from recruiting_admin_actions").fetchone()[0] == 1
+
+
+def test_mail_record_base_failure_leaves_sqlite_unchanged(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.setattr(mail_admin, "_update_base_workflow", lambda *_args: (_ for _ in ()).throw(RuntimeError("base unavailable")))
+
+    try:
+        mail_admin.update_mail_admin_record("a" * 32, {"screening_status": "未通过"}, "v1")
+    except RuntimeError as exc:
+        assert "base unavailable" in str(exc)
+    else:
+        raise AssertionError("Base failure must reject the update")
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("select screening_status from recruiting_threads where thread_key=?", ("a" * 32,)).fetchone()[0] == "未筛选"
+
+
+def test_mail_admin_page_contains_candidate_workbench_controls():
+    html = mail_admin.MAIL_ADMIN_HTML
+    assert "邮件记录" in html
+    assert "api/admin/mail/records" in html
+    assert "api/admin/mail/record" in html
+    assert "最近一周新增候选人" not in html  # links arrive only after authenticated API response
