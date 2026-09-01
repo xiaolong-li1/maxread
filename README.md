@@ -1,6 +1,6 @@
 # 读不动了 / MaxRead
 
-Send an arXiv ID/link, HuggingFace Papers link, `papers.cool/arxiv/<id>` mirror link, or supported web article URL to the Feishu bot, and MaxRead creates a public-readable Feishu docx summary.
+Send an arXiv ID/link, Hugging Face Papers/model repository link, approved technical-report PDF link, `papers.cool/arxiv/<id>` mirror link, or supported web article URL to the Feishu bot, and MaxRead creates a public-readable Feishu docx summary.
 
 
 ## Deploy / Migrate to Another Machine
@@ -170,12 +170,17 @@ screenshots, keep visual repair on a separate compatible model with
 
 - Supported: arXiv ID, `arxiv.org/abs`, `arxiv.org/pdf`.
 - Supported: `huggingface.co/papers/<arxiv-id>`; this maps to the arXiv paper pipeline.
+- Supported: Hugging Face model repositories. MaxRead selects a technical-report PDF when present, otherwise an explicit arXiv reference, otherwise the official model card.
+- Supported: GitHub `blob/.../*.pdf`, GitHub raw PDF links, and Hugging Face PDF files. GitHub blob links are canonicalized to raw downloads before queueing.
 - Supported: `papers.cool/arxiv/<arxiv-id>`; this is canonicalized to `arxiv.org/abs/<id>` and never treated as a generic webpage.
 - Supported: ordinary HTML web articles; MaxRead extracts title, text, images, captions, tables, code, and formulas into an article-style Feishu doc.
+- PDF-only reports use layout-aware text, figure-caption, immutable section-owner, and table recovery, then reuse the normal paper generation, Feishu publishing, and rendered-page QA stages. If an arXiv ID and TeX source are available, the adapter upgrades to the TeX-first path.
 - Supported fallback: manually imported arXiv source packages.
-- Not yet supported: uploaded PDF files, arbitrary PDF URLs, WeChat links, Zhihu integration.
+- Not yet supported: uploaded PDF files in chat/web forms, WeChat links, Zhihu integration.
 - Repeated paper IDs return the cached Feishu doc URL only while the source
   record remains `done`. Records marked `legacy` are rebuilt on the next request.
+
+Document downloads are host-allowlisted and DNS-checked to prevent SSRF. GitHub and Hugging Face hosts are enabled by default. An administrator may add a reviewed publisher host with `MAXREAD_DOCUMENT_ALLOWED_HOSTS=host.example`; redirects are checked again, and private/loopback/link-local targets are rejected. `MAXREAD_DOCUMENT_PROXY_URL` optionally routes only these document downloads through a dedicated proxy.
 
 ## Cache Lifecycle
 

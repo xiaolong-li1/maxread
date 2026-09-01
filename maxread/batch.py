@@ -10,6 +10,7 @@ from .arxiv import ArxivClient
 from .article_pipeline import ArticlePipeline
 from .config import Settings
 from .db import Store
+from .document_source import DocumentSourceClient
 from .feishu import FeishuClient
 from .models import FeishuEvent, PaperRef
 from .openai_client import OpenAIClient
@@ -72,14 +73,15 @@ class BatchProcessor:
         )
         try:
             if kind == "paper":
+                arxiv = ArxivClient(
+                    self.settings.workdir,
+                    timeout=self.settings.arxiv_timeout,
+                    parallel_streams=self.settings.arxiv_parallel_streams,
+                    parallel_min_bytes=self.settings.arxiv_parallel_min_bytes,
+                )
                 pipeline = MaxReadPipeline(
                     store,
-                    ArxivClient(
-                        self.settings.workdir,
-                        timeout=self.settings.arxiv_timeout,
-                        parallel_streams=self.settings.arxiv_parallel_streams,
-                        parallel_min_bytes=self.settings.arxiv_parallel_min_bytes,
-                    ),
+                    arxiv,
                     feishu,
                     llm,
                     require_source=self.settings.require_source,
@@ -89,6 +91,11 @@ class BatchProcessor:
                     sectional_generation_enabled=self.settings.sectional_generation_enabled,
                     sectional_generation_workers=self.settings.sectional_generation_workers,
                     quality_repair_rounds=self.settings.quality_repair_rounds,
+                    document_client=DocumentSourceClient(
+                        self.settings.workdir,
+                        arxiv=arxiv,
+                        timeout=self.settings.arxiv_timeout,
+                    ),
                 )
                 result = pipeline.process_ref(ref, send_progress=False)
                 return BatchItemResult(ref.paper_id, result.doc_url, result.error)

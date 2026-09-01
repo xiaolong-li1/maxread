@@ -255,6 +255,10 @@ def paper_markdown_completeness_errors(markdown: str, expected_markers: Iterable
     present = sum(1 for marker in markers if marker in text)
     if present < required:
         errors.append(f"too-few-figures:{present}/{required}")
+    for marker in markers:
+        count = text.count(marker)
+        if count > 1:
+            errors.append(f"duplicate-figure-marker:{marker}:{count}")
     return errors
 
 

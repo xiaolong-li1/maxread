@@ -25,6 +25,7 @@ from .quality_repair import QualityRepairResult, repair_until_quality_passes
 from .repository import find_repository_url
 from .render import _figure_section_target, compiled_figure_captions, compose_related_figure_groups, enforce_figure_owner_sections, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, normalize_figure_captions, polish_markdown, prepare_key_figures_with_owners, remove_false_material_warning
 from .review import MethodValidationResult, ReviewIssue, audit_method_consistency_with_report, review_markdown_with_report, validate_method_consistency
+from .sources import is_document_source_url
 from .visual_qa import VisualQAController
 from .workflow import PublishedCheckpoint, WorkflowEvent
 
@@ -69,6 +70,7 @@ class MaxReadPipeline:
         sectional_generation_workers: int = 5,
         quality_repair_rounds: int = 2,
         on_workflow_event=None,
+        document_client=None,
     ):
         self.store = store
         self.arxiv = arxiv
@@ -82,6 +84,7 @@ class MaxReadPipeline:
         self.sectional_generation_workers = max(1, int(sectional_generation_workers))
         self.quality_repair_rounds = max(0, int(quality_repair_rounds))
         self.on_workflow_event = on_workflow_event
+        self.document_client = document_client
 
     def process_ref(
         self,
@@ -118,9 +121,18 @@ class MaxReadPipeline:
             try:
                 if event and send_progress:
                     self._reply(event, f"[下载中] 正在下载论文：{ref.paper_id}", "downloading", ref.paper_id)
-                bundle = self.arxiv.fetch(ref.paper_id)
+                if is_document_source_url(ref.url):
+                    if self.document_client is None:
+                        raise RuntimeError("document source adapter is not configured")
+                    bundle = self.document_client.fetch(ref)
+                else:
+                    bundle = self.arxiv.fetch(ref.paper_id)
             except Exception as exc:
-                bundle = _limited_bundle(ref.paper_id, str(exc))
+                bundle = (
+                    _limited_document_bundle(ref, str(exc))
+                    if is_document_source_url(ref.url)
+                    else _limited_bundle(ref.paper_id, str(exc))
+                )
             self.store.upsert_paper(
                 ref.paper_id,
                 "summarizing",
@@ -137,6 +149,8 @@ class MaxReadPipeline:
                 json.dumps(
                     {
                         "paper_id": ref.paper_id,
+                        "source_kind": bundle.metadata.source_kind,
+                        "source_url": bundle.metadata.abs_url,
                         "title": bundle.metadata.title,
                         "source_chars": len(bundle.source_text or ""),
                         "pdf_chars": len(bundle.pdf_text or ""),
@@ -171,7 +185,11 @@ class MaxReadPipeline:
             )
             _remove_paper_artifact(bundle, "08-failure.txt")
             if self.require_source and not bundle.source_text:
-                message = _source_required_message(ref.paper_id, bundle.parse_warnings)
+                message = (
+                    _document_source_failed_message(ref, bundle.parse_warnings)
+                    if bundle.metadata.source_kind == "document"
+                    else _source_required_message(ref.paper_id, bundle.parse_warnings)
+                )
                 self._workflow(WorkflowEvent.SOURCE_MISSING, message)
                 self.store.upsert_paper(ref.paper_id, "needs_source", error=message)
                 if event and send_progress:
@@ -227,6 +245,11 @@ class MaxReadPipeline:
                         selected_tables,
                         owner_sections=figure_owners,
                     )
+                    reusable_sections = _load_successful_section_outputs(
+                        bundle,
+                        marker_assignments,
+                        table_assignments,
+                    )
                     return _generate_sectional_paper_markdown(
                         self.llm,
                         evidence_prefix,
@@ -239,6 +262,7 @@ class MaxReadPipeline:
                             bundle, generation_run, section, attempt, raw, errors
                         ),
                         on_workflow_event=self._workflow,
+                        initial_outputs=reusable_sections,
                     )
 
                 if self.sectional_generation_enabled and not retry_context.previous_markdown:
@@ -479,6 +503,7 @@ class MaxReadPipeline:
                         visual_descriptions=figure_visuals,
                         owner_sections=figure_owners,
                     )
+                    candidate = _dedupe_expected_markers(candidate, markers)
                     return normalize_figure_captions(
                         candidate,
                         figure_inserts,
@@ -863,9 +888,13 @@ def _load_retry_context(bundle: PaperBundle, max_feedback: int = 16) -> RetryCon
         if isinstance(errors, list) and errors:
             label = report.stem.removesuffix(".json")
             feedback.append(f"{label}: {', '.join(str(item) for item in errors)}")
-        markdown = report.with_suffix(".md")
-        if markdown.exists():
-            markdown_candidates.append(markdown)
+        # Section attempts are durable chapter checkpoints, not whole drafts.
+        # Loading one as previous_markdown makes the next retry regenerate from
+        # a fragment and can poison all otherwise successful chapters.
+        if not (isinstance(payload, dict) and payload.get("section")):
+            markdown = report.with_suffix(".md")
+            if markdown.exists():
+                markdown_candidates.append(markdown)
 
     for report in sorted(artifact_dir.glob("07-quality-round-*.json"))[-8:]:
         payload = _read_json_artifact(report)
@@ -964,11 +993,62 @@ def _write_section_generation_attempt(
         bundle,
         f"01-{run_id}-{safe_section}-attempt-{attempt}.json",
         json.dumps(
-            {"section": section, "attempt": attempt, "errors": list(errors)},
+            {
+                "section": section,
+                "attempt": attempt,
+                "errors": list(errors),
+                "source_fingerprint": _bundle_source_fingerprint(bundle),
+            },
             ensure_ascii=False,
             indent=2,
         ),
     )
+
+
+def _bundle_source_fingerprint(bundle: PaperBundle) -> str:
+    payload = "\n".join((
+        str(bundle.metadata.abs_url or ""),
+        str(bundle.metadata.title or ""),
+        str(bundle.source_text or ""),
+    ))
+    return sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _load_successful_section_outputs(
+    bundle: PaperBundle,
+    markers_by_section: Dict[str, List[str]],
+    tables_by_section: Dict[str, List[int]],
+) -> Dict[str, str]:
+    artifact_dir = _paper_artifact_dir(bundle)
+    if artifact_dir is None or not artifact_dir.exists():
+        return {}
+    fingerprint = _bundle_source_fingerprint(bundle)
+    outputs: Dict[str, str] = {}
+    for section in SECTION_GENERATION_TASKS:
+        reports = sorted(artifact_dir.glob(f"01-*-{section}-attempt-*.json"), reverse=True)
+        for report in reports:
+            payload = _read_json_artifact(report)
+            if not isinstance(payload, dict) or payload.get("errors"):
+                continue
+            recorded = str(payload.get("source_fingerprint") or "")
+            if recorded and recorded != fingerprint:
+                continue
+            markdown_path = report.with_suffix(".md")
+            try:
+                raw = markdown_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            markdown = _extract_section_output(_unwrap_outer_markdown_fence(raw), section)
+            errors = _section_output_errors(
+                markdown,
+                section,
+                markers_by_section.get(section, []),
+                tables_by_section.get(section, []),
+            )
+            if not errors:
+                outputs[section] = markdown
+                break
+    return outputs
 
 
 def _sectional_material_assignments(
@@ -1007,6 +1087,7 @@ def _generate_sectional_paper_markdown(
     workers: int = 4,
     artifact_writer=None,
     on_workflow_event=None,
+    initial_outputs: Optional[Dict[str, str]] = None,
 ) -> str:
     section_order = list(SECTION_GENERATION_TASKS)
     attempt_serials = {section: 0 for section in section_order}
@@ -1075,9 +1156,17 @@ def _generate_sectional_paper_markdown(
     # Every section is independent and starts with the same evidence bytes.
     # Launch all five together; provider-side prefix caching can still reuse
     # the shared prefix without adding a serial warm-up to the critical path.
-    outputs: Dict[str, str] = {}
+    outputs: Dict[str, str] = {
+        section: str(markdown or "")
+        for section, markdown in (initial_outputs or {}).items()
+        if section in section_order and str(markdown or "").strip()
+    }
     with ThreadPoolExecutor(max_workers=min(max(1, int(workers)), len(section_order))) as executor:
-        futures = {executor.submit(generate, section): section for section in section_order}
+        futures = {
+            executor.submit(generate, section): section
+            for section in section_order
+            if section not in outputs
+        }
         for future in as_completed(futures):
             section = futures[future]
             outputs[section] = future.result()
@@ -1240,6 +1329,25 @@ def _global_sectional_uniqueness_errors(markdown: str, markers: List[str], table
     if any(count > 1 for count in hashes.values()):
         errors.append("duplicate markdown table content across sections")
     return errors
+
+
+def _dedupe_expected_markers(markdown: str, markers: Iterable[str]) -> str:
+    """Keep the first placement selected by the owner-aware pipeline.
+
+    A model repair can copy a figure marker into a second section after the
+    sectional uniqueness gate. Publishing replaces one selection at a time,
+    so a duplicate otherwise survives as visible control text.
+    """
+    text = str(markdown or "")
+    for marker in markers:
+        start = text.find(marker)
+        if start < 0:
+            continue
+        cursor = text.find(marker, start + len(marker))
+        while cursor >= 0:
+            text = text[:cursor] + text[cursor + len(marker):]
+            cursor = text.find(marker, cursor)
+    return re.sub(r"\n{3,}", "\n\n", text)
 
 
 def _duplicate_markdown_table_sections(outputs: Dict[str, str], section_order: List[str]) -> set[str]:
@@ -1736,6 +1844,30 @@ def _limited_bundle(paper_id: str, reason: str) -> PaperBundle:
     )
 
 
+def _limited_document_bundle(ref: PaperRef, reason: str) -> PaperBundle:
+    return PaperBundle(
+        metadata=ArxivMetadata(
+            paper_id=ref.paper_id,
+            title="Technical document",
+            authors=[],
+            summary="Technical document download or parsing did not complete.",
+            published="",
+            updated="",
+            categories=[],
+            pdf_url=ref.url,
+            abs_url=ref.url,
+            source_kind="document",
+            source_label="technical document",
+        ),
+        pdf_path=None,
+        source_path=None,
+        source_dir=None,
+        source_text="",
+        pdf_text="",
+        parse_warnings=[f"document-source fetch failed: {reason}"],
+    )
+
+
 def _source_required_message(paper_id: str, warnings) -> str:
     details = "；".join(str(w) for w in warnings if "source" in str(w).lower() or "tex" in str(w).lower())
     if not details:
@@ -1746,6 +1878,16 @@ def _source_required_message(paper_id: str, warnings) -> str:
         f"细节：{details}\n"
         f"你可以在 arXiv 网页点 Download source 下载源码包，然后本地执行：\n"
         f"cd /Users/xiaolong/projects/maxread && python3 -m maxread.cli import-source {paper_id} /path/to/source.tar"
+    )
+
+
+def _document_source_failed_message(ref: PaperRef, warnings) -> str:
+    details = "；".join(str(item) for item in warnings) or "document download or parsing returned no evidence"
+    return (
+        f"这篇技术文档暂时没有解析成功：{ref.paper_id}\n"
+        f"来源：{ref.url}\n"
+        f"阶段：技术文档下载 / 版面解析。\n"
+        f"细节：{details}"
     )
 
 

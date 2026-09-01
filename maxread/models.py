@@ -72,6 +72,8 @@ class ArxivMetadata:
     categories: List[str]
     pdf_url: str
     abs_url: str
+    source_kind: str = "arxiv"
+    source_label: str = ""
 
 
 @dataclass

@@ -125,6 +125,8 @@ def test_paper_completeness_requires_all_sections_and_three_selected_figures():
     assert paper_markdown_completeness_errors(markdown, markers) == []
     assert "missing-section-7" in paper_markdown_completeness_errors(markdown.replace("## 7. S", "### 7. S"), markers)
     assert "too-few-figures:2/3" in paper_markdown_completeness_errors(markdown.replace(markers[2], ""), markers)
+    duplicate = markdown + "\n" + markers[0]
+    assert f"duplicate-figure-marker:{markers[0]}:2" in paper_markdown_completeness_errors(duplicate, markers)
 
 
 def test_paper_completeness_requires_h1_on_first_nonempty_line():

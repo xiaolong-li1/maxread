@@ -14,6 +14,7 @@ from .article_pipeline import ArticlePipeline
 from .cache_cleanup import cleanup_completed_cache, local_date_cutoff_utc
 from .config import Settings
 from .db import Store
+from .document_source import DocumentSourceClient
 from .feedback import classify_feedback_text, is_feedback_text as _is_feedback_text
 from .feishu import FeishuClient, parse_event
 from .help import group_intro_message, intro_message, plain_message_text, should_send_intro
@@ -156,6 +157,7 @@ def main(argv: List[str] | None = None) -> int:
         parallel_streams=settings.arxiv_parallel_streams,
         parallel_min_bytes=settings.arxiv_parallel_min_bytes,
     )
+    documents = DocumentSourceClient(settings.workdir, arxiv=arxiv, timeout=settings.arxiv_timeout)
     web = WebArticleClient(settings.workdir, timeout=settings.arxiv_timeout)
     feishu = FeishuClient(settings.lark_cli, settings.feishu_as)
     llm = None if getattr(args, "no_openai", False) else _maybe_llm(settings)
@@ -175,6 +177,7 @@ def main(argv: List[str] | None = None) -> int:
         sectional_generation_enabled=settings.sectional_generation_enabled,
         sectional_generation_workers=settings.sectional_generation_workers,
         quality_repair_rounds=settings.quality_repair_rounds,
+        document_client=documents,
     )
     article_pipeline = ArticlePipeline(
         store,

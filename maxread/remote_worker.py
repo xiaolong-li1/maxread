@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from .arxiv import ArxivClient
 from .cache_cleanup import cleanup_source_cache
 from .db import Store
+from .document_source import DocumentSourceClient
 from .feishu import FeishuClient
 from .job_queue import (
     _LimitedFeishu,
@@ -315,14 +316,15 @@ class RemotePaperWorker:
                     job_id, worker_id, event_type, detail
                 ),
             )
+            arxiv = ArxivClient(
+                self.settings.workdir,
+                timeout=self.settings.arxiv_timeout,
+                parallel_streams=self.settings.arxiv_parallel_streams,
+                parallel_min_bytes=self.settings.arxiv_parallel_min_bytes,
+            )
             pipeline = MaxReadPipeline(
                 local_store,
-                ArxivClient(
-                    self.settings.workdir,
-                    timeout=self.settings.arxiv_timeout,
-                    parallel_streams=self.settings.arxiv_parallel_streams,
-                    parallel_min_bytes=self.settings.arxiv_parallel_min_bytes,
-                ),
+                arxiv,
                 _LimitedFeishu(
                     FeishuClient(self.settings.lark_cli, self.settings.feishu_as),
                     self.feishu_sem,
@@ -337,6 +339,11 @@ class RemotePaperWorker:
                 quality_repair_rounds=self.settings.quality_repair_rounds,
                 on_workflow_event=lambda event, detail="": self.client.transition(
                     job_id, worker_id, event, detail
+                ),
+                document_client=DocumentSourceClient(
+                    self.settings.workdir,
+                    arxiv=arxiv,
+                    timeout=self.settings.arxiv_timeout,
                 ),
             )
             result = pipeline.process_ref(

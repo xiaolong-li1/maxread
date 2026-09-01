@@ -4,7 +4,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_generated_paper_title, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _published_document_title_from_payload, _replace_paper_method_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _sectional_material_assignments, _write_paper_artifact
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_generated_paper_title, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _load_successful_section_outputs, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _published_document_title_from_payload, _replace_paper_method_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _sectional_material_assignments, _write_paper_artifact, _write_section_generation_attempt
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 from maxread.workflow import WorkflowEvent, WorkflowState
@@ -331,6 +331,24 @@ class ExplodingArxiv:
         raise AssertionError("published-document resume unexpectedly fetched source")
 
 
+class FakeDocumentSource:
+    def __init__(self):
+        self.urls = []
+
+    def fetch(self, ref):
+        self.urls.append(ref.url)
+        bundle = FakeArxiv().fetch(ref.paper_id)
+        bundle.metadata.source_kind = "document"
+        bundle.metadata.source_label = "PDF technical report"
+        bundle.metadata.abs_url = ref.url
+        return bundle
+
+
+class ExplodingDocumentSource:
+    def fetch(self, ref):
+        raise TimeoutError("PDF download timed out")
+
+
 def test_pipeline_process_and_cache(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     feishu = FakeFeishu()
@@ -352,6 +370,53 @@ def test_pipeline_process_and_cache(tmp_path):
     assert forced.doc_url == first.doc_url
     assert forced.cached is False
     assert feishu.published == ["doc123", "doc123"]
+    store.close()
+
+
+def test_pipeline_routes_document_url_through_document_adapter(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    documents = FakeDocumentSource()
+    pipeline = MaxReadPipeline(
+        store,
+        ExplodingArxiv(),
+        FakeFeishu(),
+        FakeLLM(),
+        require_source=True,
+        document_client=documents,
+    )
+    ref = PaperRef(
+        "gh-example-report",
+        "https://raw.githubusercontent.com/example/repo/main/report.pdf",
+    )
+
+    result = pipeline.process_ref(ref)
+
+    assert result.error == ""
+    assert documents.urls == [ref.url]
+    assert store.get_paper(ref.paper_id).status == "done"
+    store.close()
+
+
+def test_document_adapter_failure_does_not_claim_tex_source_is_missing(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    pipeline = MaxReadPipeline(
+        store,
+        ExplodingArxiv(),
+        FakeFeishu(),
+        None,
+        require_source=True,
+        document_client=ExplodingDocumentSource(),
+    )
+    ref = PaperRef(
+        "gh-example-report",
+        "https://raw.githubusercontent.com/example/repo/main/report.pdf",
+    )
+
+    result = pipeline.process_ref(ref)
+
+    assert "技术文档下载 / 版面解析" in result.error
+    assert "PDF download timed out" in result.error
+    assert "需要 TeX source" not in result.error
     store.close()
 
 
@@ -559,6 +624,33 @@ def test_retry_context_loads_previous_draft_and_all_quality_layers(tmp_path):
     assert any("missing-section-7" in item for item in context.feedback)
     assert any("html-tag-in-formula" in item for item in context.feedback)
     assert any("页面有无效公式" in item for item in context.feedback)
+
+
+def test_section_retry_reuses_only_successful_matching_checkpoint(tmp_path):
+    bundle = FakeArxiv().fetch("2604.12946")
+    bundle.pdf_path = tmp_path / "paper.pdf"
+    bundle.pdf_path.write_bytes(b"pdf")
+    front = (
+        "# [2604.12946] 测试标题：验证章节级恢复\n\n"
+        "**TL;DR**：这是章节级 checkpoint 的测试。\n\n"
+        "## 1. 这篇论文要解决什么问题\n\n"
+        + "问题背景与上下文说明。" * 80
+        + "\n\n## 2. 核心观察 / 关键直觉\n\n"
+        + "观察、解释与设计动作。" * 80
+    )
+    _write_section_generation_attempt(bundle, "run", "front", 1, front, [])
+    _write_section_generation_attempt(bundle, "run", "method", 1, "", ["model-call:timeout"])
+
+    outputs = _load_successful_section_outputs(
+        bundle,
+        {key: [] for key in ("front", "method", "experiments", "ablation", "closing")},
+        {key: [] for key in ("front", "method", "experiments", "ablation", "closing")},
+    )
+    retry = _load_retry_context(bundle)
+
+    assert outputs == {"front": front.strip() + "\n"}
+    assert retry.previous_markdown == ""
+    assert any("model-call:timeout" in item for item in retry.feedback)
 
 
 def test_retry_context_prefers_complete_polished_draft_over_one_section(tmp_path):

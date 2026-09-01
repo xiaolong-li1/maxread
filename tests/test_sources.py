@@ -1,7 +1,7 @@
 from maxread.batch import _queue_message
 from maxread.db import Store
 from maxread.job_queue import QueueItem, _cached_doc
-from maxread.sources import extract_supported_inputs, is_supported_web_article_url
+from maxread.sources import canonical_document_url, extract_supported_inputs, is_supported_web_article_url
 
 
 def test_huggingface_papers_maps_to_arxiv():
@@ -60,6 +60,31 @@ def test_direct_pdf_and_feishu_docs_are_not_web_articles():
     )
     assert refs == []
     assert web_refs == []
+
+
+def test_github_blob_pdf_becomes_document_paper_ref():
+    refs, web_refs = extract_supported_inputs(
+        "读 https://github.com/QwenLM/Qwen3.8-Flash-Next/blob/main/tech_report.pdf?spm=tracking&file=tech_report.pdf"
+    )
+    assert len(refs) == 1
+    assert refs[0].paper_id.startswith("gh-QwenLM-Qwen3.8-Flash-Next-tech_report-")
+    assert refs[0].url == "https://raw.githubusercontent.com/QwenLM/Qwen3.8-Flash-Next/main/tech_report.pdf"
+    assert web_refs == []
+
+
+def test_huggingface_model_repo_becomes_document_paper_ref():
+    refs, web_refs = extract_supported_inputs(
+        "读 https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
+    )
+    assert len(refs) == 1
+    assert refs[0].paper_id.startswith("hf-deepseek-ai-DeepSeek-V4-Flash-Vision-Exp-")
+    assert web_refs == []
+
+
+def test_document_canonicalization_drops_tracking_query():
+    assert canonical_document_url(
+        "https://github.com/a/b/blob/main/report.pdf?spm=x&file=report.pdf"
+    ) == "https://raw.githubusercontent.com/a/b/main/report.pdf"
 
 
 def test_queue_message_includes_order_and_wait():

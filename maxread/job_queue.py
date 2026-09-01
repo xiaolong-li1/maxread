@@ -16,6 +16,7 @@ from .article_pipeline import ArticlePipeline
 from .cache_cleanup import cleanup_source_cache
 from .config import Settings
 from .db import Store
+from .document_source import DocumentSourceClient
 from .feishu import FeishuClient, progress_emoji_type
 from .models import FeishuEvent, PaperRef
 from .openai_client import OpenAIClient
@@ -168,14 +169,15 @@ class QueueManager:
         )
         try:
             if source_kind == "paper":
+                arxiv = ArxivClient(
+                    self.settings.workdir,
+                    timeout=self.settings.arxiv_timeout,
+                    parallel_streams=self.settings.arxiv_parallel_streams,
+                    parallel_min_bytes=self.settings.arxiv_parallel_min_bytes,
+                )
                 pipeline = MaxReadPipeline(
                     store,
-                    ArxivClient(
-                        self.settings.workdir,
-                        timeout=self.settings.arxiv_timeout,
-                        parallel_streams=self.settings.arxiv_parallel_streams,
-                        parallel_min_bytes=self.settings.arxiv_parallel_min_bytes,
-                    ),
+                    arxiv,
                     feishu,
                     llm,
                     require_source=self.settings.require_source,
@@ -187,6 +189,11 @@ class QueueManager:
                     quality_repair_rounds=self.settings.quality_repair_rounds,
                     on_workflow_event=lambda event, detail="": store.transition_queue_job(
                         job_id, event, detail, expected_worker_id=worker_id
+                    ),
+                    document_client=DocumentSourceClient(
+                        self.settings.workdir,
+                        arxiv=arxiv,
+                        timeout=self.settings.arxiv_timeout,
                     ),
                 )
                 result = pipeline.process_ref(

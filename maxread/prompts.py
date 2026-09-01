@@ -171,10 +171,12 @@ PDF text excerpt（仅在 TeX source 不可用时启用）：
     figure_pairs = _figure_pair_text(bundle)
     figure_refs = _figure_reference_text(bundle)
     guidance = str(editorial_guidance or "").strip() or "- 无"
+    heading_prefix = f"[{metadata.paper_id}] " if metadata.source_kind == "arxiv" else ""
+    source_label = metadata.source_label or (f"arXiv {metadata.paper_id}" if metadata.source_kind == "arxiv" else "技术文档")
     raw_prompt = f"""请根据下面材料生成最终飞书文档 Markdown。
 
 文档结构必须尽量贴近这个形态：
-# [{metadata.paper_id}] {{中文标题}}：{{一句话定位}}
+# {heading_prefix}{{中文标题}}：{{一句话定位}}
 **{{英文标题}}**  
 原文：{metadata.abs_url}
 
@@ -185,6 +187,7 @@ PDF text excerpt（仅在 TeX source 不可用时启用）：
 - H1 不要重复英文题名的逐词翻译；中文标题可以是问题式或结论式，但副标题必须具体说明方法或核心发现。
 - 好例子：`# [1312.6184] 深层网络一定要很深吗？：用深层模型蒸馏浅层网络`
 - 坏例子：`# [1312.6184] 深网真的需要很深吗：用模型压缩训练浅层网络复刻深层函数`
+- 当前来源类型：{source_label}。非 arXiv 技术文档的 H1 不要伪造 arXiv 编号。
 
 ---
 
