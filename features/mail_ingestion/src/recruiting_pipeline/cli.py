@@ -205,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         if args.interval_days is not None:
             settings = replace(settings, interval_days=args.interval_days)
-        lock_path = settings.data_dir / "recruiting-pipeline.lock"
+        lock_path = settings.db_path.parent / "recruiting-pipeline.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+", encoding="utf-8") as handle:
             try:

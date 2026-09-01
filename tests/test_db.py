@@ -396,6 +396,25 @@ def test_store_retry_queue_job(tmp_path):
     store.close()
 
 
+def test_completion_updates_usage_even_when_watcher_notification_is_already_closed(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event(
+        "evt", "om", "oc", "p2p", "ou", "paper", "2608.30692", "url", status="failed"
+    )
+    queued = store.enqueue_job("paper", "2608.30692", "url", "evt", "om", "oc", "p2p", "ou", usage_id)
+    store.claim_next_queue_job(worker_id="worker")
+    store.conn.execute("update job_watchers set notified=1 where job_id=?", (queued["job_id"],))
+    store.conn.commit()
+
+    assert store.complete_queue_job(queued["job_id"], "https://tenant/doc", "Paper", worker_id="worker") is True
+
+    usage = store.list_usage_events(1)[0]
+    assert usage["status"] == "done"
+    assert usage["doc_url"] == "https://tenant/doc"
+    assert usage["title"] == "Paper"
+    store.close()
+
+
 def test_find_retryable_jobs_uses_topic_source_but_selects_latest_attempt(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     usage1 = store.add_usage_event("evt1", "om-root", "oc", "group", "ou", "paper", "2410.06205", "url", status="queued")

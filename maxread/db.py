@@ -1872,6 +1872,19 @@ class Store:
                 """,
                 (doc_url, effective_title, int(job_id)),
             )
+            self.conn.execute(
+                """
+                update usage_events
+                set status='done', doc_url=?,
+                    title=case when ? != '' then ? else title end,
+                    error='', updated_at=current_timestamp
+                where id in (
+                    select usage_event_id from job_watchers
+                    where job_id=? and usage_event_id != 0
+                )
+                """,
+                (doc_url, effective_title, effective_title, int(job_id)),
+            )
             if effective_title and not is_placeholder_project_title(effective_title, str(row["source_id"] or "")):
                 self._sync_paper_title_locked(str(row["source_id"] or ""), effective_title)
             self.conn.execute("insert into job_events (job_id, event_type, detail) values (?, ?, ?)", (int(job_id), "done", doc_url))

@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from mail_collector.parser import parse_message
 from recruiting_pipeline.config import PipelineSettings
+from recruiting_pipeline.docs_sync import DocsSync
 from recruiting_pipeline.cli import build_parser
 from recruiting_pipeline.base_sync import BaseSync
 from recruiting_pipeline.attachment_text import extract_attachment_text
@@ -27,6 +28,22 @@ from recruiting_pipeline.weekly_report import markdown_to_post, render_weekly_re
 
 
 class RecruitingPipelineTest(unittest.TestCase):
+    def test_docs_sync_accepts_cloud_attachment_outside_project_root(self) -> None:
+        settings = SimpleNamespace(
+            root=Path("/home/user/maxread"),
+            lark_cli="lark-cli",
+            feishu_as="bot",
+            command_env=lambda: {},
+        )
+        sync = DocsSync(settings)
+        calls = []
+        sync._call = lambda args: calls.append(args) or {}
+
+        sync.insert_file("doc", Path("/mnt/data/user/maxread/mail/resume.pdf"))
+
+        file_index = calls[0].index("--file")
+        self.assertEqual(calls[0][file_index + 1], "/mnt/data/user/maxread/mail/resume.pdf")
+
     def test_only_candidate_mail_materializes_full_document(self) -> None:
         self.assertTrue(_needs_material_document(CandidateFields(mail_type="candidate").normalized()))
         self.assertFalse(_needs_material_document(CandidateFields(mail_type="other").normalized()))

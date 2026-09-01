@@ -129,7 +129,14 @@ class DocsSync:
         return changed
 
     def insert_file(self, document_id: str, path: Path) -> None:
-        relative = path if not path.is_absolute() else path.relative_to(self.settings.root)
+        relative = path
+        if path.is_absolute():
+            try:
+                relative = path.relative_to(self.settings.root)
+            except ValueError:
+                # Cloud-backed mail artifacts intentionally live outside the
+                # code checkout. lark-cli accepts an absolute local path.
+                relative = path
         self._call([
             self.settings.lark_cli,
             "docs",
