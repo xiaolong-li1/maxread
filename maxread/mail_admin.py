@@ -181,6 +181,19 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     if db_path.exists():
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as connection:
             connection.row_factory = sqlite3.Row
+            rejection_by_thread: dict[str, dict[str, Any]] = {}
+            if connection.execute(
+                "select 1 from sqlite_master where type='table' and name='recruiting_outbound_drafts'"
+            ).fetchone():
+                for draft in connection.execute(
+                    "select thread_key,id,status,sent_at,updated_at from recruiting_outbound_drafts order by id desc"
+                ):
+                    rejection_by_thread.setdefault(str(draft["thread_key"]), {
+                        "id": int(draft["id"]),
+                        "status": str(draft["status"] or ""),
+                        "sent_at": str(draft["sent_at"] or ""),
+                        "updated_at": str(draft["updated_at"] or ""),
+                    })
             rows = connection.execute(
                 """
                 select thread_key,candidate_address,normalized_subject,fields_json,
@@ -193,6 +206,14 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
             ).fetchall()
             for row in rows:
                 item = _mail_record(row)
+                rejection = rejection_by_thread.get(item["thread_key"])
+                item["rejection"] = rejection
+                item["rejection_status"] = str(rejection.get("status") or "") if rejection else ""
+                item["rejection_supported"] = (
+                    item["mail_type"] == "candidate"
+                    and REJECTION_SOURCE_LABEL in item["source_accounts"]
+                    and (not item["has_replied"] or rejection is not None)
+                )
                 if mail_type != "all" and item["mail_type"] != mail_type:
                     continue
                 if screening and item["screening_status"] != screening:
@@ -243,16 +264,18 @@ def mail_rejection_context(thread_key: str) -> dict[str, Any]:
     with sqlite3.connect(db_path, timeout=10) as connection:
         connection.row_factory = sqlite3.Row
         _ensure_rejection_schema(connection)
-        row, fields, incoming = _rejection_candidate(connection, clean_key)
+        row, fields, incoming = _rejection_candidate(connection, clean_key, allow_replied=True)
         template = _rejection_template(connection)
         draft = connection.execute(
             """
             select * from recruiting_outbound_drafts
-            where thread_key=? and status in ('draft','delivery_unknown','sent_sync_pending')
+            where thread_key=? and status in ('draft','sending','delivery_unknown','sent_sync_pending','sent')
             order by id desc limit 1
             """,
             (clean_key,),
         ).fetchone()
+        if str(row["last_outgoing_time"] or "").strip() and draft is None:
+            raise ValueError("该候选线程已有其他回复，不能准备拒信")
     subject = str(draft["subject_text"] if draft else template["subject"])
     body = str(draft["body_text"] if draft else _render_rejection_template(template["body"], fields))
     outbound_enabled = _outbound_enabled()
@@ -507,6 +530,8 @@ def _ensure_rejection_schema(connection: sqlite3.Connection) -> None:
 def _rejection_candidate(
     connection: sqlite3.Connection,
     thread_key: str,
+    *,
+    allow_replied: bool = False,
 ) -> tuple[sqlite3.Row, dict[str, Any], sqlite3.Row | None]:
     row = connection.execute(
         "select * from recruiting_threads where thread_key=? and status<>'inactive'",
@@ -526,7 +551,7 @@ def _rejection_candidate(
     recipient = str(row["candidate_address"] or "").strip().casefold()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient):
         raise ValueError("候选人收件地址无效")
-    if str(row["last_outgoing_time"] or "").strip():
+    if not allow_replied and str(row["last_outgoing_time"] or "").strip():
         raise ValueError("该候选线程已经有我方回复，不能自动准备拒信")
     incoming = connection.execute(
         """
@@ -836,7 +861,7 @@ def _append_rejection_to_doc(document_id: str, draft: sqlite3.Row) -> None:
     fetched = _last_cli_json(fetch)
     content = str(fetched.get("data", {}).get("document", {}).get("content") or "")
     marker = str(draft["message_id"])
-    if marker in content:
+    if _document_has_message_id(content, marker):
         return
     sent_at = _parse_datetime(str(draft["sent_at"] or "")) or datetime.now(ZoneInfo("Asia/Shanghai"))
     quoted_body = "\n".join("> " + line if line else ">" for line in str(draft["body_text"]).splitlines())
@@ -860,6 +885,12 @@ def _append_rejection_to_doc(document_id: str, draft: sqlite3.Row) -> None:
         check=False,
     )
     _last_cli_json(updated)
+
+
+def _document_has_message_id(content: str, message_id: str) -> bool:
+    marker = str(message_id or "").strip()
+    normalized = marker.removeprefix("<").removesuffix(">")
+    return bool(marker) and (marker in content or normalized in content)
 
 
 def _last_cli_json(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:

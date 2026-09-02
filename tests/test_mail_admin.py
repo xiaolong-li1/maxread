@@ -317,6 +317,9 @@ def test_rejection_template_and_draft_are_saved_without_sending(tmp_path, monkey
     assert first["draft"]["id"] == second["draft"]["id"]
     assert second["draft"]["subject"] == "修改主题"
     assert sent == []
+    records = mail_admin.mail_admin_records("mail_type=candidate&days=0&limit=10")
+    candidate = next(item for item in records["items"] if item["thread_key"] == "c" * 32)
+    assert candidate["rejection_status"] == "draft"
     with sqlite3.connect(db) as connection:
         assert connection.execute("select count(*) from recruiting_outbound_drafts").fetchone()[0] == 1
 
@@ -351,7 +354,16 @@ def test_rejection_send_is_server_gated_and_cannot_repeat(tmp_path, monkeypatch)
         thread = connection.execute("select screening_status,last_outgoing_time from recruiting_threads where thread_key=?", ("c" * 32,)).fetchone()
         action = json.loads(connection.execute("select new_json from recruiting_admin_actions").fetchone()[0])
         assert thread[0] == "未通过" and thread[1]
-        assert action["has_replied"] is True
+    assert action["has_replied"] is True
+    context = mail_admin.mail_rejection_context("c" * 32)
+    assert context["draft"]["status"] == "sent_sync_pending"
+
+
+def test_document_message_id_matches_feishu_without_angle_brackets():
+    marker = "<message-id@ziplab.co>"
+    assert mail_admin._document_has_message_id("- Message-ID：message-id@ziplab.co", marker)
+    assert mail_admin._document_has_message_id("- Message-ID：<message-id@ziplab.co>", marker)
+    assert not mail_admin._document_has_message_id("其他内容", marker)
 
 
 def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
@@ -599,6 +611,8 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "saveRejectionDraft()" in html
     assert "saveRejectionTemplate()" in html
     assert "sendRejection()" in html
+    assert "拒信已发送" in html
+    assert "查看拒信记录" in html
 
 
 def test_nginx_post_allowlist_includes_rejection_actions():
