@@ -199,6 +199,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     mail_type = str(query.get("mail_type", ["candidate"])[0] or "candidate").strip()
     screening = str(query.get("screening", [""])[0] or "").strip()
     project = str(query.get("project", [""])[0] or "").strip()
+    account = str(query.get("account", [""])[0] or "").strip().casefold()
     reply = str(query.get("reply", [""])[0] or "").strip().lower()
     tier = str(query.get("tier", [""])[0] or "").strip().lower()
     rank_percentile = _bounded_int(query.get("rank_percentile", ["0"])[0], 0, 0, 100)
@@ -213,6 +214,9 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
         raise ValueError("不支持的院校层级")
     if reply not in {"", "replied", "unreplied"}:
         raise ValueError("不支持的回复状态")
+    account_labels = {"zip-lab": "ZIP Lab", "bohan": "Bohan"}
+    if account and account not in account_labels:
+        raise ValueError("不支持的来源邮箱")
     cutoff = datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=days) if days else None
     db_path = _mail_db_path(_mail_root())
     records: list[dict[str, Any]] = []
@@ -264,6 +268,8 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
                     continue
                 if project and project not in item["projects"]:
                     continue
+                if account and account_labels[account] not in item["source_accounts"]:
+                    continue
                 if reply == "replied" and not item["has_replied"]:
                     continue
                 if reply == "unreplied" and item["has_replied"]:
@@ -296,6 +302,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
             "screening_statuses": list(SCREENING_STATUSES),
             "interview_results": list(INTERVIEW_RESULTS),
             "projects": ["MLSys", "Agentic Infrastructure", "Kernel Efficiency", "World Model"],
+            "accounts": account_labels,
         },
     }
 

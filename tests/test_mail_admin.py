@@ -324,6 +324,10 @@ def test_rejection_context_is_zip_lab_only_and_uses_editable_default(tmp_path, m
     assert supported["rejection_supported"] is True
     with pytest.raises(ValueError, match="只支持 ZIP Lab"):
         mail_admin.mail_rejection_context("d" * 32)
+    assert mail_admin.mail_admin_records("mail_type=candidate&account=zip-lab&days=0&limit=10")["total"] == 1
+    assert mail_admin.mail_admin_records("mail_type=candidate&account=bohan&days=0&limit=10")["total"] == 1
+    with pytest.raises(ValueError, match="来源邮箱"):
+        mail_admin.mail_admin_records("mail_type=candidate&account=unknown&days=0&limit=10")
 
 
 def test_rejection_template_and_draft_are_saved_without_sending(tmp_path, monkeypatch):
@@ -714,6 +718,10 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "<th>筛选状态</th>" not in html
     assert "<th>面试</th>" not in html
     assert 'id="record-reply"' in html
+    assert 'id="record-account"' in html
+    assert 'id="record-type"' not in html
+    assert "mail_type:'candidate'" in html
+    assert "account:$('record-account').value" in html
     assert '<option value="">回复状态</option>' in html
     assert "reply:$('record-reply').value" in html
     assert "updateRecord(" not in html

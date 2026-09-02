@@ -154,7 +154,7 @@
           <div class="workspace-head"><div><h2>候选人与邮件</h2><div class="muted">按回复状态、院校、方向和排名筛选；点击姓名查看完整材料</div></div><div class="inline"><span class="muted" id="record-count"></span><button id="prepare-rejection-batch" disabled onclick="createRejectionBatch()">批量准备拒信</button></div></div>
           <div class="record-toolbar">
             <input id="record-search" type="search" placeholder="搜索姓名、学校、邮箱、方向" oninput="queueRecordLoad()" />
-            <select id="record-type" onchange="resetAndLoadRecords()"><option value="candidate">候选人来信</option><option value="other">其他邮件</option><option value="all">全部邮件</option></select>
+            <select id="record-account" onchange="resetAndLoadRecords()"><option value="">全部邮箱</option><option value="zip-lab">ZIP Lab</option><option value="bohan">Bohan</option></select>
             <select id="record-reply" onchange="resetAndLoadRecords()"><option value="">回复状态</option><option value="replied">已回复</option><option value="unreplied">未回复</option></select>
             <select id="record-project" onchange="resetAndLoadRecords()"><option value="">全部方向</option></select>
             <select id="record-tier" onchange="resetAndLoadRecords()"><option value="">全部院校</option><option value="c9">C9</option><option value="985">985</option></select>
@@ -252,7 +252,7 @@
       $('errors').innerHTML=(data.errors||[]).map(e=>`<div class="error-row"><strong>${Number(e.count||0)}</strong><span>${esc(e.error||'未知错误')}</span><span class="time muted">${esc(fmt(e.last_seen))}</span></div>`).join('')||'<div class="empty">没有近期错误</div>';
     }
     async function loadRecords(){
-      const params=new URLSearchParams({q:$('record-search').value.trim(),mail_type:$('record-type').value,reply:$('record-reply').value,project:$('record-project').value,tier:$('record-tier').value,rank_percentile:$('record-rank').value,days:$('record-days').value,offset:String(recordState.offset),limit:String(recordState.limit)});
+      const params=new URLSearchParams({q:$('record-search').value.trim(),mail_type:'candidate',account:$('record-account').value,reply:$('record-reply').value,project:$('record-project').value,tier:$('record-tier').value,rank_percentile:$('record-rank').value,days:$('record-days').value,offset:String(recordState.offset),limit:String(recordState.limit)});
       try{
         const data=await api(`api/admin/mail/records?${params}`);recordState.items=data.items||[];recordState.total=Number(data.total||0);recordState.filters=data.filters||recordState.filters||{};
         const currentProject=$('record-project').value;
