@@ -445,6 +445,10 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="admin-password"' in html
     assert "loginMailAdmin(event)" in html
     assert "logoutMailAdmin()" in html
+    assert 'id="record-page-input"' in html
+    assert 'id="record-jump"' in html
+    assert "jumpRecordPage()" in html
+    assert "Math.ceil(recordState.total/recordState.limit)" in html
 
 
 def test_mail_admin_sync_status_exposes_last_base_pull(tmp_path):
