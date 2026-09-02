@@ -259,6 +259,21 @@ def test_rank_filter_accepts_any_qualifying_rank_and_ignores_gpa_ratios():
     assert mail_admin._rank_percentiles({"academic_display": "GPA 4.43/5.00"}) == []
 
 
+def test_rank_filter_accepts_multiple_and_fullwidth_formats():
+    assert mail_admin._rank_percentiles({
+        "rank": "硕士第1/142；本科第1/114",
+        "rank_evidence": "",
+    }) == [0.7042, 0.8772]
+    assert mail_admin._rank_percentiles({
+        "rank": "Top 5% 专业前10%｜预计推免前3%",
+        "rank_evidence": "",
+    }) == [3.0, 5.0, 10.0]
+    assert mail_admin._rank_percentiles({
+        "rank": "硕士第1／142；Top ５％；第1名（共142人）",
+        "rank_evidence": "",
+    }) == [0.7042, 5.0]
+
+
 def test_mail_record_update_commits_local_outbox_then_base(tmp_path, monkeypatch):
     root, db = _record_fixture(tmp_path)
     monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))

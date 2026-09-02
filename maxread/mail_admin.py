@@ -6,6 +6,7 @@ import re
 import sqlite3
 import subprocess
 import threading
+import unicodedata
 import uuid
 import urllib.error
 import urllib.request
@@ -611,6 +612,8 @@ def _rank_percentiles(fields: dict[str, Any]) -> list[float]:
         str(fields.get("rank_evidence") or ""),
     ]
     explicit_texts = rank_texts + [str(fields.get("academic_display") or "")]
+    explicit_texts = [unicodedata.normalize("NFKC", text) for text in explicit_texts]
+    rank_texts = [unicodedata.normalize("NFKC", text) for text in rank_texts]
     for text in explicit_texts:
         for match in re.finditer(
             r"(?i)(?:top|前|百分位|排名(?:为|约)?)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*%",
@@ -628,7 +631,7 @@ def _rank_percentiles(fields: dict[str, Any]) -> list[float]:
             if 0 < position <= cohort:
                 values.append(position / cohort * 100)
         for match in re.finditer(
-            r"(?:排名|第)\s*(\d+)\s*名?\s*(?:，|,|；|;)?\s*(?:共|of)?\s*(\d+)\s*(?:人|名)?",
+            r"(?:排名(?:为|约)?|第)\s*(\d+)\s*(?:名|位)?\s*(?:，|,|；|;)?\s*\(?\s*(?:共|of)\s*(\d+)\s*(?:人|名|位)?\s*\)?",
             text,
             flags=re.I,
         ):
