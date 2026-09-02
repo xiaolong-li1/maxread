@@ -148,7 +148,8 @@ IMAP_PASSWORD=app-password-or-mailbox-password
 每轮成功后刷新“最近一周新增”视图的 7 天滚动边界。
 
 拒信功能仅适用于 `来源邮箱` 含 `ZIP Lab` 且尚无我方回复的线程。网页先保存
-可编辑草稿；真实发送同时要求管理员会话、完整收件地址二次确认、Outlook
+可编辑草稿；AI 依据结构化申请目的在实习申请、硕博招生和其他咨询三类模板中
+匹配并做有限改写，模型只能产出草稿。真实发送同时要求管理员会话、完整收件地址二次确认、Outlook
 `SMTP.Send` OAuth 授权和 `RECRUITING_OUTBOUND_ENABLED=1`。SMTP 接受邮件后，
 草稿立即锁定；Base、SQLite 或材料 Docx 同步失败只补偿同步，不自动重发邮件。
 首次授权使用：
@@ -160,7 +161,8 @@ IMAP_PASSWORD=app-password-or-mailbox-password
 ```
 
 授权命令仍会把真实发送总开关写为 `0`，必须另行明确开启。Bohan 邮箱不参与
-自动拒信发送。
+自动拒信发送。发送成功在同一 SQLite 事务中写入 `筛选状态=未通过` 和已回复
+时间，网页分别显示为“已拒绝”和“已回复”，再通过 outbox 同步 Base。
 
 5090 的持久化服务模板位于 `deploy/recruiting-pipeline.service`。将 `RECRUITING_SCAN_INTERVAL_DAYS`、Base token/table ID、模型 API 基址和材料文档父文件夹写入机器上的非 Git 配置后，再用 `systemctl --user enable --now recruiting-pipeline.service` 启动。
 

@@ -25,6 +25,7 @@ from .mail_admin import (
     mail_admin_records,
     mail_admin_status,
     mail_rejection_context,
+    generate_mail_rejection_draft,
     save_mail_rejection_draft,
     save_mail_rejection_template,
     send_mail_rejection,
@@ -509,7 +510,15 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._json_response(save_mail_rejection_template(
                     str(payload.get("subject") or ""),
                     str(payload.get("body") or ""),
+                    str(payload.get("application_type") or "internship"),
                 ))
+            except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/rejection-generate":
+            payload = self._read_json()
+            try:
+                self._json_response(generate_mail_rejection_draft(str(payload.get("thread_key") or "")))
             except (ValueError, RuntimeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -520,6 +529,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                     str(payload.get("thread_key") or ""),
                     str(payload.get("subject") or ""),
                     str(payload.get("body") or ""),
+                    str(payload.get("application_type") or "general"),
+                    str(payload.get("generation_source") or "manual"),
                 ))
             except (ValueError, RuntimeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))

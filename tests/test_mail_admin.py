@@ -293,7 +293,8 @@ def test_rejection_context_is_zip_lab_only_and_uses_editable_default(tmp_path, m
 
     assert context["candidate"]["recipient"] == "15836992650@163.com"
     assert context["sender"] == "zip.lab@outlook.com"
-    assert "感谢你关注浙江大学ZIP Lab" in context["body"]
+    assert context["application_type"] == "general"
+    assert "感谢你关注浙江大学 ZIP Lab" in context["body"]
     assert context["outbound_enabled"] is False
     records = mail_admin.mail_admin_records("mail_type=candidate&days=0&limit=10")
     supported = next(item for item in records["items"] if item["thread_key"] == "c" * 32)
@@ -308,7 +309,7 @@ def test_rejection_template_and_draft_are_saved_without_sending(tmp_path, monkey
     sent = []
     monkeypatch.setattr(mail_admin, "_smtp_send_zip_lab", lambda _draft: sent.append(True))
 
-    mail_admin.save_mail_rejection_template("自定义主题", "你好 {name}，这是自定义模板。")
+    mail_admin.save_mail_rejection_template("自定义主题", "你好 {name}，这是自定义模板。", "general")
     context = mail_admin.mail_rejection_context("c" * 32)
     first = mail_admin.save_mail_rejection_draft("c" * 32, context["subject"], context["body"])
     second = mail_admin.save_mail_rejection_draft("c" * 32, "修改主题", "修改正文")
@@ -320,6 +321,7 @@ def test_rejection_template_and_draft_are_saved_without_sending(tmp_path, monkey
     records = mail_admin.mail_admin_records("mail_type=candidate&days=0&limit=10")
     candidate = next(item for item in records["items"] if item["thread_key"] == "c" * 32)
     assert candidate["rejection_status"] == "draft"
+    assert candidate["has_replied"] is False
     with sqlite3.connect(db) as connection:
         assert connection.execute("select count(*) from recruiting_outbound_drafts").fetchone()[0] == 1
 
@@ -357,6 +359,47 @@ def test_rejection_send_is_server_gated_and_cannot_repeat(tmp_path, monkeypatch)
     assert action["has_replied"] is True
     context = mail_admin.mail_rejection_context("c" * 32)
     assert context["draft"]["status"] == "sent_sync_pending"
+    records = mail_admin.mail_admin_records("mail_type=candidate&days=0&limit=10")
+    candidate = next(item for item in records["items"] if item["thread_key"] == "c" * 32)
+    assert candidate["screening_label"] == "已拒绝"
+    assert candidate["has_replied"] is True
+
+
+def test_ai_rejection_draft_matches_graduate_template(tmp_path, monkeypatch):
+    root, _db = _rejection_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.setattr(mail_admin, "_call_rejection_ai", lambda fields, subject, templates: {
+        "application_type": "graduate",
+        "subject": "硕博招生回复",
+        "body": "同学你好，感谢你咨询硕博招生，暂时无法进入后续交流。",
+    })
+
+    result = mail_admin.generate_mail_rejection_draft("c" * 32)
+
+    assert result["generation"]["source"] == "ai"
+    assert result["draft"]["application_type"] == "graduate"
+    assert result["draft"]["generation_source"] == "ai"
+    assert "硕博招生" in result["draft"]["body"]
+
+
+def test_rejection_type_fallback_distinguishes_internship_and_graduate():
+    assert mail_admin._infer_rejection_type({"purpose_summary": "申请科研实习"}, "实习生申请") == "internship"
+    assert mail_admin._infer_rejection_type({"purpose_summary": "咨询推免直博名额"}, "硕士申请") == "graduate"
+
+
+def test_ai_rejection_failure_falls_back_to_matching_template(monkeypatch):
+    monkeypatch.setattr(mail_admin, "_call_rejection_ai", lambda *_args: (_ for _ in ()).throw(RuntimeError("503")))
+    templates = {kind: dict(value) for kind, value in mail_admin.REJECTION_DEFAULT_TEMPLATES.items()}
+
+    result = mail_admin._generate_rejection_copy(
+        {"name": "同学", "purpose_summary": "申请科研实习"},
+        "实习生申请",
+        templates,
+    )
+
+    assert result["application_type"] == "internship"
+    assert result["source"] == "template"
+    assert "实习生招生活动" in result["body"]
 
 
 def test_document_message_id_matches_feishu_without_angle_brackets():
@@ -611,8 +654,12 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "saveRejectionDraft()" in html
     assert "saveRejectionTemplate()" in html
     assert "sendRejection()" in html
-    assert "拒信已发送" in html
+    assert "已回复并标记为已拒绝" in html
     assert "查看拒信记录" in html
+    assert "拒信已发送" not in html
+    assert 'id="rejection-type"' in html
+    assert 'id="generate-rejection"' in html
+    assert "generateRejectionDraft()" in html
 
 
 def test_nginx_post_allowlist_includes_rejection_actions():
@@ -620,6 +667,7 @@ def test_nginx_post_allowlist_includes_rejection_actions():
     assert "rejection-template" in config
     assert "rejection-draft" in config
     assert "rejection-send" in config
+    assert "rejection-generate" in config
 
 
 def test_mail_admin_sync_status_exposes_last_base_pull(tmp_path):

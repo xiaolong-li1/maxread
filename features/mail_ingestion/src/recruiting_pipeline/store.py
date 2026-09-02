@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS recruiting_outbound_drafts (
     recipient TEXT NOT NULL,
     subject_text TEXT NOT NULL,
     body_text TEXT NOT NULL,
+    application_type TEXT NOT NULL DEFAULT 'general',
+    generation_source TEXT NOT NULL DEFAULT 'manual',
     message_id TEXT NOT NULL,
     in_reply_to TEXT NOT NULL DEFAULT '',
     references_text TEXT NOT NULL DEFAULT '',

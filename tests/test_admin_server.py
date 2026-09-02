@@ -237,8 +237,9 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
         lark_cli="lark-cli",
     )
     monkeypatch.setattr(admin_server, "mail_rejection_context", lambda key: {"ok": True, "thread_key": key})
-    monkeypatch.setattr(admin_server, "save_mail_rejection_draft", lambda key, subject, body: {"ok": True, "thread_key": key, "subject": subject, "body": body})
-    monkeypatch.setattr(admin_server, "save_mail_rejection_template", lambda subject, body: {"ok": True, "subject": subject, "body": body})
+    monkeypatch.setattr(admin_server, "generate_mail_rejection_draft", lambda key: {"ok": True, "thread_key": key, "source": "ai"})
+    monkeypatch.setattr(admin_server, "save_mail_rejection_draft", lambda key, subject, body, application_type, generation_source: {"ok": True, "thread_key": key, "subject": subject, "body": body})
+    monkeypatch.setattr(admin_server, "save_mail_rejection_template", lambda subject, body, application_type: {"ok": True, "subject": subject, "body": body})
     monkeypatch.setattr(admin_server, "send_mail_rejection", lambda draft_id, confirmation: {"ok": True, "draft_id": draft_id, "confirmation": confirmation})
     server = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -306,6 +307,14 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
             cookie,
         )
         assert response.status == 200 and body["subject"] == "主题"
+
+        response, body = request(
+            "POST",
+            "/api/admin/mail/rejection-generate",
+            {"thread_key": "a" * 32},
+            cookie,
+        )
+        assert response.status == 200 and body["source"] == "ai"
 
         response, body = request(
             "POST",

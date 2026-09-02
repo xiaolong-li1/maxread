@@ -15,6 +15,7 @@ from .mail_admin import (
     _mail_root,
     mail_admin_records,
     mail_rejection_context,
+    generate_mail_rejection_draft,
     mail_admin_status,
     reconcile_mail_admin_actions,
     reconcile_mail_rejections,
@@ -85,13 +86,19 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
                 self._json(save_mail_rejection_template(
                     str(payload.get("subject") or ""),
                     str(payload.get("body") or ""),
+                    str(payload.get("application_type") or "internship"),
                 ))
+                return
+            if parsed.path == "/rejection-generate":
+                self._json(generate_mail_rejection_draft(str(payload.get("thread_key") or "")))
                 return
             if parsed.path == "/rejection-draft":
                 self._json(save_mail_rejection_draft(
                     str(payload.get("thread_key") or ""),
                     str(payload.get("subject") or ""),
                     str(payload.get("body") or ""),
+                    str(payload.get("application_type") or "general"),
+                    str(payload.get("generation_source") or "manual"),
                 ))
                 return
             if parsed.path == "/rejection-send":
