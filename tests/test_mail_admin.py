@@ -279,3 +279,20 @@ def test_mail_admin_page_contains_candidate_workbench_controls():
     assert "api/admin/mail/records" in html
     assert "api/admin/mail/record" in html
     assert "最近一周新增候选人" not in html  # links arrive only after authenticated API response
+
+
+def test_mail_admin_page_uses_compact_master_detail_layout():
+    html = mail_admin.MAIL_ADMIN_HTML
+
+    assert 'data-view="candidates"' in html
+    assert 'data-view="operations"' in html
+    assert 'id="candidate-panel"' in html
+    assert 'id="operations-panel"' in html
+    assert 'class="record-table-wrap"' in html
+    assert "max-height:calc(100dvh - 344px)" in html
+    assert "recordState={items:[],offset:0,limit:20" in html
+    assert "点击姓名查看完整材料" in html
+    assert "<th>摘要</th>" not in html
+    assert 'class="ops-details wide"' in html
+    assert "height:100dvh" in html
+    assert "margin:0 0 0 auto" in html
