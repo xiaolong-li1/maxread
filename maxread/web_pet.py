@@ -91,7 +91,7 @@ class WebPetAgent:
         if re.search(r"自定义分类|新建分类|创建分类", self.request_text, re.I):
             if not self.scope.feishu_open_id:
                 return "可以。先点右上角“游客”绑定飞书账号；绑定后，项目区的分类筛选旁会出现“新建分类”。", progress
-            return "可以。点项目区分类筛选旁的“新建分类”，输入名称并创建；完成论文可以在卡片底部手动移入该分类，也可以让“自动归类所选”从你的自定义分类中选择。", progress
+            return "可以。点项目区分类筛选旁的“新建分类”，输入名称并创建；完成论文可以在卡片底部手动移入该分类，也可以让“自动归类所选”从你的自定义分类中选择。自定义分类标题旁有删除按钮，删除后文章会回到“已完成未分类”，不会删除文档。", progress
         if re.search(r"按钮|页面怎么用|项目台怎么用|一键整理|分类折叠", self.request_text, re.I):
             return button_guide_answer(), progress
         target_id = int(job_id or 0)
@@ -394,6 +394,7 @@ def progress_payload(settings, store: Store, identity) -> dict:
     payload.sort(key=lambda item: 0 if item.get("favorite") else 1)
     payload = payload[:100]
     active = next((item for item in payload if item["status"] in {"queued", "running"}), None)
+    custom_categories = store.web_project_categories(identity)
     return {
         "active": active,
         "recent": payload,
@@ -402,8 +403,9 @@ def progress_payload(settings, store: Store, identity) -> dict:
             "进行中",
             UNCLASSIFIED_CATEGORY,
             *PROJECT_CATEGORIES,
-            *store.web_project_categories(identity),
+            *custom_categories,
         ],
+        "custom_categories": custom_categories,
     }
 
 

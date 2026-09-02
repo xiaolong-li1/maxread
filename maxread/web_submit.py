@@ -257,6 +257,17 @@ def create_web_project_category(store: Store, identity, name: str) -> dict:
     return {"ok": True, **store.create_web_project_category(identity, clean_name)}
 
 
+def delete_web_project_category(store: Store, identity, name: str) -> dict:
+    if not str(identity.get("feishu_open_id") or "").strip():
+        raise ValueError("绑定飞书账号后才能删除分类")
+    clean_name = " ".join(str(name or "").split()).strip()
+    if not clean_name:
+        raise ValueError("分类名称不能为空")
+    if clean_name in RESERVED_PROJECT_CATEGORIES:
+        raise ValueError("系统分类不能删除")
+    return {"ok": True, **store.delete_web_project_category(identity, clean_name)}
+
+
 def organize_web_projects(
     settings,
     store: Store,

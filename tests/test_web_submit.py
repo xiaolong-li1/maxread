@@ -10,6 +10,7 @@ from maxread.web_submit import (
     _parse_project_assignments,
     claim_binding_code,
     create_web_project_category,
+    delete_web_project_category,
     issue_binding_code,
     new_web_identity,
     organize_web_projects,
@@ -538,6 +539,45 @@ def test_ai_organizer_can_use_but_not_invent_custom_categories():
     assert rejected == {}
 
 
+def test_deleting_custom_category_moves_projects_to_unclassified(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    settings = SimpleNamespace(queue_workers=3, openai_api_key="", workdir=tmp_path / "work")
+    submit_web_papers(settings, store, guest, "2608.25927 2608.27456")
+    identity = claim_binding_code(store, issue_binding_code(store, guest)["code"], "ou_delete_category")
+    store.conn.execute(
+        "update queue_jobs set status='done', workflow_state='completed', stage='done' where source_id in (?, ?)",
+        ("2608.25927", "2608.27456"),
+    )
+    store.conn.commit()
+    create_web_project_category(store, identity, "位置编码")
+    update_web_project(store, identity, "2608.25927", "category", "位置编码")
+    update_web_project(store, identity, "2608.27456", "category", "位置编码")
+    update_web_project(store, identity, "2608.25927", "favorite", True)
+
+    result = delete_web_project_category(store, identity, "位置编码")
+    payload = progress_payload(settings, store, identity)
+    projects = {item["source_id"]: item for item in payload["recent"]}
+
+    assert result == {"ok": True, "category": "位置编码", "deleted": True, "moved": 2}
+    assert "位置编码" not in payload["custom_categories"]
+    assert projects["2608.25927"]["category"] == UNCLASSIFIED_CATEGORY
+    assert projects["2608.27456"]["category"] == UNCLASSIFIED_CATEGORY
+    assert projects["2608.25927"]["favorite"] is True
+    store.close()
+
+
+def test_guest_and_system_categories_cannot_be_deleted(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    _token, guest = new_web_identity(store)
+    with pytest.raises(ValueError, match="绑定飞书账号"):
+        delete_web_project_category(store, guest, "位置编码")
+    identity = claim_binding_code(store, issue_binding_code(store, guest)["code"], "ou_delete_category")
+    with pytest.raises(ValueError, match="系统分类"):
+        delete_web_project_category(store, identity, "机器人")
+    store.close()
+
+
 def test_guest_cannot_create_custom_category(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     _token, guest = new_web_identity(store)
@@ -848,6 +888,9 @@ def test_web_submit_page_is_compact_and_supports_binding():
     assert 'data-guide="custom-category"' in WEB_SUBMIT_HTML
     assert "categoryButton.disabled = !state.me.bound" in WEB_SUBMIT_HTML
     assert "自动整理也不会擅自创建新分类" in WEB_SUBMIT_HTML
+    assert "deleteCustomCategory" in WEB_SUBMIT_HTML
+    assert "文章移回已完成未分类" in WEB_SUBMIT_HTML
+    assert "custom_categories" in WEB_SUBMIT_HTML
     assert "自动归类所选" in WEB_SUBMIT_HTML
     assert "toggleProjectSelection" in WEB_SUBMIT_HTML
     assert "toggleAllUnclassified" in WEB_SUBMIT_HTML

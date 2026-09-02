@@ -981,6 +981,31 @@ class Store:
         self.conn.commit()
         return {"category": clean_name, "created": bool(self.conn.execute("select changes()").fetchone()[0])}
 
+    def delete_web_project_category(self, identity, name: str) -> dict:
+        owner_key = self.web_conversation_owner(identity)
+        clean_name = str(name or "").strip()[:30]
+        category = self.conn.execute(
+            "select name from web_project_categories where owner_key=? and name=?",
+            (owner_key, clean_name),
+        ).fetchone()
+        if category is None:
+            raise ValueError("自定义分类不存在")
+        with self.conn:
+            cursor = self.conn.execute(
+                """
+                update web_project_preferences
+                set category='', category_source='', updated_at=current_timestamp
+                where owner_key=? and category=?
+                """,
+                (owner_key, clean_name),
+            )
+            moved = max(0, int(cursor.rowcount or 0))
+            self.conn.execute(
+                "delete from web_project_categories where owner_key=? and name=?",
+                (owner_key, clean_name),
+            )
+        return {"category": clean_name, "deleted": True, "moved": moved}
+
     def set_web_project_auto_categories(self, identity, assignments: dict[str, str]) -> int:
         owner_key = self.web_conversation_owner(identity)
         rows = []

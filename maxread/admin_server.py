@@ -33,6 +33,7 @@ from .web_submit import (
     WEB_SESSION_COOKIE,
     WEB_SUBMIT_HTML,
     create_web_project_category,
+    delete_web_project_category,
     issue_binding_code,
     new_web_identity,
     organize_web_projects,
@@ -413,10 +414,18 @@ class AdminHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             try:
                 self._web_json(
-                    lambda store, identity: create_web_project_category(
-                        store,
-                        identity,
-                        str(payload.get("name") or ""),
+                    lambda store, identity: (
+                        delete_web_project_category(
+                            store,
+                            identity,
+                            str(payload.get("name") or ""),
+                        )
+                        if str(payload.get("action") or "create").strip().lower() == "delete"
+                        else create_web_project_category(
+                            store,
+                            identity,
+                            str(payload.get("name") or ""),
+                        )
                     )
                 )
             except ValueError as exc:

@@ -217,6 +217,18 @@
     .category-chevron { width: 16px; height: 16px; transition: transform 0.18s ease; }
     .category-heading.collapsed .category-chevron { transform: rotate(-90deg); }
     .category-count { color: #9aa19a; font-variant-numeric: tabular-nums; }
+    .category-delete-button {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      color: var(--muted);
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 6px;
+    }
+    .category-delete-button:hover { color: var(--red); background: var(--red-soft); border-color: #efd2ce; }
     .category-list { display: grid; gap: 12px; }
     .category-list[hidden] { display: none; }
     .unclassified-toolbar { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
@@ -548,6 +560,7 @@
       category: 'all',
       query: '',
       categories: [],
+      customCategories: [],
       poll: null,
       adminAuthenticated: false,
       actAs: sessionStorage.getItem('maxreadActAs') || '',
@@ -727,7 +740,10 @@
           const toolbar = category === '已完成未分类' && state.me?.bound
             ? `<div class="unclassified-toolbar" data-guide="organize"><label class="select-all"><input type="checkbox" ${projects.length && selectedCount === projects.length ? 'checked' : ''} onchange="toggleAllUnclassified(this.checked)" />全选</label><button class="organize-button" ${selectedCount ? '' : 'disabled'} onclick="organizeSelectedProjects()" title="只整理勾选的未分类项目"><span class="icon"><svg viewBox="0 0 24 24"><path d="m12 3-1.9 4.1L6 9l4.1 1.9L12 15l1.9-4.1L18 9l-4.1-1.9Z"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4"/></svg></span><span id="organize-label">自动归类所选${selectedCount ? ` (${selectedCount})` : ''}</span></button></div>`
             : '';
-          return `<section class="category-group" data-category="${esc(category)}"><div class="category-head-row"><button class="category-heading ${collapsed ? 'collapsed' : ''}" data-guide="category-heading" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button>${toolbar}</div><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
+          const deleteCategory = state.customCategories.includes(category)
+            ? `<button class="category-delete-button" aria-label="删除分类 ${esc(category)}" title="删除分类，文章移回已完成未分类" onclick="deleteCustomCategory(${esc(JSON.stringify(category))}, ${projects.length})">${icon('trash')}</button>`
+            : '';
+          return `<section class="category-group" data-category="${esc(category)}"><div class="category-head-row"><button class="category-heading ${collapsed ? 'collapsed' : ''}" data-guide="category-heading" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button>${deleteCategory}${toolbar}</div><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
         }).join('');
       }
       if (state.petProject) {
@@ -748,6 +764,7 @@
         const unclassifiedIds = new Set(state.projects.filter(item => item.category === '已完成未分类').map(item => item.source_id));
         state.selectedProjects = new Set([...state.selectedProjects].filter(sourceId => unclassifiedIds.has(sourceId)));
         state.categories = result.categories || [];
+        state.customCategories = result.custom_categories || [];
         state.service = result.service || null;
         const categoryFilter = $('category-filter');
         const currentCategory = state.category;
@@ -905,7 +922,7 @@
       button.disabled = true;
       $('category-error').textContent = '';
       try {
-        const result = await api('/api/web/categories', {method: 'POST', body: JSON.stringify({name})});
+        const result = await api('/api/web/categories', {method: 'POST', body: JSON.stringify({action: 'create', name})});
         closeCategoryDialog();
         toast(result.created ? `已创建“${result.category}”` : `“${result.category}”已经存在`);
         await refreshProjects();
@@ -913,6 +930,21 @@
         $('category-error').textContent = error.message;
       } finally {
         button.disabled = false;
+      }
+    }
+
+    async function deleteCustomCategory(name, projectCount) {
+      const countText = projectCount ? `其中 ${projectCount} 篇文章会移到“已完成未分类”。` : '';
+      if (!window.confirm(`删除自定义分类“${name}”？${countText}文档和收藏不会删除。`)) return;
+      try {
+        const result = await api('/api/web/categories', {method: 'POST', body: JSON.stringify({action: 'delete', name})});
+        state.collapsedCategories.delete(name);
+        localStorage.setItem('maxreadCollapsedCategories', JSON.stringify([...state.collapsedCategories]));
+        if (state.category === name) state.category = 'all';
+        toast(`已删除“${name}”，${Number(result.moved || 0)} 篇文章移回未分类`);
+        await refreshProjects();
+      } catch (error) {
+        toast(error.message);
       }
     }
 
@@ -1017,7 +1049,7 @@
       {
         selector: '[data-guide="custom-category"]',
         title: '建立自己的论文分类',
-        text: '绑定飞书后，点“新建分类”输入名称，例如“位置编码”或“量化 Kernel”。分类只属于你的账号；手动分类不会被自动整理覆盖，自动整理也不会擅自创建新分类。',
+        text: '绑定飞书后，点“新建分类”输入名称，例如“位置编码”或“量化 Kernel”。分类只属于你的账号；手动分类不会被自动整理覆盖，自动整理也不会擅自创建新分类。自定义分类标题旁可删除，文章会移回“已完成未分类”，文档不会删除。',
       },
       {
         selector: '[data-guide="category-heading"]',
