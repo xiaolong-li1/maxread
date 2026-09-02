@@ -16,6 +16,7 @@ from .mail_admin import (
     mail_admin_records,
     mail_admin_status,
     reconcile_mail_admin_actions,
+    sync_mail_admin_cache,
     trigger_mail_scan,
     update_mail_admin_config,
     update_mail_admin_record,
@@ -113,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
         name="maxread-mail-admin-outbox",
         daemon=True,
     ).start()
+    threading.Thread(
+        target=_base_pull_loop,
+        name="maxread-mail-base-cache",
+        daemon=True,
+    ).start()
     ThreadingHTTPServer((args.host, args.port), MailRemoteHandler).serve_forever()
     return 0
 
@@ -124,6 +130,16 @@ def _reconcile_loop() -> None:
         except Exception:
             pass
         threading.Event().wait(30)
+
+
+def _base_pull_loop() -> None:
+    interval = max(60, int(os.environ.get("MAXREAD_BASE_PULL_INTERVAL_SECONDS", "180")))
+    while True:
+        try:
+            sync_mail_admin_cache()
+        except Exception:
+            pass
+        threading.Event().wait(interval)
 
 
 if __name__ == "__main__":

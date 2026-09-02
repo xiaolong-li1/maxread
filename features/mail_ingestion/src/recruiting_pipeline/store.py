@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS recruiting_runs (
     failed_threads INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS recruiting_sync_state (
+    sync_key TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    started_at TEXT NOT NULL DEFAULT '',
+    finished_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -297,6 +305,146 @@ class PipelineStore:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM recruiting_threads ORDER BY latest_time DESC, thread_key").fetchall()
 
+    def apply_base_snapshot(
+        self,
+        states: dict[str, dict[str, Any]],
+        *,
+        snapshot_started_at: str,
+    ) -> dict[str, int]:
+        """Refresh the local read model from a complete authoritative Base snapshot."""
+        from .base_sync import merge_base_profile
+
+        self.initialize()
+        counts = {
+            "remote_records": len(states),
+            "matched": 0,
+            "updated": 0,
+            "linked": 0,
+            "skipped_pending": 0,
+            "skipped_newer_local": 0,
+        }
+        document_index: dict[str, str] = {}
+        identity_index: dict[tuple[str, str], list[str]] = defaultdict(list)
+        for record_id, state in states.items():
+            document_url = str(state.get("document_url") or "").strip()
+            if document_url:
+                document_index[document_url] = record_id
+            identity_index[(
+                str(state.get("name") or "").strip(),
+                _minute_key(str(state.get("latest_time") or "")),
+            )].append(record_id)
+
+        with self.connect() as conn:
+            pending_threads: set[str] = set()
+            if conn.execute(
+                "select 1 from sqlite_master where type='table' and name='recruiting_admin_actions'"
+            ).fetchone():
+                pending_threads = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "select distinct thread_key from recruiting_admin_actions where status in ('pending','syncing')"
+                    )
+                }
+            rows = conn.execute("select * from recruiting_threads where status<>'inactive'").fetchall()
+            now = datetime.now(UTC).isoformat()
+            for row in rows:
+                thread_key = str(row["thread_key"])
+                if thread_key in pending_threads:
+                    counts["skipped_pending"] += 1
+                    continue
+                if _is_after(str(row["updated_at"] or ""), snapshot_started_at):
+                    counts["skipped_newer_local"] += 1
+                    continue
+                record_id = str(row["base_record_id"] or "").strip()
+                if not record_id:
+                    local_url = str(row["doc_url"] or "").strip()
+                    record_id = document_index.get(local_url, "") if local_url else ""
+                    if not record_id:
+                        try:
+                            local_fields = json.loads(str(row["fields_json"] or "{}"))
+                        except json.JSONDecodeError:
+                            local_fields = {}
+                        candidates = identity_index.get((
+                            str(local_fields.get("name") or "").strip(),
+                            _minute_key(str(row["latest_time"] or "")),
+                        ), [])
+                        record_id = candidates[0] if len(candidates) == 1 else ""
+                state = states.get(record_id)
+                if not state:
+                    continue
+                counts["matched"] += 1
+                fields = self.fields_from_row(row)
+                if fields is None:
+                    continue
+                merged = merge_base_profile(fields, state)
+                screening_status = str(state.get("screening_status") or row["screening_status"] or "未筛选")
+                interview_result = str(state.get("interview_result") or row["interview_result"] or "未开始")
+                interview_assigned = int(bool(state.get("interview_assigned")))
+                document_url = str(state.get("document_url") or row["doc_url"] or "")
+                desired = (
+                    json.dumps(merged.__dict__, ensure_ascii=False),
+                    record_id,
+                    document_url,
+                    screening_status,
+                    interview_assigned,
+                    interview_result,
+                )
+                current = (
+                    str(row["fields_json"] or ""),
+                    str(row["base_record_id"] or ""),
+                    str(row["doc_url"] or ""),
+                    str(row["screening_status"] or ""),
+                    int(row["interview_assigned"] or 0),
+                    str(row["interview_result"] or ""),
+                )
+                if desired == current:
+                    continue
+                if not current[1] and record_id:
+                    counts["linked"] += 1
+                conn.execute(
+                    """
+                    update recruiting_threads
+                    set fields_json=?,base_record_id=?,doc_url=?,screening_status=?,
+                        interview_assigned=?,interview_result=?,updated_at=?
+                    where thread_key=?
+                    """,
+                    desired + (now, thread_key),
+                )
+                counts["updated"] += 1
+        return counts
+
+    def record_sync_state(
+        self,
+        sync_key: str,
+        *,
+        status: str,
+        started_at: str,
+        details: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> None:
+        self.initialize()
+        finished_at = datetime.now(UTC).isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert into recruiting_sync_state(
+                    sync_key,status,details_json,started_at,finished_at,last_error
+                ) values(?,?,?,?,?,?)
+                on conflict(sync_key) do update set
+                    status=excluded.status,details_json=excluded.details_json,
+                    started_at=excluded.started_at,finished_at=excluded.finished_at,
+                    last_error=excluded.last_error
+                """,
+                (
+                    sync_key,
+                    status,
+                    json.dumps(details or {}, ensure_ascii=False),
+                    started_at,
+                    finished_at,
+                    str(error or "")[:1000],
+                ),
+            )
+
     def reset_base_links(
         self,
         since_days: int,
@@ -383,6 +531,24 @@ def _parse_pipeline_time(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
     return parsed.astimezone(ZoneInfo("Asia/Shanghai"))
+
+
+def _minute_key(value: str) -> str:
+    parsed = _parse_pipeline_time(value)
+    return parsed.strftime("%Y-%m-%d %H:%M") if parsed else value[:16].replace("T", " ")
+
+
+def _is_after(value: str, boundary: str) -> bool:
+    try:
+        left = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        right = datetime.fromisoformat(boundary.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if left.tzinfo is None:
+        left = left.replace(tzinfo=UTC)
+    if right.tzinfo is None:
+        right = right.replace(tzinfo=UTC)
+    return left.astimezone(UTC) > right.astimezone(UTC)
 
 
 def _compact_rfc822_headers(path: Path) -> None:

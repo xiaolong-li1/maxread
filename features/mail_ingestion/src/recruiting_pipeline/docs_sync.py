@@ -129,14 +129,7 @@ class DocsSync:
         return changed
 
     def insert_file(self, document_id: str, path: Path) -> None:
-        relative = path
-        if path.is_absolute():
-            try:
-                relative = path.relative_to(self.settings.root)
-            except ValueError:
-                # Cloud-backed mail artifacts intentionally live outside the
-                # code checkout. lark-cli accepts an absolute local path.
-                relative = path
+        resolved = path.expanduser().resolve()
         self._call([
             self.settings.lark_cli,
             "docs",
@@ -146,12 +139,12 @@ class DocsSync:
             "--type",
             "file",
             "--file",
-            str(relative),
+            f"./{resolved.name}",
             "--as",
             self.settings.feishu_as,
             "--format",
             "json",
-        ])
+        ], cwd=resolved.parent)
 
     def deduplicate_files(self, document_id: str) -> int:
         """Remove repeated file-card blocks, retaining the first by name."""
@@ -199,11 +192,11 @@ class DocsSync:
             removed += 1
         return removed
 
-    def _call(self, args: list[str]) -> dict[str, Any]:
+    def _call(self, args: list[str], *, cwd: Path | None = None) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
             completed = subprocess.run(
                 args,
-                cwd=self.settings.root,
+                cwd=cwd or self.settings.root,
                 env=self.settings.command_env(),
                 capture_output=True,
                 text=True,

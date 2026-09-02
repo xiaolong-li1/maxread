@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .attachment_text import SUPPORTED_DOCUMENT_SUFFIXES, extract_attachment_text
-from .base_sync import BaseSync
+from .base_sync import BaseSync, merge_base_profile
 from .config import PipelineSettings
 from .docs_sync import DocsSync
 from .external_attachments import download_external_pdfs
@@ -454,6 +454,7 @@ class RecruitingRunner:
                 thread.document_url,
             ) or ""
         base_state = self.base.current_state(base_record_id)
+        resolved_fields = merge_base_profile(thread.fields, base_state)
         if base_state:
             status = _merge_status(previous_status, str(base_state.get("screening_status") or ""), status)
             assigned = bool(base_state.get("interview_assigned")) or assigned
@@ -467,12 +468,12 @@ class RecruitingRunner:
         summary_changed = False
         processing_state = self.store.message_processing_state()
         pending_messages = [message for message in envelope.messages if not processing_state.get(message.id, ("", False))[1]]
-        if self.docs and _needs_material_document(thread.fields):
+        if self.docs and _needs_material_document(resolved_fields):
             if thread.document_id:
-                self.docs.update_title(thread.document_id, f"{thread.fields.name}｜真实邮件材料")
-                summary_changed = bool(row and (previous_fields != thread.fields or str(row["latest_time"] or "") != str(thread.latest_time or "")))
+                self.docs.update_title(thread.document_id, f"{resolved_fields.name}｜真实邮件材料")
+                summary_changed = bool(row and (previous_fields != resolved_fields or str(row["latest_time"] or "") != str(thread.latest_time or "")))
                 if summary_changed:
-                    document_updated = self.docs.replace_summary(thread.document_id, thread.fields, thread.latest_time) or document_updated
+                    document_updated = self.docs.replace_summary(thread.document_id, resolved_fields, thread.latest_time) or document_updated
                 # A reprocess must be idempotent: never append the complete
                 # structured summary again.  Only genuinely new messages and
                 # their newly materialized attachments are appended.
@@ -481,10 +482,30 @@ class RecruitingRunner:
                     document_updated = True
                 document_id, document_url = thread.document_id, thread.document_url
             else:
-                content = self._document_content(envelope, thread.fields, None)
-                document_id, document_url = self.docs.create(f"{thread.fields.name}｜真实邮件材料", content)
-                self.docs.update_title(document_id, f"{thread.fields.name}｜真实邮件材料")
+                content = self._document_content(envelope, resolved_fields, None)
+                document_id, document_url = self.docs.create(f"{resolved_fields.name}｜真实邮件材料", content)
+                self.docs.update_title(document_id, f"{resolved_fields.name}｜真实邮件材料")
                 document_created = True
+                # Document creation and attachment insertion are separate
+                # remote operations. Persist the token as a recovery
+                # checkpoint so a later media failure resumes in place.
+                self.store.save_thread(
+                    thread.thread_key,
+                    thread.candidate_address,
+                    envelope.subject,
+                    resolved_fields,
+                    base_record_id=base_record_id,
+                    doc_id=document_id,
+                    doc_url=document_url,
+                    latest_time=thread.latest_time or "",
+                    last_incoming_time=max((item.received_at or "" for item in envelope.incoming), default=""),
+                    last_outgoing_time=max((item.received_at or "" for item in envelope.outgoing), default=""),
+                    screening_status=status,
+                    interview_assigned=int(assigned),
+                    interview_result=previous_result,
+                    status="publishing",
+                    last_error="",
+                )
             attachment_messages = pending_messages if thread.document_id else list(envelope.messages)
             uploaded_digests = self.store.uploaded_attachment_digests(thread.thread_key)
             uploaded_any = False
@@ -505,7 +526,7 @@ class RecruitingRunner:
 
         base_result = self.base.upsert(
             record_id=base_record_id or None,
-            fields=thread.fields,
+            fields=resolved_fields,
             latest_time=thread.latest_time,
             document_url=document_url,
             status=status,
@@ -517,7 +538,7 @@ class RecruitingRunner:
             thread.thread_key,
             thread.candidate_address,
             envelope.subject,
-            thread.fields,
+            resolved_fields,
             base_record_id=base_result.record_id,
             doc_id=document_id or "",
             doc_url=document_url or "",

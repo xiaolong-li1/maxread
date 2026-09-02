@@ -126,6 +126,10 @@ IMAP_PASSWORD=app-password-or-mailbox-password
 管理员可在 `/maxread/mail` 查看两个邮箱的最近扫描、运行统计和错误聚合，
 并手动触发单邮箱或全部邮箱扫描。页面可调整完整扫描与候选发布间隔，
 以及招聘周报发布间隔；写操作复用 MaxRead 管理员会话，不返回邮箱凭据。
+飞书 Base 是权威主库，5090 SQLite 是网页使用的本地读缓存，材料 Docx 是
+派生产物。网页修改采用 SQLite 事务 + outbox 同步 Base；后台每 3 分钟完整
+分页回拉 Base，因而直接在 Base 中作出的人工修订也会刷新到网页。邮件扫描
+更新邮件事实、材料 Docx、Base 与本地缓存，并保留 Base 已有的非空人工字段。
 手动扫描由 `bin/recruiting-control-scan` 在独立 systemd transient unit 中执行，
 运行期间暂停常驻管线，避免并发写同一个 SQLite。
 

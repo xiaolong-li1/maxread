@@ -4,6 +4,15 @@
 
 `RECRUITING_SCAN_INTERVAL_DAYS` 控制扫描周期，`scan-once` 用于手动验收，`run` 用于常驻运行。每轮先执行只读 IMAP 增量扫描，再处理未消费的邮件线程。
 
+### 数据所有权与同步
+
+- **飞书 Base 是权威主库**：候选人资料、人工流程状态和材料链接以 Base 记录为最终业务事实。
+- **5090 SQLite 是本地读模型**：网页列表、搜索和统计只读本地缓存，以获得稳定的响应时间；它同时保存邮件 UID、线程、运行记录和待同步 outbox。
+- **材料 Docx 是派生产物**：保存邮件原文、附件和结构化摘要，不承担数据库角色。
+- 网页写操作先在一个 SQLite 事务中更新缓存并写入 outbox，再以幂等 record ID 写 Base；远端失败时保留 pending，由后台按候选人顺序补偿。
+- 邮件扫描以邮件为事实来源更新回复时间、来源邮箱、最新时间和材料 Docx，再 upsert Base 并提交 SQLite。Base 已有的非空人工资料优先于模型重抽取，重扫不能覆盖人工修订。
+- 独立 `Base -> SQLite` 回拉每 3 分钟分页读取全部记录。回拉会跳过存在 pending 网页写入或在快照开始后刚更新的本地记录，避免旧快照覆盖新事务。
+
 ```text
 定时触发
   -> IMAP UID 增量扫描（Inbox + 自定义文件夹）
@@ -11,8 +20,14 @@
   -> PDF 本地文本提取
   -> AI 结构化抽取（新线程或有新候选人来信）
   -> 云文档创建/追加 + PDF 附件插入
-  -> Feishu Base upsert
-  -> run/message/thread 审计与失败重试
+  -> Feishu Base upsert（权威主库）
+  -> SQLite read model commit + run/message/thread 审计
+```
+
+手动核对 Base 到本地缓存时可执行：
+
+```bash
+./bin/recruiting-pipeline sync-base-cache
 ```
 
 ## 2. 新邮件、follow-up 与我方回复
@@ -112,8 +127,8 @@ RECRUITING_OPENAI_API_MODE=responses
 ./bin/recruiting-pipeline status
 ```
 
-生产部署位于 Aliyun `/opt/maxread/features/mail_ingestion`，使用系统级
-`recruiting-pipeline.service`。第一轮建议 `scan-once`，检查新增线程、
+生产计算与 SQLite 位于 5090 `/home/lixiaolong/projects/maxread/features/mail_ingestion`，
+Aliyun 只负责登录、网页和反向代理。第一轮建议 `scan-once`，检查新增线程、
 follow-up 合并、面试寄映射、云文档链接和失败重试统计，再启用常驻服务。
 
 ## 8. 已发生问题与永久防护

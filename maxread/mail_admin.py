@@ -430,13 +430,71 @@ def reconcile_mail_admin_actions(db_path: Path, limit: int = 3) -> dict[str, Any
 
 def mail_admin_sync_status(db_path: Path) -> dict[str, Any]:
     if not Path(db_path).exists():
-        return {"pending": 0, "replayed": 0}
+        return {"pending": 0, "replayed": 0, "base_pull": {"status": "never"}}
     with sqlite3.connect(db_path, timeout=5) as connection:
         _ensure_admin_actions_schema(connection)
         pending = int(connection.execute(
             "select count(*) from recruiting_admin_actions where status in ('pending','syncing')"
         ).fetchone()[0])
-    return {"pending": pending, "replayed": 0}
+        base_pull = {"status": "never"}
+        if connection.execute(
+            "select 1 from sqlite_master where type='table' and name='recruiting_sync_state'"
+        ).fetchone():
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "select * from recruiting_sync_state where sync_key='feishu_base_pull'"
+            ).fetchone()
+            if row is not None:
+                try:
+                    details = json.loads(str(row["details_json"] or "{}"))
+                except json.JSONDecodeError:
+                    details = {}
+                base_pull = {
+                    "status": str(row["status"] or "never"),
+                    "started_at": str(row["started_at"] or ""),
+                    "finished_at": str(row["finished_at"] or ""),
+                    "error": str(row["last_error"] or ""),
+                    **(details if isinstance(details, dict) else {}),
+                }
+    return {"pending": pending, "replayed": 0, "base_pull": base_pull}
+
+
+def sync_mail_admin_cache() -> dict[str, Any]:
+    """Refresh the 5090 SQLite read model from Feishu Base."""
+    if _remote_url():
+        raise RuntimeError("Base cache synchronization must run on the mail execution host")
+    mail_root = _mail_root()
+    project_root = Path(os.environ.get("MAXREAD_ROOT", str(mail_root.parent.parent))).expanduser()
+    executable = mail_root / "bin/recruiting-pipeline"
+    env_file = mail_root / "data/accounts/zip-lab.env"
+    if not executable.exists() or not env_file.exists():
+        raise RuntimeError("邮件管线或主邮箱配置未部署")
+    completed = subprocess.run(
+        [
+            str(executable),
+            "--root",
+            str(project_root),
+            "--env-file",
+            str(env_file),
+            "sync-base-cache",
+        ],
+        cwd=project_root,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "Base cache sync failed"
+        raise RuntimeError(detail[:1000])
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Base cache sync returned invalid JSON") from exc
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError("Base cache sync did not complete")
+    return result
 
 
 def _ensure_admin_actions_schema(connection: sqlite3.Connection) -> None:

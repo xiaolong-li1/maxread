@@ -15,7 +15,7 @@ from mail_collector.parser import parse_message
 from recruiting_pipeline.config import PipelineSettings
 from recruiting_pipeline.docs_sync import DocsSync
 from recruiting_pipeline.cli import build_parser
-from recruiting_pipeline.base_sync import BaseSync
+from recruiting_pipeline.base_sync import BASE_RECORD_FIELDS, BaseSync, _cell_url, merge_base_profile
 from recruiting_pipeline.attachment_text import extract_attachment_text
 from recruiting_pipeline.models import ProcessedThread, StoredMessage, ThreadEnvelope
 from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _needs_material_document, _other_fields, _within_days
@@ -37,12 +37,14 @@ class RecruitingPipelineTest(unittest.TestCase):
         )
         sync = DocsSync(settings)
         calls = []
-        sync._call = lambda args: calls.append(args) or {}
+        sync._call = lambda args, cwd=None: calls.append((args, cwd)) or {}
 
         sync.insert_file("doc", Path("/mnt/data/user/maxread/mail/resume.pdf"))
 
-        file_index = calls[0].index("--file")
-        self.assertEqual(calls[0][file_index + 1], "/mnt/data/user/maxread/mail/resume.pdf")
+        args, cwd = calls[0]
+        file_index = args.index("--file")
+        self.assertEqual(args[file_index + 1], "./resume.pdf")
+        self.assertEqual(cwd, Path("/mnt/data/user/maxread/mail"))
 
     def test_only_candidate_mail_materializes_full_document(self) -> None:
         self.assertTrue(_needs_material_document(CandidateFields(mail_type="candidate").normalized()))
@@ -255,6 +257,84 @@ class RecruitingPipelineTest(unittest.TestCase):
             store.mark_attachment_uploaded("key", "sha", "resume.pdf", "doc")
             self.assertEqual(store.uploaded_attachment_digests("key"), {"sha"})
 
+    def test_document_token_is_checkpointed_before_media_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            attachment = Path(temp) / "resume.pdf"
+            attachment.write_bytes(b"%PDF-1.4\n")
+            message = StoredMessage(
+                1,
+                "1",
+                "INBOX",
+                "申请",
+                "候选人",
+                "candidate@example.com",
+                "2026-09-02T10:00:00+08:00",
+                "申请材料",
+                Path(temp) / "message.eml",
+                attachments=(attachment,),
+            )
+            envelope = ThreadEnvelope(
+                "thread",
+                "candidate@example.com",
+                "申请",
+                (message,),
+                (message,),
+                (),
+                frozenset({"INBOX"}),
+                frozenset({"zip.lab@zju.edu.cn"}),
+            )
+            fields = CandidateFields(
+                name="候选人",
+                school="浙江大学",
+                mail_type="candidate",
+                projects=["MLSys"],
+                source_accounts=["ZIP Lab"],
+            ).normalized()
+            saved = []
+            runner = RecruitingRunner.__new__(RecruitingRunner)
+            runner._envelope_cache = {"thread": envelope}
+            runner._download_external = lambda _envelope: None
+            runner._attachment_paths = lambda _envelope, _messages: [attachment]
+            runner._document_content = lambda *_args: "content"
+            runner.dry_run = False
+            runner.store = SimpleNamespace(
+                get_thread=lambda _key: None,
+                fields_from_row=lambda _row: None,
+                message_processing_state=lambda: {},
+                uploaded_attachment_digests=lambda _key: set(),
+                save_thread=lambda *args, **kwargs: saved.append(kwargs),
+            )
+            runner.base = SimpleNamespace(
+                find_existing=lambda *_args: None,
+                current_state=lambda _record_id: None,
+            )
+
+            def fail_media(_document_id, _path):
+                raise RuntimeError("media failed")
+
+            runner.docs = SimpleNamespace(
+                create=lambda *_args: ("doc-token", "https://example/doc-token"),
+                update_title=lambda *_args: None,
+                insert_file=fail_media,
+            )
+            thread = ProcessedThread(
+                "thread",
+                "candidate@example.com",
+                "2026-09-02 10:00",
+                fields,
+                None,
+                None,
+                None,
+                None,
+                True,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "media failed"):
+                runner._sync_thread(thread)
+
+            self.assertEqual(saved[0]["doc_id"], "doc-token")
+            self.assertEqual(saved[0]["status"], "publishing")
+
     def test_base_backfill_reset_is_windowed_and_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "mail.sqlite3"
@@ -410,6 +490,175 @@ class RecruitingPipelineTest(unittest.TestCase):
         sync._existing_index = ({("—", "2026-08-26 13:18"): ["rec-a", "rec-b"]}, {"https://example/doc-b": "rec-b"})
         self.assertIsNone(sync.find_existing("—", "2026-08-26 13:18", None))
         self.assertEqual(sync.find_existing("—", "2026-08-26 13:18", "https://example/doc-b"), "rec-b")
+
+    def test_base_sync_reads_every_page_and_exposes_profile_state(self) -> None:
+        sync = BaseSync.__new__(BaseSync)
+        sync._existing_index = None
+        sync._record_states = {}
+        offsets = []
+
+        def page(offset):
+            offsets.append(offset)
+            count = 200 if offset == 0 else 1
+            rows = []
+            ids = []
+            for index in range(count):
+                number = offset + index
+                values = {field: "" for field in BASE_RECORD_FIELDS}
+                values.update({
+                    "姓名": f"候选人{number}",
+                    "最新邮件时间": "2026-09-02T10:00:00+08:00",
+                    "院校": "浙江大学",
+                    "邮件类型": ["候选人来信"],
+                    "申请项目": ["MLSys"],
+                    "筛选状态": ["未筛选"],
+                })
+                rows.append([values[field] for field in BASE_RECORD_FIELDS])
+                ids.append(f"rec-{number}")
+            return {"record_id_list": ids, "fields": list(BASE_RECORD_FIELDS), "data": rows}
+
+        sync._list_page = page
+        states = sync.all_states(refresh=True)
+
+        self.assertEqual(offsets, [0, 200])
+        self.assertEqual(len(states), 201)
+        self.assertEqual(states["rec-200"]["school"], "浙江大学")
+        self.assertEqual(states["rec-200"]["projects"], ["MLSys"])
+
+    def test_non_empty_base_profile_wins_over_mail_extraction(self) -> None:
+        extracted = CandidateFields(
+            name="旧姓名",
+            school="旧学校",
+            major="旧专业",
+            projects=["MLSys"],
+            mail_type="candidate",
+            source_accounts=["ZIP Lab"],
+        ).normalized()
+
+        merged = merge_base_profile(extracted, {
+            "name": "人工姓名",
+            "school": "同济大学",
+            "major": "计算机科学与技术",
+            "projects": ["World Model"],
+            "academic_display": "GPA 4.6/5.0",
+            "rank": "第 5/191",
+            "rank_evidence": "综合成绩第5/191名",
+            "purpose_summary": "人工校正摘要",
+            "mail_type": "candidate",
+        })
+
+        self.assertEqual(merged.name, "人工姓名")
+        self.assertEqual(merged.school, "同济大学")
+        self.assertEqual(merged.projects, ["World Model"])
+        self.assertEqual(merged.source_accounts, ["ZIP Lab"])
+
+    def test_base_markdown_link_keeps_the_complete_material_url(self) -> None:
+        url = "https://ccnsbbr30xgq.feishu.cn/docx/ExampleToken"
+        self.assertEqual(_cell_url(f"[材料]({url})"), url)
+        self.assertEqual(_cell_url(f"[{url}]({url})"), url)
+
+    def test_base_snapshot_refreshes_sqlite_from_authoritative_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "mail.sqlite3"
+            store = PipelineStore(db)
+            store.initialize()
+            fields = CandidateFields(
+                name="旧姓名",
+                school="旧学校",
+                mail_type="candidate",
+                projects=["MLSys"],
+                source_accounts=["ZIP Lab"],
+            ).normalized()
+            store.save_thread(
+                "thread-a",
+                "a@example.com",
+                "申请",
+                fields,
+                base_record_id="rec-a",
+                latest_time="2026-09-02 10:00",
+                screening_status="未筛选",
+            )
+            with store.connect() as connection:
+                connection.execute("update recruiting_threads set updated_at='2026-09-01T00:00:00+00:00'")
+            state = {
+                "rec-a": {
+                    "name": "人工姓名",
+                    "school": "浙江大学",
+                    "mail_type": "candidate",
+                    "projects": ["World Model"],
+                    "screening_status": "面试资格",
+                    "interview_assigned": True,
+                    "interview_result": "未开始",
+                    "document_url": "https://example/doc",
+                }
+            }
+
+            result = store.apply_base_snapshot(state, snapshot_started_at="2026-09-02T00:00:00+00:00")
+            row = store.get_thread("thread-a")
+
+            self.assertEqual(result["updated"], 1)
+            self.assertEqual(store.fields_from_row(row).name, "人工姓名")
+            self.assertEqual(row["screening_status"], "面试资格")
+            self.assertEqual(row["doc_url"], "https://example/doc")
+
+    def test_base_snapshot_does_not_overwrite_pending_or_newer_local_transactions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "mail.sqlite3"
+            store = PipelineStore(db)
+            store.initialize()
+            fields = CandidateFields(
+                name="本地姓名",
+                school="本地学校",
+                mail_type="candidate",
+                projects=["MLSys"],
+                source_accounts=["ZIP Lab"],
+            ).normalized()
+            for thread_key, record_id in (("pending", "rec-pending"), ("newer", "rec-newer")):
+                store.save_thread(
+                    thread_key,
+                    f"{thread_key}@example.com",
+                    "申请",
+                    fields,
+                    base_record_id=record_id,
+                    latest_time="2026-09-02 10:00",
+                    screening_status="面试资格",
+                )
+            with store.connect() as connection:
+                connection.execute(
+                    """
+                    create table recruiting_admin_actions(
+                        id integer primary key,thread_key text,status text
+                    )
+                    """
+                )
+                connection.execute(
+                    "insert into recruiting_admin_actions values(1,'pending','pending')"
+                )
+                connection.execute(
+                    "update recruiting_threads set updated_at='2026-09-02T01:01:00+00:00' where thread_key='newer'"
+                )
+            states = {
+                record_id: {
+                    "name": "远端旧姓名",
+                    "school": "远端旧学校",
+                    "mail_type": "candidate",
+                    "projects": ["World Model"],
+                    "screening_status": "未筛选",
+                    "interview_assigned": False,
+                    "interview_result": "未开始",
+                }
+                for record_id in ("rec-pending", "rec-newer")
+            }
+
+            result = store.apply_base_snapshot(
+                states,
+                snapshot_started_at="2026-09-02T01:00:00+00:00",
+            )
+
+            self.assertEqual(result["skipped_pending"], 1)
+            self.assertEqual(result["skipped_newer_local"], 1)
+            self.assertEqual(store.fields_from_row(store.get_thread("pending")).name, "本地姓名")
+            self.assertEqual(store.fields_from_row(store.get_thread("newer")).name, "本地姓名")
 
     def test_candidate_mail_types_collapse_to_one_class(self) -> None:
         for value in ("internship_application", "general_inquiry", "候选人来信"):

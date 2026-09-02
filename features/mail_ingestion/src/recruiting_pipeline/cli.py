@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import PipelineSettings
+from .cache_sync import sync_base_to_cache
 from .runner import RecruitingRunner, _within_days
 from .store import PipelineStore
 from .weekly_report import markdown_to_post, render_weekly_report
@@ -73,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     provenance.add_argument("--days", type=int, default=None)
     provenance.add_argument("--dry-run", action="store_true")
     provenance.add_argument("--confirm", action="store_true")
+    sub.add_parser("sync-base-cache", help="refresh the local SQLite read model from authoritative Feishu Base")
     return parser
 
 
@@ -85,6 +87,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         print(json.dumps({"ok": True, "runs": store.list_runs()}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "sync-base-cache":
+        print(json.dumps(sync_base_to_cache(settings), ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "weekly-report":

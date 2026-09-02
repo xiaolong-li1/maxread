@@ -133,8 +133,9 @@ def test_mail_admin_page_uses_reverse_proxy_relative_api_paths():
     assert "api('api/admin/mail/scan'" in html
     assert "api('api/admin/mail/config'" in html
     assert "api('/api/admin/mail" not in html
-    assert 'href="admin?next=mail"' in html
-    assert "登录成功后会自动返回本页" in html
+    assert "api('api/admin/login'" in html
+    assert "api('api/admin/logout'" in html
+    assert "本设备登录状态保持 30 天" in html
     assert "手动扫描中" in html
     assert "手动扫描接管" in html
     assert "结束后自动恢复常驻任务" in html
@@ -370,7 +371,11 @@ def test_pending_actions_for_same_candidate_replay_in_order(tmp_path, monkeypatc
         {"screening_status": "面试资格", "interview_assigned": False, "interview_result": "未开始"},
         {"screening_status": "面试资格", "interview_assigned": False, "interview_result": "通过"},
     ]
-    assert mail_admin.mail_admin_sync_status(db) == {"pending": 0, "replayed": 0}
+    assert mail_admin.mail_admin_sync_status(db) == {
+        "pending": 0,
+        "replayed": 0,
+        "base_pull": {"status": "never"},
+    }
 
 
 def test_admin_outbox_migrates_legacy_audit_table_in_place(tmp_path, monkeypatch):
@@ -435,3 +440,38 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="record-tier"' in html
     assert 'id="record-rank"' in html
     assert "rank_percentile:$('record-rank').value" in html
+    assert "权威主库：飞书 Base" in html
+    assert 'id="base-pull-status"' in html
+    assert 'id="admin-password"' in html
+    assert "loginMailAdmin(event)" in html
+    assert "logoutMailAdmin()" in html
+
+
+def test_mail_admin_sync_status_exposes_last_base_pull(tmp_path):
+    db = tmp_path / "mail.sqlite3"
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            """
+            create table recruiting_sync_state(
+                sync_key text primary key,status text,details_json text,
+                started_at text,finished_at text,last_error text
+            )
+            """
+        )
+        connection.execute(
+            "insert into recruiting_sync_state values(?,?,?,?,?,?)",
+            (
+                "feishu_base_pull",
+                "completed",
+                json.dumps({"remote_records": 865, "updated": 2}),
+                "2026-09-02T01:00:00+00:00",
+                "2026-09-02T01:00:03+00:00",
+                "",
+            ),
+        )
+
+    result = mail_admin.mail_admin_sync_status(db)
+
+    assert result["base_pull"]["status"] == "completed"
+    assert result["base_pull"]["remote_records"] == 865
+    assert result["base_pull"]["updated"] == 2
