@@ -45,6 +45,24 @@ cd <deploy-dir>
 
 Admin UI defaults to `http://127.0.0.1:8765/`.
 
+## Nginx `/maxread` proxy
+
+Use `deploy/nginx/maxread-location.conf.example` inside the public TLS server
+block. The general `/maxread/` location is read-only; every public POST route
+must also appear in the explicit API allowlist above it. After adding a web
+mutation endpoint, update the template and run the tests before deploying.
+
+Validate and reload without dropping active connections:
+
+```bash
+nginx -t
+systemctl reload nginx
+```
+
+For a production smoke test, an unbound request to
+`POST /maxread/api/web/categories` should reach MaxRead and return HTTP 400
+with “绑定飞书账号后才能新建分类”. HTTP 403 means the Nginx allowlist is stale.
+
 
 ## Fresh machine bootstrap
 
