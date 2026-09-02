@@ -1,6 +1,6 @@
 # Put these locations inside the TLS server block that owns /maxread.
 # Keep the explicit POST allowlist in sync with AdminHandler.do_POST.
-location ~ ^/maxread/api/(admin/(login|logout|mail/(scan|config|record|rejection-template|rejection-generate|rejection-draft|rejection-send|rejection-batch|rejection-batch-send))|web/(submit|binding-code|retry|pet/chat|project-action|organize|categories)|service-status|feedback/[0-9]+/status|jobs/[0-9]+/retry)$ {
+location ~ ^/maxread/api/(admin/(login|logout|mail/(scan|config|record))|web/(submit|binding-code|retry|pet/chat|project-action|organize|categories)|service-status|feedback/[0-9]+/status|jobs/[0-9]+/retry)$ {
     rewrite ^/maxread(/.*)$ $1 break;
     proxy_pass http://127.0.0.1:8765;
     proxy_http_version 1.1;

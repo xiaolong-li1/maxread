@@ -147,7 +147,11 @@ IMAP_PASSWORD=app-password-or-mailbox-password
 增加 `--refresh-ai`、`--refresh-docs`。中途失败的线程保持 pending，下一轮继续。常驻服务
 每轮成功后刷新“最近一周新增”视图的 7 天滚动边界。
 
-拒信功能仅适用于 `来源邮箱` 含 `ZIP Lab` 且尚无我方回复的线程。网页先保存
+拒信功能当前停用：生产环境保持 `RECRUITING_REJECTION_FEATURE_ENABLED=0`，公网
+不暴露拒信接口，邮件管理页也不显示拒信入口。以下实现说明仅用于保留历史审计与
+将来显式恢复时参考；在功能开关关闭时，草稿、生成、批次和发送入口都会拒绝调用。
+
+启用时，拒信功能仅适用于 `来源邮箱` 含 `ZIP Lab` 且尚无我方回复的线程。网页先保存
 可编辑草稿；AI 依据结构化申请目的在实习申请、硕博招生和其他咨询三类模板中
 匹配并做有限改写，模型只能产出草稿。真实发送同时要求管理员会话、完整收件地址二次确认、Outlook
 `SMTP.Send` OAuth 授权和 `RECRUITING_OUTBOUND_ENABLED=1`。SMTP 接受邮件后，

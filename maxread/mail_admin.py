@@ -308,6 +308,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
 
 
 def mail_rejection_context(thread_key: str) -> dict[str, Any]:
+    _require_rejection_feature()
     if _remote_url():
         return _remote_request(f"/rejection?{urlencode({'thread_key': thread_key})}")
     db_path = _mail_db_path(_mail_root())
@@ -371,6 +372,7 @@ def mail_rejection_context(thread_key: str) -> dict[str, Any]:
 
 
 def save_mail_rejection_template(subject: str, body: str, application_type: str = "internship") -> dict[str, Any]:
+    _require_rejection_feature()
     if _remote_url():
         return _remote_request("/rejection-template", {"subject": subject, "body": body, "application_type": application_type})
     clean_type = _validated_rejection_type(application_type)
@@ -400,6 +402,7 @@ def save_mail_rejection_draft(
     application_type: str = "general",
     generation_source: str = "manual",
 ) -> dict[str, Any]:
+    _require_rejection_feature()
     if _remote_url():
         return _remote_request(
             "/rejection-draft",
@@ -463,6 +466,7 @@ def save_mail_rejection_draft(
 
 
 def generate_mail_rejection_draft(thread_key: str) -> dict[str, Any]:
+    _require_rejection_feature()
     if _remote_url():
         return _remote_request("/rejection-generate", {"thread_key": thread_key}, timeout=240)
     clean_key = _validated_thread_key(thread_key)
@@ -484,6 +488,7 @@ def generate_mail_rejection_draft(thread_key: str) -> dict[str, Any]:
 
 
 def send_mail_rejection(draft_id: int, confirmation: str) -> dict[str, Any]:
+    _require_rejection_feature()
     if _remote_url():
         return _remote_request(
             "/rejection-send",
@@ -560,6 +565,7 @@ def reconcile_mail_rejections(db_path: Path, limit: int = 3) -> dict[str, int]:
 
 
 def create_mail_rejection_batch(thread_keys: list[str]) -> dict[str, Any]:
+    _require_rejection_feature()
     if _remote_url():
         return _remote_request("/rejection-batch", {"thread_keys": thread_keys})
     clean_keys = list(dict.fromkeys(_validated_thread_key(value) for value in thread_keys))
@@ -599,6 +605,7 @@ def create_mail_rejection_batch(thread_keys: list[str]) -> dict[str, Any]:
 
 
 def mail_rejection_batch(batch_id: int) -> dict[str, Any]:
+    _require_rejection_feature()
     if _remote_url():
         return _remote_request(f"/rejection-batch?{urlencode({'batch_id': int(batch_id)})}")
     db_path = _mail_db_path(_mail_root())
@@ -609,6 +616,7 @@ def mail_rejection_batch(batch_id: int) -> dict[str, Any]:
 
 
 def queue_mail_rejection_batch_send(batch_id: int, confirmation: str) -> dict[str, Any]:
+    _require_rejection_feature()
     if _remote_url():
         return _remote_request(
             "/rejection-batch-send",
@@ -654,6 +662,8 @@ def reconcile_mail_rejection_batches(
     prepare_limit: int = 3,
     send_limit: int = 1,
 ) -> dict[str, int]:
+    if not _rejection_feature_enabled():
+        return {"prepared": 0, "sent": 0, "failed": 0}
     if not Path(db_path).exists():
         return {"prepared": 0, "sent": 0, "failed": 0}
     prepared = 0
@@ -1142,6 +1152,17 @@ def _mail_configuration() -> dict[str, str]:
         **_read_env(project_root / ".env"),
         **_read_env(mail_root / "data/accounts/zip-lab.env"),
     }
+
+
+def _rejection_feature_enabled() -> bool:
+    return str(_mail_configuration().get("RECRUITING_REJECTION_FEATURE_ENABLED") or "0").strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _require_rejection_feature() -> None:
+    if not _rejection_feature_enabled():
+        raise ValueError("拒信功能当前已停用")
 
 
 def _zip_lab_sender() -> str:

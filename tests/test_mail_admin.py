@@ -170,6 +170,7 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
     monkeypatch.setenv("MAXREAD_MAIL_REMOTE_URL", "http://127.0.0.1:18766")
     monkeypatch.setenv("MAXREAD_MAIL_REMOTE_TOKEN", "secret-token")
     monkeypatch.setattr(mail_admin.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mail_admin, "_rejection_feature_enabled", lambda: True)
 
     assert mail_admin.mail_admin_status()["remote_execution"] is True
     assert mail_admin.trigger_mail_scan("all")["ok"] is True
@@ -255,6 +256,7 @@ def _rejection_fixture(tmp_path: Path):
         f"MAIL_DB_PATH={db}\n"
         "RECRUITING_BASE_TOKEN=base\n"
         "RECRUITING_TABLE_ID=table\n"
+        "RECRUITING_REJECTION_FEATURE_ENABLED=1\n"
         "RECRUITING_OUTBOUND_ENABLED=0\n",
         encoding="utf-8",
     )
@@ -289,6 +291,39 @@ def _rejection_fixture(tmp_path: Path):
             ("d" * 32, "bohan-only@example.com", "测试申请", json.dumps(bohan_fields, ensure_ascii=False), "rec-bohan", "", "", "2026-09-02 16:18", "", "", "active", "未筛选", 0, "未开始", "", "v1"),
         )
     return root, db
+
+
+def test_rejection_feature_is_hard_disabled(tmp_path, monkeypatch):
+    root, db = _rejection_fixture(tmp_path)
+    env_path = root / "data/accounts/zip-lab.env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8").replace(
+            "RECRUITING_REJECTION_FEATURE_ENABLED=1",
+            "RECRUITING_REJECTION_FEATURE_ENABLED=0",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+
+    disabled_calls = (
+        lambda: mail_admin.mail_rejection_context("c" * 32),
+        lambda: mail_admin.save_mail_rejection_template("主题", "正文"),
+        lambda: mail_admin.save_mail_rejection_draft("c" * 32, "主题", "正文"),
+        lambda: mail_admin.generate_mail_rejection_draft("c" * 32),
+        lambda: mail_admin.send_mail_rejection(1, "candidate@example.com"),
+        lambda: mail_admin.create_mail_rejection_batch(["c" * 32]),
+        lambda: mail_admin.mail_rejection_batch(1),
+        lambda: mail_admin.queue_mail_rejection_batch_send(1, "发送 1 封拒信"),
+    )
+    for call in disabled_calls:
+        with pytest.raises(ValueError, match="拒信功能当前已停用"):
+            call()
+
+    assert mail_admin.reconcile_mail_rejection_batches(db) == {
+        "prepared": 0,
+        "sent": 0,
+        "failed": 0,
+    }
 
 
 def _add_zip_candidate(db: Path, thread_key: str, message_id: int, address: str, name: str) -> None:
@@ -745,35 +780,14 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="record-jump"' in html
     assert "jumpRecordPage()" in html
     assert "Math.ceil(recordState.total/recordState.limit)" in html
-    assert 'id="prepare-rejection"' in html
-    assert 'id="rejection-subject"' in html
-    assert 'id="rejection-body"' in html
-    assert 'id="rejection-confirmation"' in html
-    assert 'id="send-rejection" disabled' in html
-    assert "saveRejectionDraft()" in html
-    assert "saveRejectionTemplate()" in html
-    assert "sendRejection()" in html
-    assert "已回复并标记为已拒绝" in html
-    assert "查看拒信记录" in html
-    assert "拒信已发送" not in html
-    assert 'id="rejection-type"' in html
-    assert 'id="generate-rejection"' in html
-    assert "generateRejectionDraft()" in html
-    assert 'id="select-rejection-page"' in html
-    assert 'id="prepare-rejection-batch"' in html
-    assert 'id="rejection-batch-dialog"' in html
-    assert "createRejectionBatch()" in html
-    assert "queueRejectionBatchSend()" in html
+    assert "rejection" not in html.casefold()
+    assert "拒信" not in html
 
 
-def test_nginx_post_allowlist_includes_rejection_actions():
+def test_nginx_post_allowlist_excludes_rejection_actions():
     config = Path("deploy/nginx/maxread-location.conf.example").read_text(encoding="utf-8")
-    assert "rejection-template" in config
-    assert "rejection-draft" in config
-    assert "rejection-send" in config
-    assert "rejection-generate" in config
-    assert "rejection-batch" in config
-    assert "rejection-batch-send" in config
+    assert "mail/(scan|config|record)" in config
+    assert "rejection" not in config
 
 
 def test_mail_admin_sync_status_exposes_last_base_pull(tmp_path):
