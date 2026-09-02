@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import uuid
 import urllib.error
 import urllib.request
@@ -32,6 +33,7 @@ MAIL_PUBLIC_LINKS = (
 )
 SCREENING_STATUSES = ("未筛选", "面试资格", "面试通过", "未通过", "实习生")
 INTERVIEW_RESULTS = ("未开始", "通过", "不通过")
+_ADMIN_ACTION_LOCK = threading.RLock()
 
 
 def mail_admin_status() -> dict[str, Any]:
@@ -41,6 +43,7 @@ def mail_admin_status() -> dict[str, Any]:
     primary_env = mail_root / "data/accounts/zip-lab.env"
     env = _read_env(primary_env)
     db_path = Path(env.get("MAIL_DB_PATH", str(mail_root / "data/mail_collector.sqlite3")))
+    admin_sync = mail_admin_sync_status(db_path)
     accounts = _mail_accounts(mail_root, db_path)
     runs, thread_stats, errors = _mail_database_status(db_path)
     service = _systemd_show(DEFAULT_PIPELINE_SERVICE)
@@ -70,6 +73,7 @@ def mail_admin_status() -> dict[str, Any]:
             "scan_limit": _safe_int(env.get("MAIL_SCAN_LIMIT"), 100),
         },
         "overview": mail_public_summary(),
+        "admin_sync": admin_sync,
     }
 
 
@@ -202,21 +206,106 @@ def update_mail_admin_record(thread_key: str, changes: dict[str, Any], expected_
     if not requested:
         raise ValueError("没有可更新字段")
     db_path = _mail_db_path(_mail_root())
+    with _ADMIN_ACTION_LOCK:
+        action = _stage_mail_admin_action(
+            db_path,
+            clean_key,
+            requested,
+            expected_updated_at,
+        )
+        if int(action.get("action_id") or 0):
+            delivery = _deliver_mail_admin_action(db_path, int(action["action_id"]))
+        else:
+            delivery = {"status": "committed", "attempts": 0, "last_error": ""}
+    return {
+        "ok": True,
+        "thread_key": clean_key,
+        "state": action["state"],
+        "updated_at": action["updated_at"],
+        "sync_status": delivery["status"],
+        "sync_attempts": delivery["attempts"],
+        "sync_error": delivery["last_error"],
+    }
+
+
+def _stage_mail_admin_action(
+    db_path: Path,
+    thread_key: str,
+    requested: dict[str, Any],
+    expected_updated_at: str,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    operation_id = uuid.uuid4().hex
     with sqlite3.connect(db_path, timeout=10) as connection:
         connection.row_factory = sqlite3.Row
-        row = connection.execute("select * from recruiting_threads where thread_key=?", (clean_key,)).fetchone()
-    if row is None:
-        raise ValueError("邮件记录不存在")
-    if expected_updated_at and str(row["updated_at"] or "") != str(expected_updated_at):
-        raise ValueError("记录已被其他操作更新，请刷新后重试")
-    fields = json.loads(str(row["fields_json"] or "{}"))
-    if str(fields.get("mail_type") or "other") == "other":
-        raise ValueError("其他邮件不使用候选筛选状态")
-    old_state = {
+        _ensure_admin_actions_schema(connection)
+        connection.execute("begin immediate")
+        row = connection.execute(
+            "select * from recruiting_threads where thread_key=?",
+            (thread_key,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("邮件记录不存在")
+        if expected_updated_at and str(row["updated_at"] or "") != str(expected_updated_at):
+            raise ValueError("记录已被其他操作更新，请刷新后重试")
+        fields = json.loads(str(row["fields_json"] or "{}"))
+        if str(fields.get("mail_type") or "other") == "other":
+            raise ValueError("其他邮件不使用候选筛选状态")
+        record_id = str(row["base_record_id"] or "").strip()
+        if not record_id:
+            raise ValueError("该记录尚未绑定飞书 Base，不能修改")
+        old_state = _workflow_state(row)
+        new_state = _validated_workflow_state(old_state, requested)
+        if new_state == old_state:
+            connection.rollback()
+            return {"action_id": 0, "state": new_state, "updated_at": str(row["updated_at"] or "")}
+        cursor = connection.execute(
+            """
+            update recruiting_threads
+            set screening_status=?,interview_assigned=?,interview_result=?,updated_at=?
+            where thread_key=? and updated_at=?
+            """,
+            (
+                new_state["screening_status"],
+                int(new_state["interview_assigned"]),
+                new_state["interview_result"],
+                now,
+                thread_key,
+                str(row["updated_at"] or ""),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("记录在写入期间发生变化")
+        action_id = connection.execute(
+            """
+            insert into recruiting_admin_actions(
+                operation_id,thread_key,record_id,old_json,new_json,status,
+                attempts,last_error,created_at,updated_at
+            ) values(?,?,?,?,?,'pending',0,'',?,?)
+            """,
+            (
+                operation_id,
+                thread_key,
+                record_id,
+                json.dumps(old_state, ensure_ascii=False),
+                json.dumps(new_state, ensure_ascii=False),
+                now,
+                now,
+            ),
+        ).lastrowid
+        connection.commit()
+    return {"action_id": int(action_id), "state": new_state, "updated_at": now}
+
+
+def _workflow_state(row: sqlite3.Row) -> dict[str, Any]:
+    return {
         "screening_status": str(row["screening_status"] or "未筛选"),
         "interview_assigned": bool(row["interview_assigned"]),
         "interview_result": str(row["interview_result"] or "未开始"),
     }
+
+
+def _validated_workflow_state(old_state: dict[str, Any], requested: dict[str, Any]) -> dict[str, Any]:
     new_state = dict(old_state)
     if "screening_status" in requested:
         value = str(requested["screening_status"] or "").strip()
@@ -230,51 +319,139 @@ def update_mail_admin_record(thread_key: str, changes: dict[str, Any], expected_
         new_state["interview_result"] = value
     if "interview_assigned" in requested:
         new_state["interview_assigned"] = bool(requested["interview_assigned"])
-    record_id = str(row["base_record_id"] or "").strip()
-    if not record_id:
-        raise ValueError("该记录尚未绑定飞书 Base，不能修改")
-    _update_base_workflow(record_id, new_state)
+    return new_state
+
+
+def _deliver_mail_admin_action(db_path: Path, action_id: int) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_admin_actions_schema(connection)
+        action = connection.execute(
+            "select * from recruiting_admin_actions where id=?",
+            (int(action_id),),
+        ).fetchone()
+        if action is None:
+            raise RuntimeError("待同步操作不存在")
+        if str(action["status"] or "") == "committed":
+            return {"status": "committed", "attempts": int(action["attempts"] or 0), "last_error": ""}
+        older = connection.execute(
+            """
+            select id from recruiting_admin_actions
+            where thread_key=? and id<? and status in ('pending','syncing')
+            order by id asc limit 1
+            """,
+            (str(action["thread_key"] or ""), int(action_id)),
+        ).fetchone()
+        if older is not None:
+            return {
+                "status": "pending",
+                "attempts": int(action["attempts"] or 0),
+                "last_error": "等待前序飞书同步",
+            }
+        attempts = int(action["attempts"] or 0) + 1
+        connection.execute(
+            "update recruiting_admin_actions set status='syncing',attempts=?,updated_at=? where id=?",
+            (attempts, now, int(action_id)),
+        )
+        connection.commit()
+        record_id = str(action["record_id"] or "")
+        new_state = json.loads(str(action["new_json"] or "{}"))
     try:
+        _update_base_workflow(record_id, new_state)
+    except Exception as exc:
+        error = str(exc)[:500]
         with sqlite3.connect(db_path, timeout=10) as connection:
-            connection.execute("begin immediate")
-            cursor = connection.execute(
-                """
-                update recruiting_threads
-                set screening_status=?,interview_assigned=?,interview_result=?,updated_at=?
-                where thread_key=? and updated_at=?
-                """,
-                (
-                    new_state["screening_status"],
-                    int(new_state["interview_assigned"]),
-                    new_state["interview_result"],
-                    now,
-                    clean_key,
-                    str(row["updated_at"] or ""),
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("记录在写入期间发生变化")
+            _ensure_admin_actions_schema(connection)
             connection.execute(
-                """
-                create table if not exists recruiting_admin_actions(
-                    id integer primary key autoincrement,thread_key text not null,
-                    old_json text not null,new_json text not null,created_at text not null
-                )
-                """
-            )
-            connection.execute(
-                "insert into recruiting_admin_actions(thread_key,old_json,new_json,created_at) values(?,?,?,?)",
-                (clean_key, json.dumps(old_state, ensure_ascii=False), json.dumps(new_state, ensure_ascii=False), now),
+                "update recruiting_admin_actions set status='pending',last_error=?,updated_at=? where id=?",
+                (error, datetime.now(timezone.utc).isoformat(), int(action_id)),
             )
             connection.commit()
-    except Exception as exc:
-        try:
-            _update_base_workflow(record_id, old_state)
-        except Exception:
-            raise RuntimeError(f"本地写入失败且 Base 回滚失败：{exc}") from exc
-        raise
-    return {"ok": True, "thread_key": clean_key, "state": new_state, "updated_at": now}
+        return {"status": "pending", "attempts": attempts, "last_error": error}
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        _ensure_admin_actions_schema(connection)
+        connection.execute(
+            "update recruiting_admin_actions set status='committed',last_error='',updated_at=? where id=?",
+            (datetime.now(timezone.utc).isoformat(), int(action_id)),
+        )
+        connection.commit()
+    return {"status": "committed", "attempts": attempts, "last_error": ""}
+
+
+def reconcile_mail_admin_actions(db_path: Path, limit: int = 3) -> dict[str, Any]:
+    if not Path(db_path).exists():
+        return {"pending": 0, "replayed": 0}
+    replayed = 0
+    with _ADMIN_ACTION_LOCK:
+        with sqlite3.connect(db_path, timeout=10) as connection:
+            connection.row_factory = sqlite3.Row
+            _ensure_admin_actions_schema(connection)
+            rows = connection.execute(
+                """
+                select id from recruiting_admin_actions
+                where status in ('pending','syncing')
+                order by id asc limit ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        for row in rows:
+            result = _deliver_mail_admin_action(db_path, int(row["id"]))
+            if result["status"] == "committed":
+                replayed += 1
+        with sqlite3.connect(db_path, timeout=10) as connection:
+            _ensure_admin_actions_schema(connection)
+            pending = int(connection.execute(
+                "select count(*) from recruiting_admin_actions where status in ('pending','syncing')"
+            ).fetchone()[0])
+    return {"pending": pending, "replayed": replayed}
+
+
+def mail_admin_sync_status(db_path: Path) -> dict[str, Any]:
+    if not Path(db_path).exists():
+        return {"pending": 0, "replayed": 0}
+    with sqlite3.connect(db_path, timeout=5) as connection:
+        _ensure_admin_actions_schema(connection)
+        pending = int(connection.execute(
+            "select count(*) from recruiting_admin_actions where status in ('pending','syncing')"
+        ).fetchone()[0])
+    return {"pending": pending, "replayed": 0}
+
+
+def _ensure_admin_actions_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        create table if not exists recruiting_admin_actions(
+            id integer primary key autoincrement,
+            operation_id text not null default '',
+            thread_key text not null,
+            record_id text not null default '',
+            old_json text not null,
+            new_json text not null,
+            status text not null default 'committed',
+            attempts integer not null default 0,
+            last_error text not null default '',
+            created_at text not null,
+            updated_at text not null default ''
+        )
+        """
+    )
+    columns = {str(row[1]) for row in connection.execute("pragma table_info(recruiting_admin_actions)")}
+    additions = {
+        "operation_id": "text not null default ''",
+        "record_id": "text not null default ''",
+        "status": "text not null default 'committed'",
+        "attempts": "integer not null default 0",
+        "last_error": "text not null default ''",
+        "updated_at": "text not null default ''",
+    }
+    for name, definition in additions.items():
+        if name not in columns:
+            connection.execute(f"alter table recruiting_admin_actions add column {name} {definition}")
+    connection.execute(
+        "create index if not exists recruiting_admin_actions_status_idx on recruiting_admin_actions(status,id)"
+    )
+    connection.commit()
 
 
 def _parse_datetime(value: str) -> datetime | None:

@@ -239,7 +239,7 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     assert result["filters"]["screening_statuses"] == ["未筛选", "面试资格", "面试通过", "未通过", "实习生"]
 
 
-def test_mail_record_update_writes_base_then_sqlite_and_audit(tmp_path, monkeypatch):
+def test_mail_record_update_commits_local_outbox_then_base(tmp_path, monkeypatch):
     root, db = _record_fixture(tmp_path)
     monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
     calls = []
@@ -252,25 +252,133 @@ def test_mail_record_update_writes_base_then_sqlite_and_audit(tmp_path, monkeypa
     )
 
     assert result["state"] == {"screening_status": "面试资格", "interview_assigned": True, "interview_result": "通过"}
+    assert result["sync_status"] == "committed"
+    assert result["sync_attempts"] == 1
     assert calls == [("rec1", result["state"])]
     with sqlite3.connect(db) as connection:
         assert connection.execute("select screening_status,interview_assigned,interview_result from recruiting_threads where thread_key=?", ("a" * 32,)).fetchone() == ("面试资格", 1, "通过")
-        assert connection.execute("select count(*) from recruiting_admin_actions").fetchone()[0] == 1
+        assert connection.execute("select status,attempts from recruiting_admin_actions").fetchone() == ("committed", 1)
 
 
-def test_mail_record_base_failure_leaves_sqlite_unchanged(tmp_path, monkeypatch):
+def test_mail_record_base_failure_keeps_durable_pending_outbox(tmp_path, monkeypatch):
     root, db = _record_fixture(tmp_path)
     monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
     monkeypatch.setattr(mail_admin, "_update_base_workflow", lambda *_args: (_ for _ in ()).throw(RuntimeError("base unavailable")))
 
-    try:
-        mail_admin.update_mail_admin_record("a" * 32, {"screening_status": "未通过"}, "v1")
-    except RuntimeError as exc:
-        assert "base unavailable" in str(exc)
-    else:
-        raise AssertionError("Base failure must reject the update")
+    result = mail_admin.update_mail_admin_record("a" * 32, {"screening_status": "未通过"}, "v1")
+
+    assert result["sync_status"] == "pending"
+    assert "base unavailable" in result["sync_error"]
     with sqlite3.connect(db) as connection:
-        assert connection.execute("select screening_status from recruiting_threads where thread_key=?", ("a" * 32,)).fetchone()[0] == "未筛选"
+        assert connection.execute("select screening_status from recruiting_threads where thread_key=?", ("a" * 32,)).fetchone()[0] == "未通过"
+        assert connection.execute("select status,attempts,last_error from recruiting_admin_actions").fetchone() == ("pending", 1, "base unavailable")
+
+
+def test_pending_admin_action_replays_idempotently_after_restart_window(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    calls = []
+    failures = [True]
+
+    def flaky_base(record_id, state):
+        calls.append((record_id, dict(state)))
+        should_fail = failures.pop(0) if failures else False
+        if should_fail:
+            raise RuntimeError("temporary timeout")
+
+    monkeypatch.setattr(mail_admin, "_update_base_workflow", flaky_base)
+    result = mail_admin.update_mail_admin_record("a" * 32, {"screening_status": "面试资格"}, "v1")
+    replay = mail_admin.reconcile_mail_admin_actions(db, limit=3)
+
+    assert result["sync_status"] == "pending"
+    assert replay == {"pending": 0, "replayed": 1}
+    assert calls == [
+        ("rec1", {"screening_status": "面试资格", "interview_assigned": False, "interview_result": "未开始"}),
+        ("rec1", {"screening_status": "面试资格", "interview_assigned": False, "interview_result": "未开始"}),
+    ]
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("select status,attempts from recruiting_admin_actions").fetchone() == ("committed", 2)
+
+
+def test_staged_action_survives_crash_before_remote_delivery(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    delivered = []
+    action = mail_admin._stage_mail_admin_action(
+        db,
+        "a" * 32,
+        {"interview_assigned": True},
+        "v1",
+    )
+
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("select interview_assigned from recruiting_threads where thread_key=?", ("a" * 32,)).fetchone()[0] == 1
+        assert connection.execute("select status from recruiting_admin_actions").fetchone()[0] == "pending"
+
+    monkeypatch.setattr(mail_admin, "_update_base_workflow", lambda record_id, state: delivered.append((record_id, dict(state))))
+    assert mail_admin.reconcile_mail_admin_actions(db, limit=3) == {"pending": 0, "replayed": 1}
+    assert delivered[0][0] == "rec1"
+    assert delivered[0][1]["interview_assigned"] is True
+
+
+def test_pending_actions_for_same_candidate_replay_in_order(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    calls = []
+    unavailable = {"value": True}
+
+    def base_write(record_id, state):
+        calls.append((record_id, dict(state)))
+        if unavailable["value"]:
+            raise RuntimeError("base timeout")
+
+    monkeypatch.setattr(mail_admin, "_update_base_workflow", base_write)
+    first = mail_admin.update_mail_admin_record("a" * 32, {"screening_status": "面试资格"}, "v1")
+    second = mail_admin.update_mail_admin_record(
+        "a" * 32,
+        {"interview_result": "通过"},
+        first["updated_at"],
+    )
+
+    assert first["sync_status"] == "pending"
+    assert second["sync_status"] == "pending"
+    assert second["sync_error"] == "等待前序飞书同步"
+    assert len(calls) == 1
+
+    unavailable["value"] = False
+    assert mail_admin.reconcile_mail_admin_actions(db, limit=10) == {"pending": 0, "replayed": 2}
+    assert [item[1] for item in calls[1:]] == [
+        {"screening_status": "面试资格", "interview_assigned": False, "interview_result": "未开始"},
+        {"screening_status": "面试资格", "interview_assigned": False, "interview_result": "通过"},
+    ]
+    assert mail_admin.mail_admin_sync_status(db) == {"pending": 0, "replayed": 0}
+
+
+def test_admin_outbox_migrates_legacy_audit_table_in_place(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            """
+            create table recruiting_admin_actions(
+                id integer primary key autoincrement,thread_key text not null,
+                old_json text not null,new_json text not null,created_at text not null
+            )
+            """
+        )
+        connection.execute(
+            "insert into recruiting_admin_actions(thread_key,old_json,new_json,created_at) values(?,?,?,?)",
+            ("a" * 32, "{}", "{}", "legacy"),
+        )
+    monkeypatch.setattr(mail_admin, "_update_base_workflow", lambda *_args: None)
+
+    result = mail_admin.update_mail_admin_record("a" * 32, {"screening_status": "面试资格"}, "v1")
+
+    assert result["sync_status"] == "committed"
+    with sqlite3.connect(db) as connection:
+        columns = {row[1] for row in connection.execute("pragma table_info(recruiting_admin_actions)")}
+        assert {"operation_id", "record_id", "status", "attempts", "last_error", "updated_at"} <= columns
+        assert connection.execute("select status from recruiting_admin_actions where created_at='legacy'").fetchone()[0] == "committed"
 
 
 def test_mail_admin_page_contains_candidate_workbench_controls():
@@ -291,8 +399,13 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'class="record-table-wrap"' in html
     assert "max-height:calc(100dvh - 344px)" in html
     assert "recordState={items:[],offset:0,limit:20" in html
-    assert "点击姓名查看完整材料" in html
+    assert "筛选与面试操作同步飞书 Base；材料文档保持只读" in html
     assert "<th>摘要</th>" not in html
+    assert "<th>回复</th>" in html
+    assert "item.has_replied?'已回复':'未回复'" in html
+    assert "['回复状态',item.has_replied?'已回复':'未回复']" in html
     assert 'class="ops-details wide"' in html
     assert "height:100dvh" in html
     assert "margin:0 0 0 auto" in html
+    assert "本地已保存，等待飞书同步" in html
+    assert "data.admin_sync?.pending" in html

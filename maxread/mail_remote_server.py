@@ -5,11 +5,21 @@ import hmac
 import json
 import os
 import socket
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from .mail_admin import mail_admin_records, mail_admin_status, trigger_mail_scan, update_mail_admin_config, update_mail_admin_record
+from .mail_admin import (
+    _mail_db_path,
+    _mail_root,
+    mail_admin_records,
+    mail_admin_status,
+    reconcile_mail_admin_actions,
+    trigger_mail_scan,
+    update_mail_admin_config,
+    update_mail_admin_record,
+)
 
 
 class MailRemoteHandler(BaseHTTPRequestHandler):
@@ -98,8 +108,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not str(os.environ.get("MAXREAD_MAIL_REMOTE_TOKEN", "")).strip():
         raise SystemExit("MAXREAD_MAIL_REMOTE_TOKEN is required")
+    threading.Thread(
+        target=_reconcile_loop,
+        name="maxread-mail-admin-outbox",
+        daemon=True,
+    ).start()
     ThreadingHTTPServer((args.host, args.port), MailRemoteHandler).serve_forever()
     return 0
+
+
+def _reconcile_loop() -> None:
+    while True:
+        try:
+            reconcile_mail_admin_actions(_mail_db_path(_mail_root()), limit=10)
+        except Exception:
+            pass
+        threading.Event().wait(30)
 
 
 if __name__ == "__main__":
