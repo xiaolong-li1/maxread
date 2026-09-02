@@ -570,6 +570,7 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "<th>筛选状态</th>" not in html
     assert "<th>面试</th>" not in html
     assert 'id="record-reply"' in html
+    assert '<option value="">回复状态</option>' in html
     assert "reply:$('record-reply').value" in html
     assert "updateRecord(" not in html
     assert "item.has_replied?'已回复':'未回复'" in html
