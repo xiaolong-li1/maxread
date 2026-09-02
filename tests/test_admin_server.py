@@ -230,14 +230,19 @@ def test_admin_html_recovers_from_transient_api_failure():
 
 
 def test_admin_mutations_require_authenticated_server_side_session(tmp_path, monkeypatch):
+    username = "zip.lab@outlook.com"
     password = "test-admin-password"
     settings = SimpleNamespace(
         db_path=tmp_path / "maxread.sqlite3",
+        admin_username=username,
         admin_password_hash=hashlib.sha256(password.encode("utf-8")).hexdigest(),
         lark_cli="lark-cli",
     )
     monkeypatch.setattr(admin_server, "mail_rejection_context", lambda key: {"ok": True, "thread_key": key})
     monkeypatch.setattr(admin_server, "generate_mail_rejection_draft", lambda key: {"ok": True, "thread_key": key, "source": "ai"})
+    monkeypatch.setattr(admin_server, "create_mail_rejection_batch", lambda keys: {"ok": True, "keys": keys, "batch": {"id": 9}})
+    monkeypatch.setattr(admin_server, "mail_rejection_batch", lambda batch_id: {"ok": True, "batch": {"id": batch_id}})
+    monkeypatch.setattr(admin_server, "queue_mail_rejection_batch_send", lambda batch_id, confirmation: {"ok": True, "batch": {"id": batch_id}, "confirmation": confirmation})
     monkeypatch.setattr(admin_server, "save_mail_rejection_draft", lambda key, subject, body, application_type, generation_source: {"ok": True, "thread_key": key, "subject": subject, "body": body})
     monkeypatch.setattr(admin_server, "save_mail_rejection_template", lambda subject, body, application_type: {"ok": True, "subject": subject, "body": body})
     monkeypatch.setattr(admin_server, "send_mail_rejection", lambda draft_id, confirmation: {"ok": True, "draft_id": draft_id, "confirmation": confirmation})
@@ -258,7 +263,7 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
     try:
         response, body = request("GET", "/api/admin/status")
         assert response.status == 200
-        assert body == {"authenticated": False}
+        assert body == {"authenticated": False, "username": ""}
 
         response, body = request("GET", "/api/summary")
         assert response.status == 401
@@ -272,7 +277,11 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
         assert response.status == 401
         assert body["error"] == "需要管理员登录"
 
-        response, body = request("POST", "/api/admin/login", {"password": password})
+        response, body = request("POST", "/api/admin/login", {"username": "wrong@example.com", "password": password})
+        assert response.status == 401
+        assert body["error"] == "管理员账号或密码错误"
+
+        response, body = request("POST", "/api/admin/login", {"username": username, "password": password})
         assert response.status == 200
         assert body["authenticated"] is True
         cookie = response.getheader("set-cookie").split(";", 1)[0]
@@ -291,7 +300,7 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
 
         response, body = request("GET", "/api/admin/status", cookie=cookie)
         assert response.status == 200
-        assert body == {"authenticated": True}
+        assert body == {"authenticated": True, "username": username}
 
         response, body = request("GET", "/api/summary", cookie=cookie)
         assert response.status == 200
@@ -318,6 +327,25 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
 
         response, body = request(
             "POST",
+            "/api/admin/mail/rejection-batch",
+            {"thread_keys": ["a" * 32, "b" * 32]},
+            cookie,
+        )
+        assert response.status == 200 and body["batch"]["id"] == 9
+
+        response, body = request("GET", "/api/admin/mail/rejection-batch?batch_id=9", cookie=cookie)
+        assert response.status == 200 and body["batch"]["id"] == 9
+
+        response, body = request(
+            "POST",
+            "/api/admin/mail/rejection-batch-send",
+            {"batch_id": 9, "confirmation": "发送 2 封拒信"},
+            cookie,
+        )
+        assert response.status == 200 and body["confirmation"] == "发送 2 封拒信"
+
+        response, body = request(
+            "POST",
             "/api/admin/mail/rejection-send",
             {"draft_id": 7, "confirmation": "candidate@example.com"},
             cookie,
@@ -331,14 +359,16 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
 
 
 def test_admin_session_survives_server_recreation_and_logout(tmp_path):
+    username = "zip.lab@outlook.com"
     password = "persistent-admin-password"
     settings = SimpleNamespace(
         db_path=tmp_path / "maxread.sqlite3",
+        admin_username=username,
         admin_password_hash=hashlib.sha256(password.encode("utf-8")).hexdigest(),
         lark_cli="lark-cli",
     )
     first = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
-    token, error = first.create_admin_session(password, "127.0.0.1")
+    token, error = first.create_admin_session(username, password, "127.0.0.1")
     first.server_close()
 
     second = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
@@ -361,6 +391,7 @@ def test_admin_session_survives_server_recreation_and_logout(tmp_path):
 def test_public_web_submit_creates_guest_session_and_queue_job(tmp_path):
     settings = SimpleNamespace(
         db_path=tmp_path / "maxread.sqlite3",
+        admin_username="",
         admin_password_hash="",
         lark_cli="lark-cli",
         queue_workers=3,
@@ -464,6 +495,7 @@ def test_worker_coordinator_requires_bearer_token_and_claims_paper(tmp_path, mon
     token = "worker-test-token"
     settings = SimpleNamespace(
         db_path=tmp_path / "maxread.sqlite3",
+        admin_username="",
         admin_password_hash="",
         lark_cli="lark-cli",
         feishu_as="bot",
@@ -511,6 +543,7 @@ def test_admin_session_can_overlay_web_identity_without_replacing_own_cookie(tmp
     password = "admin-pass"
     settings = SimpleNamespace(
         db_path=tmp_path / "maxread.sqlite3",
+        admin_username="zip.lab@outlook.com",
         admin_password_hash=hashlib.sha256(password.encode()).hexdigest(),
         lark_cli="lark-cli",
         queue_workers=3,
@@ -533,7 +566,7 @@ def test_admin_session_can_overlay_web_identity_without_replacing_own_cookie(tmp
         target_cookie = response.getheader("set-cookie").split(";", 1)[0]
         response, admin = json_request("GET", "/api/web/me")
         admin_cookie = response.getheader("set-cookie").split(";", 1)[0]
-        response, _body = json_request("POST", "/api/admin/login", {"password": password}, admin_cookie)
+        response, _body = json_request("POST", "/api/admin/login", {"username": "zip.lab@outlook.com", "password": password}, admin_cookie)
         auth_cookie = response.getheader("set-cookie").split(";", 1)[0]
         combined_cookie = f"{admin_cookie}; {auth_cookie}"
 
@@ -568,6 +601,8 @@ def test_admin_session_can_overlay_web_identity_without_replacing_own_cookie(tmp
 
 def test_admin_html_defaults_to_read_only_and_has_explicit_login():
     assert "管理员登录" in INDEX_HTML
+    assert 'id="admin-username"' in INDEX_HTML
+    assert "username:$('admin-username').value" in INDEX_HTML
     assert "adminAuthenticated: false" in INDEX_HTML
     assert "state.adminAuthenticated ? editor : readonly" in INDEX_HTML
     assert "000000" not in INDEX_HTML

@@ -16,9 +16,13 @@ from .mail_admin import (
     mail_admin_records,
     mail_rejection_context,
     generate_mail_rejection_draft,
+    create_mail_rejection_batch,
+    mail_rejection_batch,
+    queue_mail_rejection_batch_send,
     mail_admin_status,
     reconcile_mail_admin_actions,
     reconcile_mail_rejections,
+    reconcile_mail_rejection_batches,
     save_mail_rejection_draft,
     save_mail_rejection_template,
     send_mail_rejection,
@@ -58,6 +62,13 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if parsed.path == "/rejection-batch":
+            try:
+                query = parse_qs(parsed.query)
+                self._json(mail_rejection_batch(int(query.get("batch_id", ["0"])[0] or 0)))
+            except (TypeError, ValueError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
@@ -87,6 +98,17 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
                     str(payload.get("subject") or ""),
                     str(payload.get("body") or ""),
                     str(payload.get("application_type") or "internship"),
+                ))
+                return
+            if parsed.path == "/rejection-batch":
+                self._json(create_mail_rejection_batch([
+                    str(value) for value in payload.get("thread_keys") or []
+                ]))
+                return
+            if parsed.path == "/rejection-batch-send":
+                self._json(queue_mail_rejection_batch_send(
+                    int(payload.get("batch_id") or 0),
+                    str(payload.get("confirmation") or ""),
                 ))
                 return
             if parsed.path == "/rejection-generate":
@@ -157,6 +179,11 @@ def main(argv: list[str] | None = None) -> int:
         name="maxread-mail-base-cache",
         daemon=True,
     ).start()
+    threading.Thread(
+        target=_rejection_batch_loop,
+        name="maxread-mail-rejection-batches",
+        daemon=True,
+    ).start()
     ThreadingHTTPServer((args.host, args.port), MailRemoteHandler).serve_forever()
     return 0
 
@@ -179,6 +206,15 @@ def _base_pull_loop() -> None:
         except Exception:
             pass
         threading.Event().wait(interval)
+
+
+def _rejection_batch_loop() -> None:
+    while True:
+        try:
+            reconcile_mail_rejection_batches(_mail_db_path(_mail_root()), prepare_limit=3, send_limit=1)
+        except Exception:
+            pass
+        threading.Event().wait(5)
 
 
 if __name__ == "__main__":

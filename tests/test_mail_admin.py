@@ -177,6 +177,9 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
     assert mail_admin.mail_rejection_context("a" * 32)["ok"] is True
     assert mail_admin.save_mail_rejection_draft("a" * 32, "主题", "正文")["ok"] is True
     assert mail_admin.save_mail_rejection_template("主题", "正文")["ok"] is True
+    assert mail_admin.create_mail_rejection_batch(["a" * 32, "b" * 32])["ok"] is True
+    assert mail_admin.mail_rejection_batch(9)["ok"] is True
+    assert mail_admin.queue_mail_rejection_batch_send(9, "发送 2 封拒信")["ok"] is True
     assert mail_admin.send_mail_rejection(7, "candidate@example.com")["ok"] is True
     assert [item[0] for item in requests] == [
         "http://127.0.0.1:18766/status",
@@ -185,6 +188,9 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
         "http://127.0.0.1:18766/rejection?thread_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "http://127.0.0.1:18766/rejection-draft",
         "http://127.0.0.1:18766/rejection-template",
+        "http://127.0.0.1:18766/rejection-batch",
+        "http://127.0.0.1:18766/rejection-batch?batch_id=9",
+        "http://127.0.0.1:18766/rejection-batch-send",
         "http://127.0.0.1:18766/rejection-send",
     ]
     assert all(item[2]["Authorization"] == "Bearer secret-token" for item in requests)
@@ -283,6 +289,23 @@ def _rejection_fixture(tmp_path: Path):
             ("d" * 32, "bohan-only@example.com", "测试申请", json.dumps(bohan_fields, ensure_ascii=False), "rec-bohan", "", "", "2026-09-02 16:18", "", "", "active", "未筛选", 0, "未开始", "", "v1"),
         )
     return root, db
+
+
+def _add_zip_candidate(db: Path, thread_key: str, message_id: int, address: str, name: str) -> None:
+    fields = {
+        "name": name, "mail_type": "candidate", "school": "浙江大学", "major": "计算机",
+        "projects": ["MLSys"], "purpose_summary": "申请目的：科研实习", "source_accounts": ["ZIP Lab"],
+    }
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "insert into messages values(?,?,?,?)",
+            (message_id, "实习生申请", f"<incoming-{message_id}@example.com>", "2026-09-02T17:00:00+08:00"),
+        )
+        connection.execute("insert into recruiting_messages values(?,?,'incoming')", (message_id, thread_key))
+        connection.execute(
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (thread_key, address, "实习生申请", json.dumps(fields, ensure_ascii=False), f"rec-{message_id}", f"doc-{message_id}", "https://doc", "2026-09-02 17:00", "", "", "active", "未筛选", 0, "未开始", "", "v1"),
+        )
 
 
 def test_rejection_context_is_zip_lab_only_and_uses_editable_default(tmp_path, monkeypatch):
@@ -400,6 +423,72 @@ def test_ai_rejection_failure_falls_back_to_matching_template(monkeypatch):
     assert result["application_type"] == "internship"
     assert result["source"] == "template"
     assert "实习生招生活动" in result["body"]
+
+
+def test_rejection_batch_prepares_ai_drafts_without_sending(tmp_path, monkeypatch):
+    root, db = _rejection_fixture(tmp_path)
+    _add_zip_candidate(db, "e" * 32, 2, "second@example.com", "王同学")
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.setattr(mail_admin, "_call_rejection_ai", lambda fields, subject, templates: {
+        "application_type": "internship",
+        "subject": "实习申请回复",
+        "body": f"{fields.get('name')}同学你好，感谢申请，暂时无法进入后续交流。",
+    })
+    sent = []
+    monkeypatch.setattr(mail_admin, "send_mail_rejection", lambda *_args: sent.append(True))
+
+    created = mail_admin.create_mail_rejection_batch(["c" * 32, "e" * 32])
+    progress = mail_admin.reconcile_mail_rejection_batches(db, prepare_limit=3, send_limit=0)
+    batch = mail_admin.mail_rejection_batch(created["batch"]["id"])
+
+    assert created["batch"]["status"] == "preparing"
+    assert progress == {"prepared": 2, "sent": 0, "failed": 0}
+    assert batch["batch"]["status"] == "ready"
+    assert batch["batch"]["counts"] == {"ready": 2}
+    assert all(item["generation_source"] == "ai" for item in batch["items"])
+    assert sent == []
+    with pytest.raises(ValueError, match="真实发送当前未启用"):
+        mail_admin.queue_mail_rejection_batch_send(batch["batch"]["id"], "发送 2 封拒信")
+
+
+def test_rejection_batch_rejects_mixed_ineligible_selection_atomically(tmp_path, monkeypatch):
+    root, db = _rejection_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+
+    with pytest.raises(ValueError, match="只支持 ZIP Lab"):
+        mail_admin.create_mail_rejection_batch(["c" * 32, "d" * 32])
+
+    with sqlite3.connect(db) as connection:
+        mail_admin._ensure_rejection_schema(connection)
+        assert connection.execute("select count(*) from recruiting_rejection_batches").fetchone()[0] == 0
+
+
+def test_rejection_batch_send_queue_reuses_single_send_pipeline(tmp_path, monkeypatch):
+    root, db = _rejection_fixture(tmp_path)
+    _add_zip_candidate(db, "e" * 32, 2, "second@example.com", "王同学")
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    for key in ("c" * 32, "e" * 32):
+        mail_admin.save_mail_rejection_draft(key, "回复", "拒信正文", "internship", "template")
+    batch = mail_admin.create_mail_rejection_batch(["c" * 32, "e" * 32])
+    env_path = root / "data/accounts/zip-lab.env"
+    env_path.write_text(env_path.read_text(encoding="utf-8").replace(
+        "RECRUITING_OUTBOUND_ENABLED=0", "RECRUITING_OUTBOUND_ENABLED=1",
+    ), encoding="utf-8")
+    monkeypatch.setattr(mail_admin, "_smtp_ready", lambda: True)
+    sent = []
+    monkeypatch.setattr(mail_admin, "send_mail_rejection", lambda draft_id, recipient: sent.append((draft_id, recipient)) or {"status": "sent"})
+
+    with pytest.raises(ValueError, match="发送 2 封拒信"):
+        mail_admin.queue_mail_rejection_batch_send(batch["batch"]["id"], "确认")
+    queued = mail_admin.queue_mail_rejection_batch_send(batch["batch"]["id"], "发送 2 封拒信")
+    first = mail_admin.reconcile_mail_rejection_batches(db, prepare_limit=1, send_limit=1)
+    second = mail_admin.reconcile_mail_rejection_batches(db, prepare_limit=1, send_limit=1)
+    completed = mail_admin.mail_rejection_batch(batch["batch"]["id"])
+
+    assert queued["batch"]["status"] == "sending"
+    assert first["sent"] == 1 and second["sent"] == 1
+    assert len(sent) == 2 and len({item[0] for item in sent}) == 2
+    assert completed["batch"]["status"] == "completed"
 
 
 def test_document_message_id_matches_feishu_without_angle_brackets():
@@ -640,6 +729,8 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "权威主库：飞书 Base" in html
     assert 'id="base-pull-status"' in html
     assert 'id="admin-password"' in html
+    assert 'id="admin-username"' in html
+    assert "username:$('admin-username').value" in html
     assert "loginMailAdmin(event)" in html
     assert "logoutMailAdmin()" in html
     assert 'id="record-page-input"' in html
@@ -660,6 +751,11 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="rejection-type"' in html
     assert 'id="generate-rejection"' in html
     assert "generateRejectionDraft()" in html
+    assert 'id="select-rejection-page"' in html
+    assert 'id="prepare-rejection-batch"' in html
+    assert 'id="rejection-batch-dialog"' in html
+    assert "createRejectionBatch()" in html
+    assert "queueRejectionBatchSend()" in html
 
 
 def test_nginx_post_allowlist_includes_rejection_actions():
@@ -668,6 +764,8 @@ def test_nginx_post_allowlist_includes_rejection_actions():
     assert "rejection-draft" in config
     assert "rejection-send" in config
     assert "rejection-generate" in config
+    assert "rejection-batch" in config
+    assert "rejection-batch-send" in config
 
 
 def test_mail_admin_sync_status_exposes_last_base_pull(tmp_path):

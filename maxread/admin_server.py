@@ -26,6 +26,9 @@ from .mail_admin import (
     mail_admin_status,
     mail_rejection_context,
     generate_mail_rejection_draft,
+    create_mail_rejection_batch,
+    mail_rejection_batch,
+    queue_mail_rejection_batch_send,
     save_mail_rejection_draft,
     save_mail_rejection_template,
     send_mail_rejection,
@@ -79,7 +82,7 @@ class AdminServer(ThreadingHTTPServer):
         self.web_pet_requests: dict[str, list[float]] = {}
         self.admin_lock = threading.Lock()
 
-    def create_admin_session(self, password: str, client_id: str) -> tuple[str, str]:
+    def create_admin_session(self, username: str, password: str, client_id: str) -> tuple[str, str]:
         now = time.time()
         with self.admin_lock:
             failures = [
@@ -90,9 +93,13 @@ class AdminServer(ThreadingHTTPServer):
             if len(failures) >= ADMIN_LOGIN_MAX_FAILURES:
                 self.admin_login_failures[client_id] = failures
                 return "", "too_many_attempts"
+            expected_username = str(getattr(self.settings, "admin_username", "") or "").strip().casefold()
+            candidate_username = str(username or "").strip().casefold()
             expected = str(getattr(self.settings, "admin_password_hash", "") or "").strip().lower()
             candidate = hashlib.sha256(str(password or "").encode("utf-8")).hexdigest()
-            if not expected or not secrets.compare_digest(candidate, expected):
+            username_ok = bool(expected_username) and secrets.compare_digest(candidate_username, expected_username)
+            password_ok = bool(expected) and secrets.compare_digest(candidate, expected)
+            if not username_ok or not password_ok:
                 failures.append(now)
                 self.admin_login_failures[client_id] = failures
                 return "", "invalid_password"
@@ -235,7 +242,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._json_response(self._with_store(lambda store: store.get_service_status()))
             return
         if parsed.path == "/api/admin/status":
-            self._json_response({"authenticated": self._is_admin()})
+            authenticated = self._is_admin()
+            self._json_response({
+                "authenticated": authenticated,
+                "username": str(getattr(self.server.settings, "admin_username", "") or "") if authenticated else "",
+            })
             return
         if parsed.path == "/api/admin/mail/status":
             if not self._require_admin():
@@ -260,6 +271,15 @@ class AdminHandler(BaseHTTPRequestHandler):
                 query = parse_qs(parsed.query)
                 self._json_response(mail_rejection_context(str(query.get("thread_key", [""])[0])))
             except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/rejection-batch":
+            if not self._require_admin():
+                return
+            try:
+                query = parse_qs(parsed.query)
+                self._json_response(mail_rejection_batch(int(query.get("batch_id", ["0"])[0] or 0)))
+            except (TypeError, ValueError, RuntimeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path == "/api/usage":
@@ -455,15 +475,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/admin/login":
             payload = self._read_json()
             token, error = self.server.create_admin_session(
+                str(payload.get("username", "")),
                 str(payload.get("password", "")),
                 str(self.client_address[0] if self.client_address else "unknown"),
             )
             if error:
                 status = HTTPStatus.TOO_MANY_REQUESTS if error == "too_many_attempts" else HTTPStatus.UNAUTHORIZED
-                self._error(status, "登录尝试过多，请稍后再试" if error == "too_many_attempts" else "管理员密码错误")
+                self._error(status, "登录尝试过多，请稍后再试" if error == "too_many_attempts" else "管理员账号或密码错误")
                 return
             self._json_response(
-                {"ok": True, "authenticated": True},
+                {"ok": True, "authenticated": True, "username": str(getattr(self.server.settings, "admin_username", "") or "")},
                 headers={"set-cookie": self._session_cookie(token)},
             )
             return
@@ -513,6 +534,24 @@ class AdminHandler(BaseHTTPRequestHandler):
                     str(payload.get("application_type") or "internship"),
                 ))
             except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/rejection-batch":
+            payload = self._read_json()
+            try:
+                values = payload.get("thread_keys") if isinstance(payload.get("thread_keys"), list) else []
+                self._json_response(create_mail_rejection_batch([str(value) for value in values]))
+            except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/rejection-batch-send":
+            payload = self._read_json()
+            try:
+                self._json_response(queue_mail_rejection_batch_send(
+                    int(payload.get("batch_id") or 0),
+                    str(payload.get("confirmation") or ""),
+                ))
+            except (TypeError, ValueError, RuntimeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path == "/api/admin/mail/rejection-generate":
@@ -1056,7 +1095,8 @@ INDEX_HTML = r'''
   <dialog id="admin-login-dialog">
     <form class="login-form" onsubmit="loginAdmin(event)">
       <h2>管理员登录</h2>
-      <input id="admin-password" type="password" inputmode="numeric" autocomplete="current-password" placeholder="管理员密码" required />
+      <input id="admin-username" type="email" autocomplete="username" placeholder="管理员账号" required />
+      <input id="admin-password" type="password" autocomplete="current-password" placeholder="管理员密码" required />
       <div id="admin-login-error" class="login-error"></div>
       <div class="login-actions"><button type="button" onclick="closeAdminDialog()">取消</button><button class="primary" type="submit">登录</button></div>
     </form>
@@ -1112,16 +1152,17 @@ function updateAdminButton() { $('admin-auth-button').textContent = state.adminA
 function toggleAdminSession() {
   if (state.adminAuthenticated) { logoutAdmin(); return; }
   $('admin-login-error').textContent = '';
+  $('admin-username').value = '';
   $('admin-password').value = '';
   $('admin-login-dialog').showModal();
-  window.setTimeout(() => $('admin-password').focus(), 0);
+  window.setTimeout(() => $('admin-username').focus(), 0);
 }
 function closeAdminDialog() { $('admin-login-dialog').close(); }
 async function loginAdmin(event) {
   event.preventDefault();
   $('admin-login-error').textContent = '';
   try {
-    const result = await api('/api/admin/login', {method:'POST', body:JSON.stringify({password:$('admin-password').value})});
+    const result = await api('/api/admin/login', {method:'POST', body:JSON.stringify({username:$('admin-username').value,password:$('admin-password').value})});
     state.adminAuthenticated = Boolean(result.authenticated);
     closeAdminDialog();
     updateAdminButton();

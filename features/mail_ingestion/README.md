@@ -163,6 +163,8 @@ IMAP_PASSWORD=app-password-or-mailbox-password
 授权命令仍会把真实发送总开关写为 `0`，必须另行明确开启。Bohan 邮箱不参与
 自动拒信发送。发送成功在同一 SQLite 事务中写入 `筛选状态=未通过` 和已回复
 时间，网页分别显示为“已拒绝”和“已回复”，再通过 outbox 同步 Base。
+管理员页面支持一次选择 1–20 位待筛选、未回复的 ZIP Lab 候选人。批次只负责
+并发准备草稿，确认后仍逐封复用单封事务；任何已成功邮件都不会因批次重试而重发。
 
 5090 的持久化服务模板位于 `deploy/recruiting-pipeline.service`。将 `RECRUITING_SCAN_INTERVAL_DAYS`、Base token/table ID、模型 API 基址和材料文档父文件夹写入机器上的非 Git 配置后，再用 `systemctl --user enable --now recruiting-pipeline.service` 启动。
 

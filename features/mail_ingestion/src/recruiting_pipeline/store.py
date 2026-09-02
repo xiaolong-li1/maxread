@@ -91,6 +91,27 @@ CREATE TABLE IF NOT EXISTS recruiting_outbound_drafts (
 );
 CREATE INDEX IF NOT EXISTS idx_recruiting_outbound_status
 ON recruiting_outbound_drafts(status, updated_at);
+CREATE TABLE IF NOT EXISTS recruiting_rejection_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'preparing',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS recruiting_rejection_batch_items (
+    batch_id INTEGER NOT NULL,
+    thread_key TEXT NOT NULL,
+    draft_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'queued',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(batch_id, thread_key),
+    FOREIGN KEY(batch_id) REFERENCES recruiting_rejection_batches(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rejection_batch_items_status
+ON recruiting_rejection_batch_items(status, updated_at);
 CREATE TABLE IF NOT EXISTS recruiting_runs (
     run_id TEXT PRIMARY KEY,
     started_at TEXT NOT NULL,

@@ -75,6 +75,7 @@ class Settings:
     duty_hour: int
     duty_minute: int
     duty_poll_seconds: int
+    admin_username: str
     admin_password_hash: str
 
     @classmethod
@@ -147,5 +148,6 @@ class Settings:
             duty_hour=int(os.environ.get("MAXREAD_DUTY_HOUR", "7")),
             duty_minute=int(os.environ.get("MAXREAD_DUTY_MINUTE", "0")),
             duty_poll_seconds=int(os.environ.get("MAXREAD_DUTY_POLL_SECONDS", "30")),
+            admin_username=os.environ.get("MAXREAD_ADMIN_USERNAME", "").strip().casefold(),
             admin_password_hash=os.environ.get("MAXREAD_ADMIN_PASSWORD_SHA256", "").strip().lower(),
         )

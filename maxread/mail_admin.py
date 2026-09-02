@@ -13,6 +13,7 @@ import unicodedata
 import uuid
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
@@ -250,6 +251,12 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
                     item["mail_type"] == "candidate"
                     and REJECTION_SOURCE_LABEL in item["source_accounts"]
                     and (not item["has_replied"] or rejection is not None)
+                )
+                item["rejection_selectable"] = (
+                    item["mail_type"] == "candidate"
+                    and REJECTION_SOURCE_LABEL in item["source_accounts"]
+                    and not item["has_replied"]
+                    and item["screening_status"] == "未筛选"
                 )
                 if mail_type != "all" and item["mail_type"] != mail_type:
                     continue
@@ -545,6 +552,291 @@ def reconcile_mail_rejections(db_path: Path, limit: int = 3) -> dict[str, int]:
     return {"pending": pending, "replayed": replayed, "delivery_unknown": unknown}
 
 
+def create_mail_rejection_batch(thread_keys: list[str]) -> dict[str, Any]:
+    if _remote_url():
+        return _remote_request("/rejection-batch", {"thread_keys": thread_keys})
+    clean_keys = list(dict.fromkeys(_validated_thread_key(value) for value in thread_keys))
+    if not 1 <= len(clean_keys) <= 20:
+        raise ValueError("每个拒信批次必须选择 1–20 位候选人")
+    db_path = _mail_db_path(_mail_root())
+    now = datetime.now(timezone.utc).isoformat()
+    with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        connection.execute("begin immediate")
+        items: list[tuple[str, int | None, str]] = []
+        for thread_key in clean_keys:
+            row, _fields, _incoming = _rejection_candidate(connection, thread_key)
+            if str(row["screening_status"] or "未筛选") != "未筛选":
+                raise ValueError("批量拒信只允许待筛选候选人")
+            draft = connection.execute(
+                "select id from recruiting_outbound_drafts where thread_key=? and status='draft' order by id desc limit 1",
+                (thread_key,),
+            ).fetchone()
+            items.append((thread_key, int(draft[0]) if draft else None, "ready" if draft else "queued"))
+        status = "ready" if all(item[2] == "ready" for item in items) else "preparing"
+        batch_id = int(connection.execute(
+            "insert into recruiting_rejection_batches(operation_id,status,created_at,updated_at) values(?,?,?,?)",
+            (uuid.uuid4().hex, status, now, now),
+        ).lastrowid)
+        connection.executemany(
+            """
+            insert into recruiting_rejection_batch_items(
+                batch_id,thread_key,draft_id,status,last_error,created_at,updated_at
+            ) values(?,?,?,?,'',?,?)
+            """,
+            [(batch_id, key, draft_id, item_status, now, now) for key, draft_id, item_status in items],
+        )
+        connection.commit()
+    return mail_rejection_batch(batch_id)
+
+
+def mail_rejection_batch(batch_id: int) -> dict[str, Any]:
+    if _remote_url():
+        return _remote_request(f"/rejection-batch?{urlencode({'batch_id': int(batch_id)})}")
+    db_path = _mail_db_path(_mail_root())
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        return _rejection_batch_payload(connection, int(batch_id))
+
+
+def queue_mail_rejection_batch_send(batch_id: int, confirmation: str) -> dict[str, Any]:
+    if _remote_url():
+        return _remote_request(
+            "/rejection-batch-send",
+            {"batch_id": int(batch_id), "confirmation": confirmation},
+        )
+    if not _outbound_enabled() or not _smtp_ready():
+        raise ValueError("ZIP Lab 拒信真实发送当前未启用")
+    db_path = _mail_db_path(_mail_root())
+    with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        connection.execute("begin immediate")
+        batch = connection.execute("select * from recruiting_rejection_batches where id=?", (int(batch_id),)).fetchone()
+        if batch is None:
+            raise ValueError("拒信批次不存在")
+        ready = connection.execute(
+            "select * from recruiting_rejection_batch_items where batch_id=? and status='ready' order by rowid",
+            (int(batch_id),),
+        ).fetchall()
+        expected = f"发送 {len(ready)} 封拒信"
+        if not ready or str(confirmation or "").strip() != expected:
+            raise ValueError(f"请输入“{expected}”确认")
+        for item in ready:
+            row, _fields, _incoming = _rejection_candidate(connection, str(item["thread_key"]))
+            if str(row["screening_status"] or "未筛选") != "未筛选":
+                raise ValueError("批次中有候选人已不再是待筛选状态，请刷新后重建批次")
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            "update recruiting_rejection_batch_items set status='send_queued',last_error='',updated_at=? where batch_id=? and status='ready'",
+            (now, int(batch_id)),
+        )
+        connection.execute(
+            "update recruiting_rejection_batches set status='sending',updated_at=? where id=?",
+            (now, int(batch_id)),
+        )
+        connection.commit()
+        return _rejection_batch_payload(connection, int(batch_id))
+
+
+def reconcile_mail_rejection_batches(
+    db_path: Path,
+    *,
+    prepare_limit: int = 3,
+    send_limit: int = 1,
+) -> dict[str, int]:
+    if not Path(db_path).exists():
+        return {"prepared": 0, "sent": 0, "failed": 0}
+    prepared = 0
+    sent = 0
+    failed = 0
+    with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        connection.execute(
+            "update recruiting_rejection_batch_items set status='queued',updated_at=? where status='preparing' and updated_at<?",
+            (datetime.now(timezone.utc).isoformat(), stale),
+        )
+        connection.execute(
+            """
+            update recruiting_rejection_batch_items
+            set status='sent',last_error='',updated_at=?
+            where status='sync_pending' and draft_id in (
+                select id from recruiting_outbound_drafts where status='sent'
+            )
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        queued = connection.execute(
+            "select batch_id,thread_key from recruiting_rejection_batch_items where status='queued' order by created_at limit ?",
+            (max(1, int(prepare_limit)),),
+        ).fetchall()
+        now = datetime.now(timezone.utc).isoformat()
+        connection.executemany(
+            "update recruiting_rejection_batch_items set status='preparing',updated_at=? where batch_id=? and thread_key=? and status='queued'",
+            [(now, int(row["batch_id"]), str(row["thread_key"])) for row in queued],
+        )
+        connection.commit()
+
+    def prepare_item(batch_id_value: int, thread_key_value: str) -> tuple[int, str, int | None, str]:
+        try:
+            result = generate_mail_rejection_draft(thread_key_value)
+            return batch_id_value, thread_key_value, int(result["draft"]["id"]), ""
+        except Exception as exc:
+            return batch_id_value, thread_key_value, None, str(exc)[:500]
+
+    if queued:
+        with ThreadPoolExecutor(max_workers=min(3, len(queued))) as executor:
+            futures = [executor.submit(prepare_item, int(row["batch_id"]), str(row["thread_key"])) for row in queued]
+            for future in as_completed(futures):
+                batch_id_value, thread_key_value, draft_id, error = future.result()
+                item_status = "ready" if draft_id else "failed"
+                prepared += int(bool(draft_id))
+                failed += int(not draft_id)
+                with sqlite3.connect(db_path, timeout=10) as connection:
+                    _ensure_rejection_schema(connection)
+                    connection.execute(
+                        "update recruiting_rejection_batch_items set draft_id=?,status=?,last_error=?,updated_at=? where batch_id=? and thread_key=?",
+                        (draft_id, item_status, error, datetime.now(timezone.utc).isoformat(), batch_id_value, thread_key_value),
+                    )
+                    connection.commit()
+
+    for _ in range(max(0, int(send_limit))):
+        with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+            connection.row_factory = sqlite3.Row
+            _ensure_rejection_schema(connection)
+            item = connection.execute(
+                "select * from recruiting_rejection_batch_items where status='send_queued' order by updated_at limit 1"
+            ).fetchone()
+            if item is None:
+                break
+            connection.execute(
+                "update recruiting_rejection_batch_items set status='sending',updated_at=? where batch_id=? and thread_key=? and status='send_queued'",
+                (datetime.now(timezone.utc).isoformat(), int(item["batch_id"]), str(item["thread_key"])),
+            )
+            connection.commit()
+        try:
+            with sqlite3.connect(db_path, timeout=10) as connection:
+                connection.row_factory = sqlite3.Row
+                draft = connection.execute("select recipient from recruiting_outbound_drafts where id=?", (int(item["draft_id"]),)).fetchone()
+            result = send_mail_rejection(int(item["draft_id"]), str(draft["recipient"]))
+            item_status = "sent" if result.get("status") == "sent" else "sync_pending" if result.get("status") == "sent_sync_pending" else "failed"
+            error = ""
+            sent += int(item_status == "sent")
+        except Exception as exc:
+            with sqlite3.connect(db_path, timeout=10) as connection:
+                draft_status_row = connection.execute("select status from recruiting_outbound_drafts where id=?", (int(item["draft_id"]),)).fetchone()
+            draft_status = str(draft_status_row[0] or "") if draft_status_row else ""
+            item_status = "delivery_unknown" if draft_status == "delivery_unknown" else "ready" if not _outbound_enabled() else "failed"
+            error = str(exc)[:500]
+            failed += int(item_status in {"failed", "delivery_unknown"})
+        with sqlite3.connect(db_path, timeout=10) as connection:
+            _ensure_rejection_schema(connection)
+            connection.execute(
+                "update recruiting_rejection_batch_items set status=?,last_error=?,updated_at=? where batch_id=? and thread_key=?",
+                (item_status, error, datetime.now(timezone.utc).isoformat(), int(item["batch_id"]), str(item["thread_key"])),
+            )
+            connection.commit()
+
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        batch_ids = [int(row[0]) for row in connection.execute(
+            "select id from recruiting_rejection_batches where status not in ('completed','cancelled')"
+        )]
+        for batch_id_value in batch_ids:
+            _refresh_rejection_batch_state(connection, batch_id_value)
+        connection.commit()
+    return {"prepared": prepared, "sent": sent, "failed": failed}
+
+
+def _refresh_rejection_batch_state(connection: sqlite3.Connection, batch_id: int) -> str:
+    counts = {
+        str(row[0]): int(row[1])
+        for row in connection.execute(
+            "select status,count(*) from recruiting_rejection_batch_items where batch_id=? group by status",
+            (int(batch_id),),
+        )
+    }
+    if counts.get("queued") or counts.get("preparing"):
+        status = "preparing"
+    elif counts.get("send_queued") or counts.get("sending") or counts.get("sync_pending"):
+        status = "sending"
+    elif counts.get("delivery_unknown"):
+        status = "attention"
+    elif counts.get("ready"):
+        status = "ready"
+    elif counts.get("failed"):
+        status = "needs_review"
+    else:
+        status = "completed"
+    now = datetime.now(timezone.utc).isoformat()
+    connection.execute(
+        "update recruiting_rejection_batches set status=?,updated_at=?,completed_at=? where id=?",
+        (status, now, now if status == "completed" else "", int(batch_id)),
+    )
+    return status
+
+
+def _rejection_batch_payload(connection: sqlite3.Connection, batch_id: int) -> dict[str, Any]:
+    batch = connection.execute("select * from recruiting_rejection_batches where id=?", (int(batch_id),)).fetchone()
+    if batch is None:
+        raise ValueError("拒信批次不存在")
+    rows = connection.execute(
+        """
+        select i.*,t.candidate_address,t.fields_json,
+               d.subject_text,d.application_type,d.generation_source,d.sent_at
+        from recruiting_rejection_batch_items i
+        join recruiting_threads t on t.thread_key=i.thread_key
+        left join recruiting_outbound_drafts d on d.id=i.draft_id
+        where i.batch_id=? order by i.rowid
+        """,
+        (int(batch_id),),
+    ).fetchall()
+    items: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for row in rows:
+        try:
+            fields = json.loads(str(row["fields_json"] or "{}"))
+        except json.JSONDecodeError:
+            fields = {}
+        item_status = str(row["status"] or "queued")
+        counts[item_status] = counts.get(item_status, 0) + 1
+        items.append({
+            "thread_key": str(row["thread_key"]),
+            "name": str(fields.get("name") or row["candidate_address"] or "unknown"),
+            "recipient": str(row["candidate_address"] or ""),
+            "draft_id": int(row["draft_id"]) if row["draft_id"] else None,
+            "status": item_status,
+            "application_type": str(row["application_type"] or "") if row["draft_id"] else "",
+            "application_type_label": REJECTION_TYPE_LABELS.get(str(row["application_type"] or ""), "") if row["draft_id"] else "",
+            "generation_source": str(row["generation_source"] or "") if row["draft_id"] else "",
+            "subject": str(row["subject_text"] or "") if row["draft_id"] else "",
+            "sent_at": str(row["sent_at"] or "") if row["draft_id"] else "",
+            "last_error": str(row["last_error"] or ""),
+        })
+    ready_count = counts.get("ready", 0)
+    return {
+        "ok": True,
+        "batch": {
+            "id": int(batch["id"]),
+            "operation_id": str(batch["operation_id"] or ""),
+            "status": str(batch["status"] or "preparing"),
+            "created_at": str(batch["created_at"] or ""),
+            "updated_at": str(batch["updated_at"] or ""),
+            "completed_at": str(batch["completed_at"] or ""),
+            "counts": counts,
+            "total": len(items),
+            "confirmation_text": f"发送 {ready_count} 封拒信",
+            "outbound_enabled": _outbound_enabled() and _smtp_ready(),
+        },
+        "items": items,
+    }
+
+
 def _validated_thread_key(thread_key: str) -> str:
     clean_key = str(thread_key or "").strip()
     if not re.fullmatch(r"[0-9a-f]{32}", clean_key):
@@ -601,6 +893,27 @@ def _ensure_rejection_schema(connection: sqlite3.Connection) -> None:
         );
         create index if not exists idx_recruiting_outbound_status
         on recruiting_outbound_drafts(status,updated_at);
+        create table if not exists recruiting_rejection_batches(
+            id integer primary key autoincrement,
+            operation_id text not null unique,
+            status text not null default 'preparing',
+            created_at text not null,
+            updated_at text not null,
+            completed_at text not null default ''
+        );
+        create table if not exists recruiting_rejection_batch_items(
+            batch_id integer not null,
+            thread_key text not null,
+            draft_id integer,
+            status text not null default 'queued',
+            last_error text not null default '',
+            created_at text not null,
+            updated_at text not null,
+            primary key(batch_id,thread_key),
+            foreign key(batch_id) references recruiting_rejection_batches(id) on delete cascade
+        );
+        create index if not exists idx_rejection_batch_items_status
+        on recruiting_rejection_batch_items(status,updated_at);
         """
     )
     columns = {str(row[1]) for row in connection.execute("pragma table_info(recruiting_outbound_drafts)")}
