@@ -469,7 +469,16 @@ class RecruitingRunner:
         processing_state = self.store.message_processing_state()
         pending_messages = [message for message in envelope.messages if not processing_state.get(message.id, ("", False))[1]]
         if self.docs and _needs_material_document(resolved_fields):
+            document_messages: list[StoredMessage] = []
             if thread.document_id:
+                materialized_ids = self.store.document_materialized_message_ids(thread.thread_key, thread.document_id)
+                document_messages = [message for message in pending_messages if message.id not in materialized_ids]
+                if document_messages:
+                    markers = {message.id: self._document_message_heading(envelope, message) for message in document_messages}
+                    existing_markers = self.docs.materialized_markers(thread.document_id, set(markers.values()))
+                    recovered_ids = [message_id for message_id, marker in markers.items() if marker in existing_markers]
+                    self.store.mark_document_messages_materialized(thread.thread_key, thread.document_id, recovered_ids)
+                    document_messages = [message for message in document_messages if message.id not in recovered_ids]
                 self.docs.update_title(thread.document_id, f"{resolved_fields.name}｜真实邮件材料")
                 summary_changed = bool(row and (previous_fields != resolved_fields or str(row["latest_time"] or "") != str(thread.latest_time or "")))
                 if summary_changed:
@@ -477,8 +486,13 @@ class RecruitingRunner:
                 # A reprocess must be idempotent: never append the complete
                 # structured summary again.  Only genuinely new messages and
                 # their newly materialized attachments are appended.
-                if pending_messages:
-                    self.docs.append(thread.document_id, self._document_delta_content(envelope, pending_messages))
+                if document_messages:
+                    self.docs.append(thread.document_id, self._document_delta_content(envelope, document_messages))
+                    self.store.mark_document_messages_materialized(
+                        thread.thread_key,
+                        thread.document_id,
+                        [message.id for message in document_messages],
+                    )
                     document_updated = True
                 document_id, document_url = thread.document_id, thread.document_url
             else:
@@ -506,6 +520,11 @@ class RecruitingRunner:
                     status="publishing",
                     last_error="",
                 )
+                self.store.mark_document_messages_materialized(
+                    thread.thread_key,
+                    document_id,
+                    [message.id for message in envelope.messages],
+                )
             attachment_messages = pending_messages if thread.document_id else list(envelope.messages)
             uploaded_digests = self.store.uploaded_attachment_digests(thread.thread_key)
             uploaded_any = False
@@ -517,7 +536,7 @@ class RecruitingRunner:
                 self.store.mark_attachment_uploaded(thread.thread_key, digest, path.name, document_id)
                 uploaded_digests.add(digest)
                 uploaded_any = True
-            if summary_changed or pending_messages or uploaded_any:
+            if summary_changed or document_messages or uploaded_any:
                 # Some document update calls replay tokenized media blocks;
                 # remove any replayed file cards before the run completes.
                 self.docs.deduplicate_files(document_id)
@@ -681,9 +700,8 @@ class RecruitingRunner:
             "## 新增邮件线程片段",
         ]
         for message in messages or list(envelope.messages):
-            direction = "我方回复" if message in envelope.outgoing else "候选人来信"
             parts.extend([
-                f"### UID {message.source_uid}｜{direction}｜{message.received_at or 'unknown'}｜{message.subject}",
+                f"### {self._document_message_heading(envelope, message)}",
                 f"发件人：{message.sender_address}",
                 "```text",
                 message.body_text[:50000],
@@ -704,9 +722,8 @@ class RecruitingRunner:
         """Render only newly arrived thread material for an existing doc."""
         parts = ["## 新增邮件线程片段", ""]
         for message in messages:
-            direction = "我方回复" if message in envelope.outgoing else "候选人来信"
             parts.extend([
-                f"### UID {message.source_uid}｜{direction}｜{message.received_at or 'unknown'}｜{message.subject}",
+                f"### {self._document_message_heading(envelope, message)}",
                 f"发件人：{message.sender_address}",
                 "```text",
                 message.body_text[:50000],
@@ -717,6 +734,11 @@ class RecruitingRunner:
         if names:
             parts.extend(["## 新增附件", "", *[f"- {name}" for name in names], ""])
         return "\n".join(parts)
+
+    @staticmethod
+    def _document_message_heading(envelope: ThreadEnvelope, message: StoredMessage) -> str:
+        direction = "我方回复" if message in envelope.outgoing else "候选人来信"
+        return f"UID {message.source_uid}｜{direction}｜{message.received_at or 'unknown'}｜{message.subject}"
 
 
 def _base_time(value: str | None) -> str | None:

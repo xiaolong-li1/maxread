@@ -60,6 +60,33 @@ class DocsSync:
             self.settings.feishu_as,
         ])
 
+    def materialized_markers(self, document_id: str, markers: set[str]) -> set[str]:
+        """Return deterministic message headings already present in a document."""
+        if not markers:
+            return set()
+        fetched = self._call([
+            self.settings.lark_cli,
+            "docs",
+            "+fetch",
+            "--doc",
+            document_id,
+            "--doc-format",
+            "markdown",
+            "--detail",
+            "simple",
+            "--scope",
+            "full",
+            "--as",
+            self.settings.feishu_as,
+        ])
+        content = str(fetched.get("data", {}).get("document", {}).get("content") or "")
+        headings = {
+            line[4:].strip()
+            for line in content.splitlines()
+            if line.startswith("### ")
+        }
+        return markers & headings
+
     def replace_summary(self, document_id: str, fields: Any, latest_time: str | None) -> bool:
         """Refresh simple summary lines without touching media blocks.
 

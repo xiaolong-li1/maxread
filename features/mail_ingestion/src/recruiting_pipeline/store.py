@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS recruiting_uploaded_attachments (
     uploaded_at TEXT NOT NULL,
     PRIMARY KEY(thread_key, digest)
 );
+CREATE TABLE IF NOT EXISTS recruiting_document_messages (
+    thread_key TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    message_record_id INTEGER NOT NULL,
+    materialized_at TEXT NOT NULL,
+    PRIMARY KEY(thread_key, document_id, message_record_id)
+);
 CREATE TABLE IF NOT EXISTS recruiting_runs (
     run_id TEXT PRIMARY KEY,
     started_at TEXT NOT NULL,
@@ -213,6 +220,41 @@ class PipelineStore:
     def mark_message_processed(self, message_id: int) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE recruiting_messages SET processed_at=? WHERE message_record_id=?", (datetime.now(UTC).isoformat(), message_id))
+
+    def document_materialized_message_ids(self, thread_key: str, document_id: str) -> set[int]:
+        self.initialize()
+        with self.connect() as conn:
+            return {
+                int(row[0])
+                for row in conn.execute(
+                    "select message_record_id from recruiting_document_messages where thread_key=? and document_id=?",
+                    (thread_key, document_id),
+                )
+            }
+
+    def mark_document_messages_materialized(
+        self,
+        thread_key: str,
+        document_id: str,
+        message_ids: Iterable[int],
+    ) -> None:
+        values = [
+            (thread_key, document_id, int(message_id), datetime.now(UTC).isoformat())
+            for message_id in dict.fromkeys(message_ids)
+        ]
+        if not values:
+            return
+        self.initialize()
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                insert into recruiting_document_messages(
+                    thread_key,document_id,message_record_id,materialized_at
+                ) values(?,?,?,?)
+                on conflict(thread_key,document_id,message_record_id) do nothing
+                """,
+                values,
+            )
 
     def release_processed_artifacts(self) -> int:
         """Release bulky local payloads only after their durable thread commit."""

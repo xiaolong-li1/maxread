@@ -256,6 +256,9 @@ class RecruitingPipelineTest(unittest.TestCase):
             self.assertEqual(store.message_processing_state()[1], ("key-b", False))
             store.mark_attachment_uploaded("key", "sha", "resume.pdf", "doc")
             self.assertEqual(store.uploaded_attachment_digests("key"), {"sha"})
+            store.mark_document_messages_materialized("key", "doc", [1, 2, 2])
+            self.assertEqual(store.document_materialized_message_ids("key", "doc"), {1, 2})
+            self.assertEqual(store.document_materialized_message_ids("key", "other-doc"), set())
 
     def test_document_token_is_checkpointed_before_media_upload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -291,6 +294,7 @@ class RecruitingPipelineTest(unittest.TestCase):
                 source_accounts=["ZIP Lab"],
             ).normalized()
             saved = []
+            materialized = []
             runner = RecruitingRunner.__new__(RecruitingRunner)
             runner._envelope_cache = {"thread": envelope}
             runner._download_external = lambda _envelope: None
@@ -301,6 +305,8 @@ class RecruitingPipelineTest(unittest.TestCase):
                 get_thread=lambda _key: None,
                 fields_from_row=lambda _row: None,
                 message_processing_state=lambda: {},
+                document_materialized_message_ids=lambda _key, _doc: set(),
+                mark_document_messages_materialized=lambda key, doc, ids: materialized.append((key, doc, list(ids))),
                 uploaded_attachment_digests=lambda _key: set(),
                 save_thread=lambda *args, **kwargs: saved.append(kwargs),
             )
@@ -334,6 +340,90 @@ class RecruitingPipelineTest(unittest.TestCase):
 
             self.assertEqual(saved[0]["doc_id"], "doc-token")
             self.assertEqual(saved[0]["status"], "publishing")
+            self.assertEqual(materialized, [("thread", "doc-token", [1])])
+
+    def test_existing_remote_message_marker_prevents_duplicate_append(self) -> None:
+        message = StoredMessage(
+            1,
+            "42",
+            "INBOX",
+            "申请",
+            "候选人",
+            "candidate@example.com",
+            "2026-09-02T10:00:00+08:00",
+            "申请材料",
+            Path("/tmp/message.eml"),
+        )
+        envelope = ThreadEnvelope(
+            "thread",
+            "candidate@example.com",
+            "申请",
+            (message,),
+            (message,),
+            (),
+            frozenset({"INBOX"}),
+            frozenset({"zip.lab@zju.edu.cn"}),
+        )
+        fields = CandidateFields(
+            name="候选人",
+            school="浙江大学",
+            mail_type="candidate",
+            projects=["MLSys"],
+            source_accounts=["ZIP Lab"],
+        ).normalized()
+        row = {
+            "screening_status": "未筛选",
+            "interview_result": "未开始",
+            "interview_assigned": 0,
+            "base_record_id": "rec",
+            "latest_time": "2026-09-02 10:00",
+        }
+        materialized = []
+        appended = []
+        runner = RecruitingRunner.__new__(RecruitingRunner)
+        runner._envelope_cache = {"thread": envelope}
+        runner._download_external = lambda _envelope: None
+        runner._attachment_paths = lambda *_args: []
+        runner.dry_run = False
+        runner.store = SimpleNamespace(
+            get_thread=lambda _key: row,
+            fields_from_row=lambda _row: fields,
+            message_processing_state=lambda: {},
+            document_materialized_message_ids=lambda _key, _doc: set(),
+            mark_document_messages_materialized=lambda key, doc, ids: materialized.append((key, doc, list(ids))),
+            uploaded_attachment_digests=lambda _key: set(),
+            save_thread=lambda *_args, **_kwargs: None,
+            mark_message_processed=lambda _id: None,
+        )
+        runner.base = SimpleNamespace(
+            find_existing=lambda *_args: "rec",
+            current_state=lambda _id: None,
+            upsert=lambda **_kwargs: SimpleNamespace(record_id="rec"),
+        )
+        marker = runner._document_message_heading(envelope, message)
+        runner.docs = SimpleNamespace(
+            materialized_markers=lambda _doc, _markers: {marker},
+            update_title=lambda *_args: None,
+            replace_summary=lambda *_args: False,
+            append=lambda *_args: appended.append(True),
+            deduplicate_files=lambda *_args: 0,
+        )
+        thread = ProcessedThread(
+            "thread",
+            "candidate@example.com",
+            "2026-09-02 10:00",
+            fields,
+            None,
+            None,
+            "doc-token",
+            "https://example/doc-token",
+            True,
+        )
+
+        runner._sync_thread(thread)
+
+        self.assertEqual(appended, [])
+        self.assertEqual(materialized, [("thread", "doc-token", [1])])
 
     def test_base_backfill_reset_is_windowed_and_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
