@@ -263,9 +263,17 @@ def delete_web_project_category(store: Store, identity, name: str) -> dict:
     clean_name = " ".join(str(name or "").split()).strip()
     if not clean_name:
         raise ValueError("分类名称不能为空")
-    if clean_name in RESERVED_PROJECT_CATEGORIES:
-        raise ValueError("系统分类不能删除")
-    return {"ok": True, **store.delete_web_project_category(identity, clean_name)}
+    if clean_name in {"进行中", UNCLASSIFIED_CATEGORY}:
+        raise ValueError("状态分类不能删除")
+    custom_categories = set(store.web_project_categories(identity))
+    if clean_name in custom_categories:
+        return {"ok": True, **store.delete_web_project_category(identity, clean_name)}
+    if clean_name in PROJECT_CATEGORIES:
+        return {
+            "ok": True,
+            **store.delete_web_project_category(identity, clean_name, ai_only=True),
+        }
+    raise ValueError("分类不存在")
 
 
 def organize_web_projects(

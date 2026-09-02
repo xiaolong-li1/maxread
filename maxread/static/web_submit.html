@@ -740,10 +740,13 @@
           const toolbar = category === '已完成未分类' && state.me?.bound
             ? `<div class="unclassified-toolbar" data-guide="organize"><label class="select-all"><input type="checkbox" ${projects.length && selectedCount === projects.length ? 'checked' : ''} onchange="toggleAllUnclassified(this.checked)" />全选</label><button class="organize-button" ${selectedCount ? '' : 'disabled'} onclick="organizeSelectedProjects()" title="只整理勾选的未分类项目"><span class="icon"><svg viewBox="0 0 24 24"><path d="m12 3-1.9 4.1L6 9l4.1 1.9L12 15l1.9-4.1L18 9l-4.1-1.9Z"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4"/></svg></span><span id="organize-label">自动归类所选${selectedCount ? ` (${selectedCount})` : ''}</span></button></div>`
             : '';
-          const deleteCategory = state.customCategories.includes(category)
-            ? `<button class="category-delete-button" aria-label="删除分类 ${esc(category)}" title="删除分类，文章移回已完成未分类" onclick="deleteCustomCategory(${esc(JSON.stringify(category))}, ${projects.length})">${icon('trash')}</button>`
+          const isCustomCategory = state.customCategories.includes(category);
+          const aiProjectCount = projects.filter(project => project.category_source === 'ai').length;
+          const removableCount = isCustomCategory ? projects.length : aiProjectCount;
+          const removeCategory = removableCount
+            ? `<button class="category-delete-button" aria-label="${isCustomCategory ? '删除分类' : '撤销 AI 分类'} ${esc(category)}" title="${isCustomCategory ? '删除分类' : '撤销 AI 整理'}，文章移回已完成未分类" onclick="deleteCategory(${esc(JSON.stringify(category))}, ${removableCount}, ${isCustomCategory ? 'true' : 'false'})">${icon('trash')}</button>`
             : '';
-          return `<section class="category-group" data-category="${esc(category)}"><div class="category-head-row"><button class="category-heading ${collapsed ? 'collapsed' : ''}" data-guide="category-heading" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button>${deleteCategory}${toolbar}</div><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
+          return `<section class="category-group" data-category="${esc(category)}"><div class="category-head-row"><button class="category-heading ${collapsed ? 'collapsed' : ''}" data-guide="category-heading" onclick="toggleCategory('${esc(category)}')" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="icon category-chevron"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></span><span>${esc(category)}</span><span class="category-count">${projects.length}</span></button>${removeCategory}${toolbar}</div><div class="category-list" ${collapsed ? 'hidden' : ''}>${projects.map(projectHtml).join('')}</div></section>`;
         }).join('');
       }
       if (state.petProject) {
@@ -933,15 +936,16 @@
       }
     }
 
-    async function deleteCustomCategory(name, projectCount) {
-      const countText = projectCount ? `其中 ${projectCount} 篇文章会移到“已完成未分类”。` : '';
-      if (!window.confirm(`删除自定义分类“${name}”？${countText}文档和收藏不会删除。`)) return;
+    async function deleteCategory(name, projectCount, customCategory) {
+      const action = customCategory ? `删除自定义分类“${name}”` : `撤销“${name}”中的 AI 整理`;
+      const countText = projectCount ? `${projectCount} 篇文章会移到“已完成未分类”。` : '';
+      if (!window.confirm(`${action}？${countText}文档、收藏和手动分类不会删除。`)) return;
       try {
         const result = await api('/api/web/categories', {method: 'POST', body: JSON.stringify({action: 'delete', name})});
         state.collapsedCategories.delete(name);
         localStorage.setItem('maxreadCollapsedCategories', JSON.stringify([...state.collapsedCategories]));
         if (state.category === name) state.category = 'all';
-        toast(`已删除“${name}”，${Number(result.moved || 0)} 篇文章移回未分类`);
+        toast(`${result.deleted ? `已删除“${name}”` : `已撤销“${name}”的 AI 整理`}，${Number(result.moved || 0)} 篇文章移回未分类`);
         await refreshProjects();
       } catch (error) {
         toast(error.message);
@@ -1049,7 +1053,7 @@
       {
         selector: '[data-guide="custom-category"]',
         title: '建立自己的论文分类',
-        text: '绑定飞书后，点“新建分类”输入名称，例如“位置编码”或“量化 Kernel”。分类只属于你的账号；手动分类不会被自动整理覆盖，自动整理也不会擅自创建新分类。自定义分类标题旁可删除，文章会移回“已完成未分类”，文档不会删除。',
+        text: '绑定飞书后，点“新建分类”输入名称，例如“位置编码”或“量化 Kernel”。分类只属于你的账号；手动分类不会被自动整理覆盖，自动整理也不会擅自创建新分类。自定义分类标题旁可删除；AI 整理出的系统分类旁可撤销整理。对应文章会移回“已完成未分类”，文档不会删除。',
       },
       {
         selector: '[data-guide="category-heading"]',
