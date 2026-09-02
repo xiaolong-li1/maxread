@@ -346,9 +346,6 @@
     .pet-sprite.thinking { background-position: 66.666% 0; }
     .pet-sprite.done { background-position: 100% 0; animation: pet-done 0.75s ease-in-out 2; }
     .pet-label { margin-top: -3px; color: var(--muted); font-size: 11px; }
-    .max-mover { position: fixed; z-index: 45; width: 62px; height: 82px; pointer-events: none; filter: drop-shadow(0 9px 12px rgba(39, 58, 45, 0.18)); }
-    .max-mover .pet-sprite { background-position: 33.333% 0; animation: pet-work 0.7s ease-in-out infinite; }
-    .max-mover span { position: absolute; top: 78px; left: 50%; padding: 4px 7px; color: var(--green); background: var(--paper); border: 1px solid #bad4c8; border-radius: 6px; box-shadow: 0 8px 22px rgba(27, 53, 39, .13); font-size: 11px; font-weight: 650; white-space: nowrap; transform: translateX(-50%); }
     .project-arrived .project-card { animation: project-arrived 0.85s ease-out; }
     .category-arrived { animation: category-arrived 1.15s ease-out; }
     .empty { padding: 38px 2px; color: var(--muted); }
@@ -573,7 +570,6 @@
       tourTarget: null,
       tourTransitionToken: 0,
       tourTransitioning: false,
-      projectMoveBusy: false,
       collapsedCategories: new Set(storedCollapsedCategories),
     };
     const $ = id => document.getElementById(id);
@@ -757,11 +753,9 @@
     }
 
     async function refreshProjects() {
-      if (state.projectMoveBusy) return;
       try {
         const previousRows = [...document.querySelectorAll('.project-row')];
         const previousCategories = new Map(previousRows.map(row => [row.dataset.source, row.dataset.category]));
-        const previousRects = new Map(previousRows.map(row => [row.dataset.source, row.getBoundingClientRect()]));
         const result = await api('/api/web/progress');
         state.projects = result.recent || [];
         const unclassifiedIds = new Set(state.projects.filter(item => item.category === '已完成未分类').map(item => item.source_id));
@@ -776,7 +770,7 @@
         renderService();
         renderProjects();
         const moved = state.projects.filter(item => previousCategories.has(item.source_id) && previousCategories.get(item.source_id) !== item.category);
-        if (moved.length) animateProjectMoves(moved, previousRects);
+        if (moved.length) highlightProjectMoves(moved);
       } catch (_error) {
         toast('项目状态暂时无法刷新');
       }
@@ -802,58 +796,17 @@
       return [...document.querySelectorAll('.project-row')].find(row => row.dataset.source === sourceId);
     }
 
-    const movePause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
-
-    async function animateProjectMoves(projects, previousRects) {
+    function highlightProjectMoves(projects) {
       if (!projects.length) return;
-      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      const groups = new Map();
-      projects.forEach(project => {
-        if (!groups.has(project.category)) groups.set(project.category, []);
-        groups.get(project.category).push(project);
+      const categories = new Set(projects.map(project => project.category));
+      document.querySelectorAll('.category-group').forEach(group => {
+        if (categories.has(group.dataset.category)) group.querySelector('.category-heading')?.classList.add('category-arrived');
       });
-      state.projectMoveBusy = true;
-      try {
-        for (const [category, items] of groups) {
-          const categoryGroup = [...document.querySelectorAll('.category-group')].find(group => group.dataset.category === category);
-          const heading = categoryGroup?.querySelector('.category-heading');
-          if (!heading) continue;
-          if (reduced) {
-            heading.classList.add('category-arrived');
-            items.forEach(item => projectRow(item.source_id)?.classList.add('project-arrived'));
-            await movePause(750);
-          } else {
-            const before = items.map(item => previousRects.get(item.source_id)).find(Boolean);
-            const helper = document.createElement('div');
-            helper.className = 'max-mover';
-            helper.innerHTML = `<div class="pet-sprite"></div><span>${items.length > 1 ? `${items.length} 篇 → ` : '→ '}${esc(category)}</span>`;
-            const startLeft = Math.min(window.innerWidth - 78, Math.max(12, Number(before?.right || window.innerWidth / 2) - 62));
-            const startTop = Math.min(window.innerHeight - 118, Math.max(16, Number(before?.top || window.innerHeight / 2)));
-            helper.style.left = `${startLeft}px`;
-            helper.style.top = `${startTop}px`;
-            document.body.appendChild(helper);
-            heading.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'nearest'});
-            await movePause(520);
-            const destination = heading.getBoundingClientRect();
-            const endLeft = Math.min(window.innerWidth - 78, Math.max(12, destination.right - 70));
-            const endTop = Math.min(window.innerHeight - 118, Math.max(16, destination.top - 28));
-            helper.style.transition = 'left 1250ms cubic-bezier(.2,.78,.2,1), top 1250ms cubic-bezier(.2,.78,.2,1), transform 1250ms ease';
-            helper.style.left = `${endLeft}px`;
-            helper.style.top = `${endTop}px`;
-            helper.style.transform = 'scale(1.06)';
-            await movePause(1280);
-            heading.classList.add('category-arrived');
-            items.forEach(item => projectRow(item.source_id)?.classList.add('project-arrived'));
-            helper.querySelector('span').textContent = `已到 ${category}`;
-            await movePause(850);
-            helper.remove();
-          }
-          heading.classList.remove('category-arrived');
-          items.forEach(item => projectRow(item.source_id)?.classList.remove('project-arrived'));
-        }
-      } finally {
-        state.projectMoveBusy = false;
-      }
+      projects.forEach(project => projectRow(project.source_id)?.classList.add('project-arrived'));
+      window.setTimeout(() => {
+        document.querySelectorAll('.category-arrived').forEach(element => element.classList.remove('category-arrived'));
+        document.querySelectorAll('.project-arrived').forEach(element => element.classList.remove('project-arrived'));
+      }, 900);
     }
 
     function toggleProjectSelection(sourceId, selected) {
