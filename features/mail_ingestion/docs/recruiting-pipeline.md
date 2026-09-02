@@ -116,6 +116,7 @@ RECRUITING_OPENAI_API_MODE=responses
 - 429、超时、连接错误、5xx：带抖动指数退避，默认最多 3 次，尊重 `Retry-After`。
 - 400、权限、参数错误：不重试，写入失败记录等待人工处理。
 - SQLite 保存 `thread_key`、`message_record_id`、`base_record_id`、`doc_id`、attempt/error；重启后继续未消费线程。
+- `recruiting_document_messages` 单独记录每封邮件正文是否已写入指定 Docx；它与“整条任务已完成”分离。账本缺失时，追加前先在真实文档中核对完整 UID 标题，防止附件或 Base 失败后的恢复重放正文。
 - 文档创建成功后先落库 token；附件按路径逐个追加。Base 使用已保存 record ID 更新，避免重复创建。
 - 已有文档重跑时只追加新邮件片段，不重复写入完整结构化摘要；同名同分钟邮件若没有材料文档精确匹配，不会任意复用旧行，而是创建独立 Base 记录。
 
