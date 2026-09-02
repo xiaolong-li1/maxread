@@ -60,6 +60,35 @@ CREATE TABLE IF NOT EXISTS recruiting_document_messages (
     materialized_at TEXT NOT NULL,
     PRIMARY KEY(thread_key, document_id, message_record_id)
 );
+CREATE TABLE IF NOT EXISTS recruiting_mail_templates (
+    template_key TEXT PRIMARY KEY,
+    subject_text TEXT NOT NULL,
+    body_text TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recruiting_outbound_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id TEXT NOT NULL UNIQUE,
+    thread_key TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    subject_text TEXT NOT NULL,
+    body_text TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    in_reply_to TEXT NOT NULL DEFAULT '',
+    references_text TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    base_action_id INTEGER,
+    doc_synced INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_recruiting_outbound_status
+ON recruiting_outbound_drafts(status, updated_at);
 CREATE TABLE IF NOT EXISTS recruiting_runs (
     run_id TEXT PRIMARY KEY,
     started_at TEXT NOT NULL,

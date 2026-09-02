@@ -229,13 +229,17 @@ def test_admin_html_recovers_from_transient_api_failure():
     assert "AbortController" in INDEX_HTML
 
 
-def test_admin_mutations_require_authenticated_server_side_session(tmp_path):
+def test_admin_mutations_require_authenticated_server_side_session(tmp_path, monkeypatch):
     password = "test-admin-password"
     settings = SimpleNamespace(
         db_path=tmp_path / "maxread.sqlite3",
         admin_password_hash=hashlib.sha256(password.encode("utf-8")).hexdigest(),
         lark_cli="lark-cli",
     )
+    monkeypatch.setattr(admin_server, "mail_rejection_context", lambda key: {"ok": True, "thread_key": key})
+    monkeypatch.setattr(admin_server, "save_mail_rejection_draft", lambda key, subject, body: {"ok": True, "thread_key": key, "subject": subject, "body": body})
+    monkeypatch.setattr(admin_server, "save_mail_rejection_template", lambda subject, body: {"ok": True, "subject": subject, "body": body})
+    monkeypatch.setattr(admin_server, "send_mail_rejection", lambda draft_id, confirmation: {"ok": True, "draft_id": draft_id, "confirmation": confirmation})
     server = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -291,6 +295,25 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path):
         response, body = request("GET", "/api/summary", cookie=cookie)
         assert response.status == 200
         assert "jobs" in body
+
+        response, body = request("GET", "/api/admin/mail/rejection?thread_key=" + "a" * 32, cookie=cookie)
+        assert response.status == 200 and body["thread_key"] == "a" * 32
+
+        response, body = request(
+            "POST",
+            "/api/admin/mail/rejection-draft",
+            {"thread_key": "a" * 32, "subject": "主题", "body": "正文"},
+            cookie,
+        )
+        assert response.status == 200 and body["subject"] == "主题"
+
+        response, body = request(
+            "POST",
+            "/api/admin/mail/rejection-send",
+            {"draft_id": 7, "confirmation": "candidate@example.com"},
+            cookie,
+        )
+        assert response.status == 200 and body["draft_id"] == 7
     finally:
         connection.close()
         server.shutdown()

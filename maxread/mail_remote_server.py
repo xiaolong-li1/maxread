@@ -8,14 +8,19 @@ import socket
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .mail_admin import (
     _mail_db_path,
     _mail_root,
     mail_admin_records,
+    mail_rejection_context,
     mail_admin_status,
     reconcile_mail_admin_actions,
+    reconcile_mail_rejections,
+    save_mail_rejection_draft,
+    save_mail_rejection_template,
+    send_mail_rejection,
     sync_mail_admin_cache,
     trigger_mail_scan,
     update_mail_admin_config,
@@ -45,6 +50,13 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if parsed.path == "/rejection":
+            try:
+                query = parse_qs(parsed.query)
+                self._json(mail_rejection_context(str(query.get("thread_key", [""])[0])))
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
@@ -67,6 +79,25 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
                     str(payload.get("thread_key") or ""),
                     payload.get("changes") if isinstance(payload.get("changes"), dict) else {},
                     str(payload.get("expected_updated_at") or ""),
+                ))
+                return
+            if parsed.path == "/rejection-template":
+                self._json(save_mail_rejection_template(
+                    str(payload.get("subject") or ""),
+                    str(payload.get("body") or ""),
+                ))
+                return
+            if parsed.path == "/rejection-draft":
+                self._json(save_mail_rejection_draft(
+                    str(payload.get("thread_key") or ""),
+                    str(payload.get("subject") or ""),
+                    str(payload.get("body") or ""),
+                ))
+                return
+            if parsed.path == "/rejection-send":
+                self._json(send_mail_rejection(
+                    int(payload.get("draft_id") or 0),
+                    str(payload.get("confirmation") or ""),
                 ))
                 return
         except (RuntimeError, ValueError) as exc:
@@ -127,6 +158,7 @@ def _reconcile_loop() -> None:
     while True:
         try:
             reconcile_mail_admin_actions(_mail_db_path(_mail_root()), limit=10)
+            reconcile_mail_rejections(_mail_db_path(_mail_root()), limit=5)
         except Exception:
             pass
         threading.Event().wait(30)

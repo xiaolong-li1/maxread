@@ -10,8 +10,8 @@ from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import patch
 
-from mail_collector.cli import command_configure
-from mail_collector.oauth import access_token
+from mail_collector.cli import build_parser, command_configure
+from mail_collector.oauth import IMAP_SMTP_SCOPES, access_token
 from mail_collector.config import Settings
 from mail_collector.imap_client import ImapClient, _folder_name_from_list_row, _mailbox_argument, decode_modified_utf7, encode_modified_utf7
 from mail_collector.parser import parse_message
@@ -149,6 +149,30 @@ class ConfigureTest(unittest.TestCase):
                 "expires_at": int(time.time()) + 3600,
             }), encoding="utf-8")
             self.assertEqual(access_token(cache_path), "dummy-access-token")
+
+    def test_outlook_auth_can_request_smtp_without_enabling_delivery(self) -> None:
+        args = build_parser().parse_args(["outlook-auth", "--smtp-send"])
+        self.assertTrue(args.smtp_send)
+        self.assertIn("https://outlook.office.com/SMTP.Send", IMAP_SMTP_SCOPES)
+
+    def test_oauth_refresh_preserves_the_authorized_scope_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "token.json"
+            cache_path.write_text(json.dumps({
+                "access_token": "expired",
+                "expires_at": 0,
+                "refresh_token": "refresh",
+                "client_id": "client",
+                "tenant": "consumers",
+                "scope_request": IMAP_SMTP_SCOPES,
+            }), encoding="utf-8")
+            with patch("mail_collector.oauth._post_form", return_value={
+                "access_token": "fresh",
+                "refresh_token": "new-refresh",
+                "expires_in": 3600,
+            }) as post:
+                self.assertEqual(access_token(cache_path), "fresh")
+            self.assertEqual(post.call_args.args[1]["scope"], IMAP_SMTP_SCOPES)
 
 
 if __name__ == "__main__":

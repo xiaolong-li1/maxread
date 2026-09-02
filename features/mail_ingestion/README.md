@@ -147,6 +147,21 @@ IMAP_PASSWORD=app-password-or-mailbox-password
 增加 `--refresh-ai`、`--refresh-docs`。中途失败的线程保持 pending，下一轮继续。常驻服务
 每轮成功后刷新“最近一周新增”视图的 7 天滚动边界。
 
+拒信功能仅适用于 `来源邮箱` 含 `ZIP Lab` 且尚无我方回复的线程。网页先保存
+可编辑草稿；真实发送同时要求管理员会话、完整收件地址二次确认、Outlook
+`SMTP.Send` OAuth 授权和 `RECRUITING_OUTBOUND_ENABLED=1`。SMTP 接受邮件后，
+草稿立即锁定；Base、SQLite 或材料 Docx 同步失败只补偿同步，不自动重发邮件。
+首次授权使用：
+
+```bash
+./bin/mail-collector outlook-auth \
+  --env-file data/accounts/zip-lab.env \
+  --smtp-send
+```
+
+授权命令仍会把真实发送总开关写为 `0`，必须另行明确开启。Bohan 邮箱不参与
+自动拒信发送。
+
 5090 的持久化服务模板位于 `deploy/recruiting-pipeline.service`。将 `RECRUITING_SCAN_INTERVAL_DAYS`、Base token/table ID、模型 API 基址和材料文档父文件夹写入机器上的非 Git 配置后，再用 `systemctl --user enable --now recruiting-pipeline.service` 启动。
 
 处理边界固定为：

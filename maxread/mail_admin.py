@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import smtplib
 import sqlite3
+import ssl
 import subprocess
 import threading
 import unicodedata
@@ -11,6 +14,8 @@ import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from email.utils import format_datetime, make_msgid
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -35,6 +40,22 @@ MAIL_PUBLIC_LINKS = (
 SCREENING_STATUSES = ("未筛选", "面试资格", "面试通过", "未通过", "实习生")
 INTERVIEW_RESULTS = ("未开始", "通过", "不通过")
 _ADMIN_ACTION_LOCK = threading.RLock()
+REJECTION_TEMPLATE_KEY = "zip-lab-rejection"
+REJECTION_DEFAULT_SUBJECT = "关于 ZIP Lab 实习生申请的回复"
+REJECTION_DEFAULT_BODY = """同学你好，
+
+感谢你关注浙江大学ZIP Lab的实习生招生活动。
+
+你的成绩和经历都很优秀，但是出于不同的研究背景考虑，我们还是决定暂时不邀请你加入ZIP Lab，希望你能找到更适合自己学习的地方。如果我们后续有合适的实习生空缺，会再次联系你，也欢迎你继续关注我们。
+
+再次感谢你对ZIP Lab的关注和认可，祝你学业顺利，生活愉快！
+
+
+Best Regards,
+ZIP Lab Recruitment
+https://ziplab.co/uploads/zip-lab-poster-full.html"""
+REJECTION_ACCOUNT_ID = "zip-lab"
+REJECTION_SOURCE_LABEL = "ZIP Lab"
 
 
 def mail_admin_status() -> dict[str, Any]:
@@ -212,6 +233,655 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
             "projects": ["MLSys", "Agentic Infrastructure", "Kernel Efficiency", "World Model"],
         },
     }
+
+
+def mail_rejection_context(thread_key: str) -> dict[str, Any]:
+    if _remote_url():
+        return _remote_request(f"/rejection?{urlencode({'thread_key': thread_key})}")
+    db_path = _mail_db_path(_mail_root())
+    clean_key = _validated_thread_key(thread_key)
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        row, fields, incoming = _rejection_candidate(connection, clean_key)
+        template = _rejection_template(connection)
+        draft = connection.execute(
+            """
+            select * from recruiting_outbound_drafts
+            where thread_key=? and status in ('draft','delivery_unknown','sent_sync_pending')
+            order by id desc limit 1
+            """,
+            (clean_key,),
+        ).fetchone()
+    subject = str(draft["subject_text"] if draft else template["subject"])
+    body = str(draft["body_text"] if draft else _render_rejection_template(template["body"], fields))
+    outbound_enabled = _outbound_enabled()
+    smtp_ready = _smtp_ready()
+    send_enabled = outbound_enabled and smtp_ready
+    return {
+        "ok": True,
+        "thread_key": clean_key,
+        "candidate": {
+            "name": str(fields.get("name") or row["candidate_address"] or "unknown"),
+            "recipient": str(row["candidate_address"] or ""),
+            "source_accounts": [str(value) for value in fields.get("source_accounts") or []],
+        },
+        "sender": _zip_lab_sender(),
+        "reply_to_subject": str(incoming["subject"] or "") if incoming else "",
+        "subject": subject,
+        "body": body,
+        "template": template,
+        "draft": _rejection_draft_payload(draft),
+        "outbound_enabled": send_enabled,
+        "send_gate": (
+            "服务器总开关当前关闭，只能保存草稿"
+            if not outbound_enabled
+            else "ZIP Lab SMTP 尚未完成授权，只能保存草稿"
+            if not smtp_ready
+            else "输入完整收件地址后方可发送"
+        ),
+    }
+
+
+def save_mail_rejection_template(subject: str, body: str) -> dict[str, Any]:
+    if _remote_url():
+        return _remote_request("/rejection-template", {"subject": subject, "body": body})
+    clean_subject, clean_body = _validated_rejection_content(subject, body)
+    now = datetime.now(timezone.utc).isoformat()
+    db_path = _mail_db_path(_mail_root())
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        _ensure_rejection_schema(connection)
+        connection.execute("begin immediate")
+        connection.execute(
+            """
+            insert into recruiting_mail_templates(template_key,subject_text,body_text,updated_at)
+            values(?,?,?,?)
+            on conflict(template_key) do update set
+                subject_text=excluded.subject_text,body_text=excluded.body_text,updated_at=excluded.updated_at
+            """,
+            (REJECTION_TEMPLATE_KEY, clean_subject, clean_body, now),
+        )
+        connection.commit()
+    return {"ok": True, "template": {"subject": clean_subject, "body": clean_body, "updated_at": now}}
+
+
+def save_mail_rejection_draft(thread_key: str, subject: str, body: str) -> dict[str, Any]:
+    if _remote_url():
+        return _remote_request(
+            "/rejection-draft",
+            {"thread_key": thread_key, "subject": subject, "body": body},
+        )
+    clean_key = _validated_thread_key(thread_key)
+    clean_subject, clean_body = _validated_rejection_content(subject, body)
+    db_path = _mail_db_path(_mail_root())
+    now = datetime.now(timezone.utc).isoformat()
+    with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        connection.execute("begin immediate")
+        row, _fields, incoming = _rejection_candidate(connection, clean_key)
+        existing = connection.execute(
+            "select id,operation_id,message_id from recruiting_outbound_drafts where thread_key=? and status='draft' order by id desc limit 1",
+            (clean_key,),
+        ).fetchone()
+        if existing:
+            draft_id = int(existing["id"])
+            connection.execute(
+                """
+                update recruiting_outbound_drafts
+                set subject_text=?,body_text=?,last_error='',updated_at=? where id=?
+                """,
+                (clean_subject, clean_body, now, draft_id),
+            )
+        else:
+            operation_id = uuid.uuid4().hex
+            message_id = make_msgid(idstring=f"maxread-{operation_id}", domain="ziplab.co")
+            in_reply_to = str(incoming["message_id"] or "") if incoming else ""
+            draft_id = int(connection.execute(
+                """
+                insert into recruiting_outbound_drafts(
+                    operation_id,thread_key,account_id,sender,recipient,subject_text,body_text,
+                    message_id,in_reply_to,references_text,status,created_at,updated_at
+                ) values(?,?,?,?,?,?,?,?,?,?,'draft',?,?)
+                """,
+                (
+                    operation_id,
+                    clean_key,
+                    REJECTION_ACCOUNT_ID,
+                    _zip_lab_sender(),
+                    str(row["candidate_address"] or ""),
+                    clean_subject,
+                    clean_body,
+                    message_id,
+                    in_reply_to,
+                    in_reply_to,
+                    now,
+                    now,
+                ),
+            ).lastrowid)
+        connection.commit()
+        draft = connection.execute("select * from recruiting_outbound_drafts where id=?", (draft_id,)).fetchone()
+    return {"ok": True, "draft": _rejection_draft_payload(draft)}
+
+
+def send_mail_rejection(draft_id: int, confirmation: str) -> dict[str, Any]:
+    if _remote_url():
+        return _remote_request(
+            "/rejection-send",
+            {"draft_id": int(draft_id), "confirmation": confirmation},
+            timeout=300,
+        )
+    if not _outbound_enabled():
+        raise ValueError("真实邮件发送尚未启用；请先完成 ZIP Lab SMTP 授权并显式开启总开关")
+    if not _smtp_ready():
+        raise ValueError("ZIP Lab SMTP 尚未完成授权")
+    db_path = _mail_db_path(_mail_root())
+    with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        connection.execute("begin immediate")
+        draft = connection.execute("select * from recruiting_outbound_drafts where id=?", (int(draft_id),)).fetchone()
+        if draft is None:
+            raise ValueError("拒信草稿不存在")
+        if str(draft["status"] or "") != "draft":
+            raise ValueError("该草稿已离开发送前状态，不能重复发送")
+        if str(confirmation or "").strip().casefold() != str(draft["recipient"] or "").strip().casefold():
+            raise ValueError("请输入完整收件地址确认")
+        _smtp_configuration()
+        connection.execute(
+            "update recruiting_outbound_drafts set status='sending',attempt_count=attempt_count+1,last_error='',updated_at=? where id=? and status='draft'",
+            (datetime.now(timezone.utc).isoformat(), int(draft_id)),
+        )
+        connection.commit()
+    try:
+        _smtp_send_zip_lab(draft)
+    except Exception as exc:
+        with sqlite3.connect(db_path, timeout=10) as connection:
+            _ensure_rejection_schema(connection)
+            connection.execute(
+                "update recruiting_outbound_drafts set status='delivery_unknown',last_error=?,updated_at=? where id=?",
+                (str(exc)[:1000], datetime.now(timezone.utc).isoformat(), int(draft_id)),
+            )
+            connection.commit()
+        raise RuntimeError("SMTP 发送结果不确定，系统不会自动重发；请先到 Outlook 已发送邮件中核对") from exc
+    _mark_rejection_delivered(db_path, int(draft_id))
+    return _sync_rejection_side_effects(db_path, int(draft_id))
+
+
+def reconcile_mail_rejections(db_path: Path, limit: int = 3) -> dict[str, int]:
+    if not Path(db_path).exists():
+        return {"pending": 0, "replayed": 0, "delivery_unknown": 0}
+    replayed = 0
+    with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        connection.execute(
+            """
+            update recruiting_outbound_drafts
+            set status='delivery_unknown',last_error='发送进程中断，投递结果未知；禁止自动重发',updated_at=?
+            where status='sending' and updated_at<?
+            """,
+            (datetime.now(timezone.utc).isoformat(), stale),
+        )
+        rows = connection.execute(
+            "select id from recruiting_outbound_drafts where status='sent_sync_pending' order by id limit ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        connection.commit()
+    for row in rows:
+        result = _sync_rejection_side_effects(Path(db_path), int(row["id"]))
+        if result.get("status") == "sent":
+            replayed += 1
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        _ensure_rejection_schema(connection)
+        pending = int(connection.execute("select count(*) from recruiting_outbound_drafts where status='sent_sync_pending'").fetchone()[0])
+        unknown = int(connection.execute("select count(*) from recruiting_outbound_drafts where status='delivery_unknown'").fetchone()[0])
+    return {"pending": pending, "replayed": replayed, "delivery_unknown": unknown}
+
+
+def _validated_thread_key(thread_key: str) -> str:
+    clean_key = str(thread_key or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", clean_key):
+        raise ValueError("无效邮件线程")
+    return clean_key
+
+
+def _validated_rejection_content(subject: str, body: str) -> tuple[str, str]:
+    clean_subject = str(subject or "").strip()
+    clean_body = str(body or "").strip()
+    if not clean_subject or len(clean_subject) > 200 or "\n" in clean_subject or "\r" in clean_subject:
+        raise ValueError("拒信主题必须是 1–200 字的单行文本")
+    if not clean_body or len(clean_body) > 20_000:
+        raise ValueError("拒信正文必须是 1–20000 字")
+    return clean_subject, clean_body
+
+
+def _ensure_rejection_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        create table if not exists recruiting_mail_templates(
+            template_key text primary key,subject_text text not null,
+            body_text text not null,updated_at text not null
+        );
+        create table if not exists recruiting_outbound_drafts(
+            id integer primary key autoincrement,
+            operation_id text not null unique,
+            thread_key text not null,
+            account_id text not null,
+            sender text not null,
+            recipient text not null,
+            subject_text text not null,
+            body_text text not null,
+            message_id text not null,
+            in_reply_to text not null default '',
+            references_text text not null default '',
+            status text not null default 'draft',
+            attempt_count integer not null default 0,
+            base_action_id integer,
+            doc_synced integer not null default 0,
+            last_error text not null default '',
+            created_at text not null,
+            updated_at text not null,
+            sent_at text not null default ''
+        );
+        create index if not exists idx_recruiting_outbound_status
+        on recruiting_outbound_drafts(status,updated_at);
+        """
+    )
+    columns = {str(row[1]) for row in connection.execute("pragma table_info(recruiting_outbound_drafts)")}
+    additions = {
+        "in_reply_to": "text not null default ''",
+        "references_text": "text not null default ''",
+        "base_action_id": "integer",
+        "doc_synced": "integer not null default 0",
+        "last_error": "text not null default ''",
+        "sent_at": "text not null default ''",
+    }
+    for name, definition in additions.items():
+        if name not in columns:
+            connection.execute(f"alter table recruiting_outbound_drafts add column {name} {definition}")
+    connection.commit()
+
+
+def _rejection_candidate(
+    connection: sqlite3.Connection,
+    thread_key: str,
+) -> tuple[sqlite3.Row, dict[str, Any], sqlite3.Row | None]:
+    row = connection.execute(
+        "select * from recruiting_threads where thread_key=? and status<>'inactive'",
+        (thread_key,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("候选人邮件记录不存在")
+    try:
+        fields = json.loads(str(row["fields_json"] or "{}"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("候选人结构化数据损坏") from exc
+    if str(fields.get("mail_type") or "other") == "other":
+        raise ValueError("其他邮件不能生成拒信")
+    sources = [str(value) for value in fields.get("source_accounts") or []]
+    if REJECTION_SOURCE_LABEL not in sources:
+        raise ValueError("目前只支持 ZIP Lab 收到或被抄送的邮件")
+    recipient = str(row["candidate_address"] or "").strip().casefold()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient):
+        raise ValueError("候选人收件地址无效")
+    if str(row["last_outgoing_time"] or "").strip():
+        raise ValueError("该候选线程已经有我方回复，不能自动准备拒信")
+    incoming = connection.execute(
+        """
+        select m.subject,m.message_id,m.received_at
+        from recruiting_messages rm join messages m on m.id=rm.message_record_id
+        where rm.thread_key=? and rm.direction='incoming'
+        order by coalesce(m.received_at,'') desc,m.id desc limit 1
+        """,
+        (thread_key,),
+    ).fetchone()
+    return row, fields, incoming
+
+
+def _rejection_template(connection: sqlite3.Connection) -> dict[str, str]:
+    row = connection.execute(
+        "select subject_text,body_text,updated_at from recruiting_mail_templates where template_key=?",
+        (REJECTION_TEMPLATE_KEY,),
+    ).fetchone()
+    if row is None:
+        return {"subject": REJECTION_DEFAULT_SUBJECT, "body": REJECTION_DEFAULT_BODY, "updated_at": ""}
+    return {"subject": str(row[0]), "body": str(row[1]), "updated_at": str(row[2])}
+
+
+def _render_rejection_template(body: str, fields: dict[str, Any]) -> str:
+    return str(body).replace("{name}", str(fields.get("name") or "同学"))
+
+
+def _rejection_draft_payload(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "id": int(row["id"]),
+        "operation_id": str(row["operation_id"] or ""),
+        "recipient": str(row["recipient"] or ""),
+        "sender": str(row["sender"] or ""),
+        "subject": str(row["subject_text"] or ""),
+        "body": str(row["body_text"] or ""),
+        "status": str(row["status"] or "draft"),
+        "attempt_count": int(row["attempt_count"] or 0),
+        "last_error": str(row["last_error"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+        "sent_at": str(row["sent_at"] or ""),
+    }
+
+
+def _mail_configuration() -> dict[str, str]:
+    mail_root = _mail_root()
+    project_root = Path(os.environ.get("MAXREAD_ROOT", str(mail_root.parent.parent))).expanduser()
+    return {
+        **_read_env(project_root / ".env"),
+        **_read_env(mail_root / "data/accounts/zip-lab.env"),
+    }
+
+
+def _zip_lab_sender() -> str:
+    sender = str(_mail_configuration().get("IMAP_USERNAME") or "").strip().casefold()
+    return sender or "zip.lab@outlook.com"
+
+
+def _outbound_enabled() -> bool:
+    return str(_mail_configuration().get("RECRUITING_OUTBOUND_ENABLED") or "0").strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _smtp_ready() -> bool:
+    try:
+        config = _smtp_configuration()
+    except (TypeError, ValueError):
+        return False
+    if config["auth"] == "password":
+        return bool(config["password"])
+    if config["explicit_token"]:
+        return True
+    cache_path = Path(str(config["token_cache"] or "")).expanduser()
+    if not cache_path.is_absolute():
+        cache_path = (_mail_root() / cache_path).resolve()
+    if not cache_path.exists():
+        return False
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    scopes = " ".join((str(cache.get("scope") or ""), str(cache.get("scope_request") or "")))
+    return "https://outlook.office.com/SMTP.Send" in scopes
+
+
+def _smtp_configuration() -> dict[str, Any]:
+    values = _mail_configuration()
+    sender = str(values.get("IMAP_USERNAME") or "").strip().casefold()
+    if sender != "zip.lab@outlook.com":
+        raise ValueError("拒信发件账号必须是 zip.lab@outlook.com")
+    security = str(values.get("SMTP_SECURITY") or "starttls").strip().casefold()
+    auth = str(values.get("SMTP_AUTH") or "oauth2").strip().casefold()
+    if security not in {"starttls", "ssl"} or auth not in {"oauth2", "password"}:
+        raise ValueError("ZIP Lab SMTP 安全或认证方式配置无效")
+    return {
+        "host": str(values.get("SMTP_HOST") or "smtp.office365.com").strip(),
+        "port": int(values.get("SMTP_PORT") or (465 if security == "ssl" else 587)),
+        "security": security,
+        "auth": auth,
+        "username": sender,
+        "password": str(values.get("SMTP_PASSWORD") or ""),
+        "explicit_token": str(values.get("SMTP_OAUTH2_ACCESS_TOKEN") or ""),
+        "token_cache": str(values.get("MS_TOKEN_CACHE") or ""),
+        "timeout": max(5, min(120, int(values.get("SMTP_TIMEOUT") or 30))),
+    }
+
+
+def _smtp_send_zip_lab(draft: sqlite3.Row) -> None:
+    config = _smtp_configuration()
+    message = EmailMessage()
+    message["From"] = config["username"]
+    message["To"] = str(draft["recipient"])
+    message["Subject"] = str(draft["subject_text"])
+    message["Date"] = format_datetime(datetime.now(timezone.utc))
+    message["Message-ID"] = str(draft["message_id"])
+    if str(draft["in_reply_to"] or ""):
+        message["In-Reply-To"] = str(draft["in_reply_to"])
+    if str(draft["references_text"] or ""):
+        message["References"] = str(draft["references_text"])
+    message.set_content(str(draft["body_text"]), subtype="plain", charset="utf-8")
+    context = ssl.create_default_context()
+    client = (
+        smtplib.SMTP_SSL(config["host"], config["port"], timeout=config["timeout"], context=context)
+        if config["security"] == "ssl"
+        else smtplib.SMTP(config["host"], config["port"], timeout=config["timeout"])
+    )
+    with client:
+        client.ehlo()
+        if config["security"] == "starttls":
+            client.starttls(context=context)
+            client.ehlo()
+        if config["auth"] == "oauth2":
+            token = _smtp_oauth_token(config)
+            auth = base64.b64encode(
+                f"user={config['username']}\x01auth=Bearer {token}\x01\x01".encode("utf-8")
+            ).decode("ascii")
+            code, response = client.docmd("AUTH", "XOAUTH2 " + auth)
+            if code != 235:
+                raise smtplib.SMTPAuthenticationError(code, response)
+        else:
+            if not config["password"]:
+                raise ValueError("SMTP_PASSWORD 未配置")
+            client.login(config["username"], config["password"])
+        client.send_message(message, from_addr=config["username"], to_addrs=[str(draft["recipient"])])
+
+
+def _smtp_oauth_token(config: dict[str, Any]) -> str:
+    if config["explicit_token"]:
+        return str(config["explicit_token"])
+    cache_path = Path(str(config["token_cache"] or "")).expanduser()
+    if not cache_path.is_absolute():
+        cache_path = (_mail_root() / cache_path).resolve()
+    if not cache_path.exists():
+        raise ValueError("Outlook OAuth token cache 不存在")
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    scopes = " ".join((str(cache.get("scope") or ""), str(cache.get("scope_request") or "")))
+    if "https://outlook.office.com/SMTP.Send" not in scopes:
+        raise ValueError("Outlook OAuth 尚未授权 SMTP.Send")
+    token = str(cache.get("access_token") or "")
+    if token and int(cache.get("expires_at") or 0) > int(datetime.now(timezone.utc).timestamp()) + 90:
+        return token
+    refresh_token = str(cache.get("refresh_token") or "")
+    client_id = str(cache.get("client_id") or "")
+    tenant = str(cache.get("tenant") or "consumers")
+    scope_request = str(cache.get("scope_request") or "").strip()
+    if not refresh_token or not client_id or "SMTP.Send" not in scope_request:
+        raise ValueError("Outlook SMTP OAuth 已过期，需要重新执行设备授权")
+    request = urllib.request.Request(
+        f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+        data=urlencode({
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": scope_request,
+        }).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            refreshed = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise ValueError(f"Outlook SMTP OAuth 刷新失败：{detail}") from exc
+    if "access_token" not in refreshed:
+        raise ValueError("Outlook SMTP OAuth 刷新未返回 access token")
+    refreshed.update({
+        "client_id": client_id,
+        "tenant": tenant,
+        "scope_request": scope_request,
+        "refresh_token": refreshed.get("refresh_token") or refresh_token,
+        "expires_at": int(datetime.now(timezone.utc).timestamp()) + int(refreshed.get("expires_in") or 3600),
+    })
+    _atomic_text(cache_path, json.dumps(refreshed, ensure_ascii=False, indent=2) + "\n", mode=0o600)
+    return str(refreshed["access_token"])
+
+
+def _mark_rejection_delivered(db_path: Path, draft_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        _ensure_admin_actions_schema(connection)
+        connection.execute("begin immediate")
+        draft = connection.execute("select * from recruiting_outbound_drafts where id=?", (draft_id,)).fetchone()
+        thread = connection.execute("select * from recruiting_threads where thread_key=?", (str(draft["thread_key"]),)).fetchone()
+        if thread is None:
+            raise RuntimeError("发送成功，但本地候选记录不存在")
+        old_state = _workflow_state(thread)
+        new_state = {**old_state, "screening_status": "未通过", "has_replied": True}
+        operation_id = f"rejection-{draft['operation_id']}"
+        existing = connection.execute(
+            "select id from recruiting_admin_actions where operation_id=? order by id desc limit 1",
+            (operation_id,),
+        ).fetchone()
+        if existing:
+            action_id = int(existing[0])
+        else:
+            action_id = int(connection.execute(
+                """
+                insert into recruiting_admin_actions(
+                    operation_id,thread_key,record_id,old_json,new_json,status,
+                    attempts,last_error,created_at,updated_at
+                ) values(?,?,?,?,?,'pending',0,'',?,?)
+                """,
+                (
+                    operation_id,
+                    str(draft["thread_key"]),
+                    str(thread["base_record_id"] or ""),
+                    json.dumps(old_state, ensure_ascii=False),
+                    json.dumps(new_state, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            ).lastrowid)
+        connection.execute(
+            "update recruiting_threads set last_outgoing_time=?,screening_status='未通过',updated_at=? where thread_key=?",
+            (now, now, str(draft["thread_key"])),
+        )
+        connection.execute(
+            """
+            update recruiting_outbound_drafts
+            set status='sent_sync_pending',base_action_id=?,sent_at=?,updated_at=?,last_error=''
+            where id=?
+            """,
+            (action_id, now, now, draft_id),
+        )
+        connection.commit()
+
+
+def _sync_rejection_side_effects(db_path: Path, draft_id: int) -> dict[str, Any]:
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        draft = connection.execute("select * from recruiting_outbound_drafts where id=?", (draft_id,)).fetchone()
+        if draft is None:
+            raise RuntimeError("拒信发送记录不存在")
+        thread = connection.execute("select doc_id from recruiting_threads where thread_key=?", (str(draft["thread_key"]),)).fetchone()
+    base_done = not draft["base_action_id"]
+    errors: list[str] = []
+    if draft["base_action_id"]:
+        delivery = _deliver_mail_admin_action(Path(db_path), int(draft["base_action_id"]))
+        base_done = delivery["status"] == "committed"
+        if not base_done and delivery.get("last_error"):
+            errors.append(str(delivery["last_error"]))
+    doc_done = bool(draft["doc_synced"]) or not thread or not str(thread["doc_id"] or "")
+    if not doc_done:
+        try:
+            _append_rejection_to_doc(str(thread["doc_id"]), draft)
+            doc_done = True
+        except Exception as exc:
+            errors.append(str(exc)[:500])
+    status = "sent" if base_done and doc_done else "sent_sync_pending"
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_rejection_schema(connection)
+        connection.execute(
+            "update recruiting_outbound_drafts set status=?,doc_synced=?,last_error=?,updated_at=? where id=?",
+            (status, int(doc_done), "；".join(errors)[:1000], now, draft_id),
+        )
+        connection.commit()
+        updated = connection.execute("select * from recruiting_outbound_drafts where id=?", (draft_id,)).fetchone()
+    return {"ok": True, "status": status, "draft": _rejection_draft_payload(updated)}
+
+
+def _append_rejection_to_doc(document_id: str, draft: sqlite3.Row) -> None:
+    values = _mail_configuration()
+    lark_cli = values.get("RECRUITING_LARK_CLI") or values.get("MAXREAD_LARK_CLI") or "lark-cli"
+    identity = values.get("RECRUITING_FEISHU_AS") or values.get("MAXREAD_FEISHU_AS") or "bot"
+    env = dict(os.environ)
+    node_value = str(values.get("MAXREAD_NODE") or "").strip()
+    if node_value:
+        env["PATH"] = f"{Path(node_value).expanduser().parent}:{Path(lark_cli).expanduser().parent}:{env.get('PATH', '')}"
+    fetch = subprocess.run(
+        [lark_cli, "docs", "+fetch", "--doc", document_id, "--doc-format", "markdown", "--detail", "simple", "--scope", "full", "--as", identity, "--format", "json"],
+        cwd=Path(os.environ.get("MAXREAD_ROOT", str(_mail_root().parent.parent))),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    fetched = _last_cli_json(fetch)
+    content = str(fetched.get("data", {}).get("document", {}).get("content") or "")
+    marker = str(draft["message_id"])
+    if marker in content:
+        return
+    sent_at = _parse_datetime(str(draft["sent_at"] or "")) or datetime.now(ZoneInfo("Asia/Shanghai"))
+    quoted_body = "\n".join("> " + line if line else ">" for line in str(draft["body_text"]).splitlines())
+    addition = "\n".join((
+        "## ZIP Lab 回复记录",
+        "",
+        f"- 发送时间：{sent_at.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 发件人：{draft['sender']}",
+        f"- 收件人：{draft['recipient']}",
+        f"- Message-ID：{marker}",
+        "",
+        quoted_body,
+    ))
+    updated = subprocess.run(
+        [lark_cli, "docs", "+update", "--doc", document_id, "--command", "append", "--doc-format", "markdown", "--content", addition, "--as", identity, "--format", "json"],
+        cwd=Path(os.environ.get("MAXREAD_ROOT", str(_mail_root().parent.parent))),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    _last_cli_json(updated)
+
+
+def _last_cli_json(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or completed.stdout or "飞书命令失败").strip()[-1000:])
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, Any]] = []
+    for index, character in enumerate(completed.stdout):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(completed.stdout[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            candidates.append(value)
+    if not candidates:
+        raise RuntimeError("飞书命令没有返回 JSON")
+    result = next((item for item in reversed(candidates) if "ok" in item or "data" in item), candidates[-1])
+    if result.get("ok") is False:
+        raise RuntimeError(json.dumps(result, ensure_ascii=False)[:1000])
+    return result
 
 
 def update_mail_admin_record(thread_key: str, changes: dict[str, Any], expected_updated_at: str = "") -> dict[str, Any]:
@@ -591,6 +1261,11 @@ def _mail_record(row: sqlite3.Row) -> dict[str, Any]:
         "last_error": str(row["last_error"] or ""),
         "updated_at": str(row["updated_at"] or ""),
     }
+    item["rejection_supported"] = (
+        mail_type == "candidate"
+        and REJECTION_SOURCE_LABEL in item["source_accounts"]
+        and not item["has_replied"]
+    )
     item["search_text"] = " ".join(
         str(value) for value in (
             item["name"], item["candidate_address"], item["school"],
@@ -668,6 +1343,8 @@ def _update_base_workflow(record_id: str, state: dict[str, Any]) -> None:
             }
         }
     }
+    if "has_replied" in state:
+        payload["update_records"][str(record_id)]["是否已回复"] = bool(state["has_replied"])
     env = dict(os.environ)
     node_value = str(values.get("MAXREAD_NODE") or "").strip()
     if node_value:
@@ -961,7 +1638,7 @@ def _remote_url() -> str:
     return str(os.environ.get("MAXREAD_MAIL_REMOTE_URL", "")).strip().rstrip("/")
 
 
-def _remote_request(path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _remote_request(path: str, payload: dict[str, Any] | None = None, *, timeout: int = 20) -> dict[str, Any]:
     url = _remote_url() + path
     token = str(os.environ.get("MAXREAD_MAIL_REMOTE_TOKEN", "")).strip()
     if not token:
@@ -974,7 +1651,7 @@ def _remote_request(path: str, payload: dict[str, Any] | None = None) -> dict[st
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=max(5, int(timeout))) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]

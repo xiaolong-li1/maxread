@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 IMAP_SCOPES = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access openid profile email"
+IMAP_SMTP_SCOPES = "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access openid profile email"
 # Public client bundled by better-email-mcp for local Outlook device-code auth.
 # Override with --client-id when operating a first-party registration.
 DEFAULT_OUTLOOK_CLIENT_ID = "d56f8c71-9f7c-43f4-9934-be29cb6e77b0"
@@ -42,9 +43,9 @@ def _save_cache(path: Path, payload: dict[str, object]) -> None:
     os.chmod(path, 0o600)
 
 
-def begin_device_flow(client_id: str, tenant: str) -> dict[str, object]:
+def begin_device_flow(client_id: str, tenant: str, scopes: str = IMAP_SCOPES) -> dict[str, object]:
     endpoint = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
-    result = _post_form(endpoint, {"client_id": client_id, "scope": IMAP_SCOPES})
+    result = _post_form(endpoint, {"client_id": client_id, "scope": scopes})
     if "error" in result:
         raise RuntimeError(str(result.get("error_description") or result["error"]))
     return result
@@ -72,6 +73,7 @@ def complete_device_flow(
     flow: dict[str, object],
     cache_path: Path,
     expected_username: str | None = None,
+    scopes: str = IMAP_SCOPES,
 ) -> dict[str, object]:
     endpoint = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
     interval = int(flow.get("interval", 5))
@@ -92,7 +94,7 @@ def complete_device_flow(
                 )
             result["client_id"] = client_id
             result["tenant"] = tenant
-            result["scope_request"] = IMAP_SCOPES
+            result["scope_request"] = scopes
             result["authorized_username"] = authorized_username or ""
             result["expires_at"] = int(time.time()) + int(result.get("expires_in", 3600))
             _save_cache(cache_path, result)
@@ -128,13 +130,13 @@ def access_token(cache_path: Path, explicit_token: str | None = None) -> str:
         "client_id": client_id,
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "scope": IMAP_SCOPES,
+        "scope": str(cache.get("scope_request") or IMAP_SCOPES),
     })
     if "error" in result:
         raise RuntimeError(str(result.get("error_description") or result["error"]))
     result["client_id"] = client_id
     result["tenant"] = tenant
-    result["scope_request"] = IMAP_SCOPES
+    result["scope_request"] = str(cache.get("scope_request") or IMAP_SCOPES)
     result["refresh_token"] = result.get("refresh_token") or refresh_token
     result["expires_at"] = int(time.time()) + int(result.get("expires_in", 3600))
     _save_cache(cache_path, result)

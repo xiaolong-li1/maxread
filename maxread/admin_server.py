@@ -20,7 +20,18 @@ from .admin_architecture import architecture_html, architecture_spec
 from .config import Settings
 from .db import Store
 from .feedback import count_feedback_by_status, visible_feedback_rows
-from .mail_admin import MAIL_ADMIN_HTML, mail_admin_records, mail_admin_status, trigger_mail_scan, update_mail_admin_config, update_mail_admin_record
+from .mail_admin import (
+    MAIL_ADMIN_HTML,
+    mail_admin_records,
+    mail_admin_status,
+    mail_rejection_context,
+    save_mail_rejection_draft,
+    save_mail_rejection_template,
+    send_mail_rejection,
+    trigger_mail_scan,
+    update_mail_admin_config,
+    update_mail_admin_record,
+)
 from .review import visible_review_issues
 from .remote_worker import (
     coordinator_claim,
@@ -238,6 +249,15 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             try:
                 self._json_response(mail_admin_records(parsed.query))
+            except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/rejection":
+            if not self._require_admin():
+                return
+            try:
+                query = parse_qs(parsed.query)
+                self._json_response(mail_rejection_context(str(query.get("thread_key", [""])[0])))
             except (ValueError, RuntimeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -481,6 +501,37 @@ class AdminHandler(BaseHTTPRequestHandler):
                     str(payload.get("expected_updated_at") or ""),
                 ))
             except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/rejection-template":
+            payload = self._read_json()
+            try:
+                self._json_response(save_mail_rejection_template(
+                    str(payload.get("subject") or ""),
+                    str(payload.get("body") or ""),
+                ))
+            except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/rejection-draft":
+            payload = self._read_json()
+            try:
+                self._json_response(save_mail_rejection_draft(
+                    str(payload.get("thread_key") or ""),
+                    str(payload.get("subject") or ""),
+                    str(payload.get("body") or ""),
+                ))
+            except (ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/rejection-send":
+            payload = self._read_json()
+            try:
+                self._json_response(send_mail_rejection(
+                    int(payload.get("draft_id") or 0),
+                    str(payload.get("confirmation") or ""),
+                ))
+            except (TypeError, ValueError, RuntimeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path == "/api/service-status":

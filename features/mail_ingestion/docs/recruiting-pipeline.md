@@ -120,6 +120,15 @@ RECRUITING_OPENAI_API_MODE=responses
 - 文档创建成功后先落库 token；附件按路径逐个追加。Base 使用已保存 record ID 更新，避免重复创建。
 - 已有文档重跑时只追加新邮件片段，不重复写入完整结构化摘要；同名同分钟邮件若没有材料文档精确匹配，不会任意复用旧行，而是创建独立 Base 记录。
 
+### ZIP Lab 拒信发送
+
+拒信采用 `draft -> sending -> sent_sync_pending -> sent` 状态机，只支持 ZIP Lab
+收到或被抄送、且尚无我方回复的候选线程。模板和草稿保存在 5090 SQLite；
+收件人由线程数据库确定，网页不能覆盖。真实发送必须输入完整收件地址确认，
+并同时通过 SMTP OAuth 授权和服务器总开关。SMTP 接受后不再自动重投；若进程
+在投递边界中断，状态进入 `delivery_unknown`，必须人工检查 Outlook 已发送邮件。
+发送后的回复状态、未通过状态、Base 字段和材料文档由补偿任务继续同步。
+
 ## 7. 运行与验收
 
 ```bash

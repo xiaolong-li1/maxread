@@ -4,6 +4,8 @@ import sqlite3
 import json
 from pathlib import Path
 
+import pytest
+
 from maxread import mail_admin
 
 
@@ -172,12 +174,21 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
     assert mail_admin.mail_admin_status()["remote_execution"] is True
     assert mail_admin.trigger_mail_scan("all")["ok"] is True
     assert mail_admin.update_mail_admin_config(60, 168)["ok"] is True
+    assert mail_admin.mail_rejection_context("a" * 32)["ok"] is True
+    assert mail_admin.save_mail_rejection_draft("a" * 32, "主题", "正文")["ok"] is True
+    assert mail_admin.save_mail_rejection_template("主题", "正文")["ok"] is True
+    assert mail_admin.send_mail_rejection(7, "candidate@example.com")["ok"] is True
     assert [item[0] for item in requests] == [
         "http://127.0.0.1:18766/status",
         "http://127.0.0.1:18766/scan",
         "http://127.0.0.1:18766/config",
+        "http://127.0.0.1:18766/rejection?thread_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "http://127.0.0.1:18766/rejection-draft",
+        "http://127.0.0.1:18766/rejection-template",
+        "http://127.0.0.1:18766/rejection-send",
     ]
     assert all(item[2]["Authorization"] == "Bearer secret-token" for item in requests)
+    assert requests[-1][4] == 300
 
 
 def test_user_systemd_prefix_is_used_on_compute_worker(monkeypatch):
@@ -226,6 +237,121 @@ def _record_fixture(tmp_path: Path):
             ("b" * 32, "notice@example.com", "通知", json.dumps(other, ensure_ascii=False), "rec2", "", "2026-08-31T10:00:00+08:00", "", "", "active", "未筛选", 0, "未开始", "", "v2"),
         )
     return root, db
+
+
+def _rejection_fixture(tmp_path: Path):
+    root = tmp_path / "mail-rejection"
+    accounts = root / "data/accounts"
+    accounts.mkdir(parents=True)
+    db = accounts / "mail.sqlite3"
+    (accounts / "zip-lab.env").write_text(
+        "IMAP_USERNAME=zip.lab@outlook.com\n"
+        f"MAIL_DB_PATH={db}\n"
+        "RECRUITING_BASE_TOKEN=base\n"
+        "RECRUITING_TABLE_ID=table\n"
+        "RECRUITING_OUTBOUND_ENABLED=0\n",
+        encoding="utf-8",
+    )
+    with sqlite3.connect(db) as connection:
+        connection.executescript(
+            """
+            create table messages(id integer primary key,subject text,message_id text,received_at text);
+            create table recruiting_messages(message_record_id integer,thread_key text,direction text);
+            create table recruiting_threads(
+              thread_key text primary key,candidate_address text,normalized_subject text,fields_json text,
+              base_record_id text,doc_id text,doc_url text,latest_time text,last_incoming_time text,last_outgoing_time text,
+              status text,screening_status text,interview_assigned integer,interview_result text,
+              last_error text,updated_at text
+            );
+            """
+        )
+        connection.execute(
+            "insert into messages values(1,'申请','<incoming@example.com>','2026-09-02T16:18:00+08:00')"
+        )
+        connection.execute("insert into recruiting_messages values(1,?,'incoming')", ("c" * 32,))
+        zip_fields = {
+            "name": "李xx", "mail_type": "candidate", "school": "unknown", "major": "unknown",
+            "projects": ["World Model"], "source_accounts": ["ZIP Lab"],
+        }
+        bohan_fields = {**zip_fields, "name": "王同学", "source_accounts": ["Bohan"]}
+        connection.execute(
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("c" * 32, "15836992650@163.com", "测试申请", json.dumps(zip_fields, ensure_ascii=False), "rec-zip", "doc-zip", "https://doc", "2026-09-02 16:18", "", "", "active", "未筛选", 0, "未开始", "", "v1"),
+        )
+        connection.execute(
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("d" * 32, "bohan-only@example.com", "测试申请", json.dumps(bohan_fields, ensure_ascii=False), "rec-bohan", "", "", "2026-09-02 16:18", "", "", "active", "未筛选", 0, "未开始", "", "v1"),
+        )
+    return root, db
+
+
+def test_rejection_context_is_zip_lab_only_and_uses_editable_default(tmp_path, monkeypatch):
+    root, _db = _rejection_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+
+    context = mail_admin.mail_rejection_context("c" * 32)
+
+    assert context["candidate"]["recipient"] == "15836992650@163.com"
+    assert context["sender"] == "zip.lab@outlook.com"
+    assert "感谢你关注浙江大学ZIP Lab" in context["body"]
+    assert context["outbound_enabled"] is False
+    records = mail_admin.mail_admin_records("mail_type=candidate&days=0&limit=10")
+    supported = next(item for item in records["items"] if item["thread_key"] == "c" * 32)
+    assert supported["rejection_supported"] is True
+    with pytest.raises(ValueError, match="只支持 ZIP Lab"):
+        mail_admin.mail_rejection_context("d" * 32)
+
+
+def test_rejection_template_and_draft_are_saved_without_sending(tmp_path, monkeypatch):
+    root, db = _rejection_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    sent = []
+    monkeypatch.setattr(mail_admin, "_smtp_send_zip_lab", lambda _draft: sent.append(True))
+
+    mail_admin.save_mail_rejection_template("自定义主题", "你好 {name}，这是自定义模板。")
+    context = mail_admin.mail_rejection_context("c" * 32)
+    first = mail_admin.save_mail_rejection_draft("c" * 32, context["subject"], context["body"])
+    second = mail_admin.save_mail_rejection_draft("c" * 32, "修改主题", "修改正文")
+
+    assert context["body"] == "你好 李xx，这是自定义模板。"
+    assert first["draft"]["id"] == second["draft"]["id"]
+    assert second["draft"]["subject"] == "修改主题"
+    assert sent == []
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("select count(*) from recruiting_outbound_drafts").fetchone()[0] == 1
+
+
+def test_rejection_send_is_server_gated_and_cannot_repeat(tmp_path, monkeypatch):
+    root, db = _rejection_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    draft = mail_admin.save_mail_rejection_draft("c" * 32, "回复", "拒信正文")["draft"]
+    sent = []
+    monkeypatch.setattr(mail_admin, "_smtp_send_zip_lab", lambda row: sent.append(str(row["recipient"])))
+
+    with pytest.raises(ValueError, match="尚未启用"):
+        mail_admin.send_mail_rejection(draft["id"], "15836992650@163.com")
+    assert sent == []
+
+    env_path = root / "data/accounts/zip-lab.env"
+    env_path.write_text(env_path.read_text(encoding="utf-8").replace(
+        "RECRUITING_OUTBOUND_ENABLED=0",
+        "RECRUITING_OUTBOUND_ENABLED=1\nSMTP_HOST=smtp.office365.com\nSMTP_PORT=587\nSMTP_SECURITY=starttls\nSMTP_AUTH=oauth2",
+    ), encoding="utf-8")
+    monkeypatch.setattr(mail_admin, "_sync_rejection_side_effects", lambda _db, _id: {"ok": True, "status": "sent_sync_pending"})
+    monkeypatch.setattr(mail_admin, "_smtp_ready", lambda: True)
+    with pytest.raises(ValueError, match="完整收件地址"):
+        mail_admin.send_mail_rejection(draft["id"], "wrong@example.com")
+    result = mail_admin.send_mail_rejection(draft["id"], "15836992650@163.com")
+
+    assert result["status"] == "sent_sync_pending"
+    assert sent == ["15836992650@163.com"]
+    with pytest.raises(ValueError, match="不能重复发送"):
+        mail_admin.send_mail_rejection(draft["id"], "15836992650@163.com")
+    with sqlite3.connect(db) as connection:
+        thread = connection.execute("select screening_status,last_outgoing_time from recruiting_threads where thread_key=?", ("c" * 32,)).fetchone()
+        action = json.loads(connection.execute("select new_json from recruiting_admin_actions").fetchone()[0])
+        assert thread[0] == "未通过" and thread[1]
+        assert action["has_replied"] is True
 
 
 def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
@@ -464,6 +590,21 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="record-jump"' in html
     assert "jumpRecordPage()" in html
     assert "Math.ceil(recordState.total/recordState.limit)" in html
+    assert 'id="prepare-rejection"' in html
+    assert 'id="rejection-subject"' in html
+    assert 'id="rejection-body"' in html
+    assert 'id="rejection-confirmation"' in html
+    assert 'id="send-rejection" disabled' in html
+    assert "saveRejectionDraft()" in html
+    assert "saveRejectionTemplate()" in html
+    assert "sendRejection()" in html
+
+
+def test_nginx_post_allowlist_includes_rejection_actions():
+    config = Path("deploy/nginx/maxread-location.conf.example").read_text(encoding="utf-8")
+    assert "rejection-template" in config
+    assert "rejection-draft" in config
+    assert "rejection-send" in config
 
 
 def test_mail_admin_sync_status_exposes_last_base_pull(tmp_path):
