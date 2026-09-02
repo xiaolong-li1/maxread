@@ -139,6 +139,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     mail_type = str(query.get("mail_type", ["candidate"])[0] or "candidate").strip()
     screening = str(query.get("screening", [""])[0] or "").strip()
     project = str(query.get("project", [""])[0] or "").strip()
+    reply = str(query.get("reply", [""])[0] or "").strip().lower()
     tier = str(query.get("tier", [""])[0] or "").strip().lower()
     rank_percentile = _bounded_int(query.get("rank_percentile", ["0"])[0], 0, 0, 100)
     days = _bounded_int(query.get("days", ["30"])[0], 30, 0, 3650)
@@ -150,6 +151,8 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
         raise ValueError("不支持的筛选状态")
     if tier not in {"", "c9", "985"}:
         raise ValueError("不支持的院校层级")
+    if reply not in {"", "replied", "unreplied"}:
+        raise ValueError("不支持的回复状态")
     cutoff = datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=days) if days else None
     db_path = _mail_db_path(_mail_root())
     records: list[dict[str, Any]] = []
@@ -173,6 +176,10 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
                 if screening and item["screening_status"] != screening:
                     continue
                 if project and project not in item["projects"]:
+                    continue
+                if reply == "replied" and not item["has_replied"]:
+                    continue
+                if reply == "unreplied" and item["has_replied"]:
                     continue
                 if tier == "c9" and not _truthy_school_flag(item["is_c9"]):
                     continue

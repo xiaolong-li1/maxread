@@ -241,6 +241,8 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     ranked = mail_admin.mail_admin_records("mail_type=candidate&tier=c9&rank_percentile=5&days=0&limit=10")
     assert ranked["total"] == 1
     assert ranked["items"][0]["best_rank_percentile"] == 5.0
+    assert mail_admin.mail_admin_records("mail_type=candidate&reply=replied&days=0&limit=10")["total"] == 1
+    assert mail_admin.mail_admin_records("mail_type=candidate&reply=unreplied&days=0&limit=10")["total"] == 0
 
 
 def test_rank_filter_accepts_any_qualifying_rank_and_ignores_gpa_ratios():
@@ -401,7 +403,7 @@ def test_mail_admin_page_contains_candidate_workbench_controls():
     html = mail_admin.MAIL_ADMIN_HTML
     assert "邮件记录" in html
     assert "api/admin/mail/records" in html
-    assert "api/admin/mail/record" in html
+    assert "api('api/admin/mail/record'" not in html
     assert "最近一周新增候选人" not in html  # links arrive only after authenticated API response
 
 
@@ -415,15 +417,19 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'class="record-table-wrap"' in html
     assert "max-height:calc(100dvh - 344px)" in html
     assert "recordState={items:[],offset:0,limit:20" in html
-    assert "筛选与面试操作同步飞书 Base；材料文档保持只读" in html
+    assert "按回复状态、院校、方向和排名筛选" in html
     assert "<th>摘要</th>" not in html
     assert "<th>回复</th>" in html
+    assert "<th>筛选状态</th>" not in html
+    assert "<th>面试</th>" not in html
+    assert 'id="record-reply"' in html
+    assert "reply:$('record-reply').value" in html
+    assert "updateRecord(" not in html
     assert "item.has_replied?'已回复':'未回复'" in html
     assert "['回复状态',item.has_replied?'已回复':'未回复']" in html
     assert 'class="ops-details wide"' in html
     assert "height:100dvh" in html
     assert "margin:0 0 0 auto" in html
-    assert "本地已保存，等待飞书同步" in html
     assert "data.admin_sync?.pending" in html
     assert 'id="record-tier"' in html
     assert 'id="record-rank"' in html

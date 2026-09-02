@@ -57,9 +57,7 @@
     .record-table .person { width:205px; }
     .record-table .study { width:245px; }
     .record-table .direction { width:165px; }
-    .record-table .reply { width:84px; }
-    .record-table .workflow { width:135px; }
-    .record-table .interview { width:180px; }
+    .record-table .reply { width:92px; }
     .person-button { padding:0; min-height:0; justify-content:flex-start; color:var(--green); background:transparent; border:0; font-weight:680; text-align:left; }
     .person-meta,.cell-note { display:block; margin-top:2px; color:var(--muted); font-size:11px; }
     .tags { display:flex; flex-wrap:wrap; gap:4px; }
@@ -104,7 +102,7 @@
     .hidden { display:none !important; }
     .toast { position:fixed; z-index:20; right:20px; bottom:20px; padding:10px 13px; color:#fff; background:#202621; border-radius:7px; opacity:0; transform:translateY(8px); transition:.2s; pointer-events:none; }
     .toast.show { opacity:1; transform:none; }
-    @media (max-width:760px) { .wrap{width:calc(100% - 16px);padding-top:10px;} header{align-items:flex-start;flex-direction:column;} .status{align-items:flex-start;flex-direction:column;} .overview-bar{grid-template-columns:1fr;} #overview-metrics{grid-template-columns:1fr 1fr;} .base-menu{justify-self:end;} .record-toolbar{grid-template-columns:1fr 1fr;} .record-toolbar input{grid-column:1/-1;} .record-table-wrap{max-height:55dvh;} .record-table{display:block;min-width:0;} .record-table thead{display:none;} .record-table tbody{display:block;} .record-table tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;padding:12px;border-bottom:1px solid var(--line);} .record-table td{display:block;padding:0;border:0;width:auto!important;min-width:0;} .record-table td:nth-child(2){grid-column:1/-1;} .record-table td:nth-child(5)::before,.record-table td:nth-child(6)::before{display:block;margin-bottom:3px;color:var(--muted);font-size:11px;} .record-table td:nth-child(5)::before{content:'筛选状态';}.record-table td:nth-child(6)::before{content:'面试';}.record-table td:last-child{grid-column:1/-1;} .ops-grid{grid-template-columns:1fr;} .wide{grid-column:auto;} .account{grid-template-columns:1fr 1fr;} .account .address{grid-column:1/-1;} .account div:nth-child(4){display:none;} .config{grid-template-columns:1fr;} .table-links{position:fixed;left:8px;right:8px;top:auto;width:auto;} dialog{width:100vw;} .detail-grid{grid-template-columns:96px minmax(0,1fr);} }
+    @media (max-width:760px) { .wrap{width:calc(100% - 16px);padding-top:10px;} header{align-items:flex-start;flex-direction:column;} .status{align-items:flex-start;flex-direction:column;} .overview-bar{grid-template-columns:1fr;} #overview-metrics{grid-template-columns:1fr 1fr;} .base-menu{justify-self:end;} .record-toolbar{grid-template-columns:1fr 1fr;} .record-toolbar input{grid-column:1/-1;} .record-table-wrap{max-height:55dvh;} .record-table{display:block;min-width:0;} .record-table thead{display:none;} .record-table tbody{display:block;} .record-table tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;padding:12px;border-bottom:1px solid var(--line);} .record-table td{display:block;padding:0;border:0;width:auto!important;min-width:0;} .record-table td:nth-child(2){grid-column:1/-1;} .record-table td:last-child{grid-column:1/-1;} .ops-grid{grid-template-columns:1fr;} .wide{grid-column:auto;} .account{grid-template-columns:1fr 1fr;} .account .address{grid-column:1/-1;} .account div:nth-child(4){display:none;} .config{grid-template-columns:1fr;} .table-links{position:fixed;left:8px;right:8px;top:auto;width:auto;} dialog{width:100vw;} .detail-grid{grid-template-columns:96px minmax(0,1fr);} }
   </style>
 </head>
 <body>
@@ -122,17 +120,17 @@
       </section>
       <nav class="tabs" aria-label="邮件管理视图"><button class="active" data-view="candidates" onclick="setMailView('candidates')">候选人</button><button data-view="operations" onclick="setMailView('operations')">运维</button></nav>
       <section id="candidate-panel" class="workspace">
-          <div class="workspace-head"><div><h2>候选人与邮件</h2><div class="muted">筛选与面试操作同步飞书 Base；材料文档保持只读</div></div><span class="muted" id="record-count"></span></div>
+          <div class="workspace-head"><div><h2>候选人与邮件</h2><div class="muted">按回复状态、院校、方向和排名筛选；点击姓名查看完整材料</div></div><span class="muted" id="record-count"></span></div>
           <div class="record-toolbar">
             <input id="record-search" type="search" placeholder="搜索姓名、学校、邮箱、方向" oninput="queueRecordLoad()" />
             <select id="record-type" onchange="resetAndLoadRecords()"><option value="candidate">候选人来信</option><option value="other">其他邮件</option><option value="all">全部邮件</option></select>
-            <select id="record-status" onchange="resetAndLoadRecords()"><option value="">全部筛选状态</option></select>
+            <select id="record-reply" onchange="resetAndLoadRecords()"><option value="">全部回复</option><option value="replied">已回复</option><option value="unreplied">未回复</option></select>
             <select id="record-project" onchange="resetAndLoadRecords()"><option value="">全部方向</option></select>
             <select id="record-tier" onchange="resetAndLoadRecords()"><option value="">全部院校</option><option value="c9">C9</option><option value="985">985</option></select>
             <select id="record-rank" onchange="resetAndLoadRecords()"><option value="0">全部排名</option><option value="5">Top 5%</option><option value="10">Top 10%</option><option value="20">Top 20%</option><option value="30">Top 30%</option></select>
             <select id="record-days" onchange="resetAndLoadRecords()"><option value="7">最近 7 天</option><option value="30" selected>最近 30 天</option><option value="90">最近 90 天</option><option value="0">全部时间</option></select>
           </div>
-          <div class="record-table-wrap"><table class="record-table"><thead><tr><th>候选人 / 来信</th><th>院校 / 学业</th><th>方向</th><th>回复</th><th>筛选状态</th><th>面试</th><th></th></tr></thead><tbody id="record-rows"></tbody></table></div>
+          <div class="record-table-wrap"><table class="record-table"><thead><tr><th>候选人 / 来信</th><th>院校 / 学业</th><th>方向</th><th>回复</th><th></th></tr></thead><tbody id="record-rows"></tbody></table></div>
           <div class="pager"><button id="record-prev" onclick="changeRecordPage(-1)">上一页</button><span id="record-page"></span><button id="record-next" onclick="changeRecordPage(1)">下一页</button></div>
       </section>
       <section id="operations-panel" class="hidden">
@@ -217,41 +215,31 @@
       $('errors').innerHTML=(data.errors||[]).map(e=>`<div class="error-row"><strong>${Number(e.count||0)}</strong><span>${esc(e.error||'未知错误')}</span><span class="time muted">${esc(fmt(e.last_seen))}</span></div>`).join('')||'<div class="empty">没有近期错误</div>';
     }
     async function loadRecords(){
-      const params=new URLSearchParams({q:$('record-search').value.trim(),mail_type:$('record-type').value,screening:$('record-status').value,project:$('record-project').value,tier:$('record-tier').value,rank_percentile:$('record-rank').value,days:$('record-days').value,offset:String(recordState.offset),limit:String(recordState.limit)});
+      const params=new URLSearchParams({q:$('record-search').value.trim(),mail_type:$('record-type').value,reply:$('record-reply').value,project:$('record-project').value,tier:$('record-tier').value,rank_percentile:$('record-rank').value,days:$('record-days').value,offset:String(recordState.offset),limit:String(recordState.limit)});
       try{
         const data=await api(`api/admin/mail/records?${params}`);recordState.items=data.items||[];recordState.total=Number(data.total||0);recordState.filters=data.filters||recordState.filters||{};
-        const currentStatus=$('record-status').value;const currentProject=$('record-project').value;
-        $('record-status').innerHTML='<option value="">全部筛选状态</option>'+selectOptions(recordState.filters.screening_statuses||[],currentStatus);$('record-status').value=currentStatus;
+        const currentProject=$('record-project').value;
         $('record-project').innerHTML='<option value="">全部方向</option>'+selectOptions(recordState.filters.projects||[],currentProject);$('record-project').value=currentProject;
         renderRecords();
       }catch(error){if(error.status!==401)toast(`邮件记录加载失败：${error.message}`);}
     }
     function renderRecords(){
-      const statuses=recordState.filters?.screening_statuses||[];const results=recordState.filters?.interview_results||[];
       $('record-count').textContent=`${recordState.total} 条`;
       $('record-rows').innerHTML=recordState.items.map(item=>{
-        const candidate=item.mail_type==='candidate';const controls=candidate&&item.base_record_id;
-        const status=controls?`<select class="workflow-select" onchange="updateRecord('${item.thread_key}',{screening_status:this.value})">${selectOptions(statuses,item.screening_status)}</select>`:`<span class="pill">${esc(item.mail_type==='other'?'其他':item.screening_status)}</span>`;
-        const assigned=controls?`<label class="assigned"><input type="checkbox" ${item.interview_assigned?'checked':''} onchange="updateRecord('${item.thread_key}',{interview_assigned:this.checked})"/>已分配</label>`:'';
-        const interview=controls?`<select class="workflow-select" onchange="updateRecord('${item.thread_key}',{interview_result:this.value})">${selectOptions(results,item.interview_result)}</select>`:'—';
         const projects=(item.projects||[]).map(value=>`<span class="tag">${esc(value)}</span>`).join('')||'—';
         const document=item.doc_url?`<a class="button" href="${esc(item.doc_url)}" target="_blank" rel="noopener" title="打开材料文档">↗</a>`:'';
         const reply=pill(item.has_replied?'已回复':'未回复',false,!item.has_replied);
-        return `<tr data-thread="${item.thread_key}"><td class="person"><button class="person-button" onclick="openRecord('${item.thread_key}')">${esc(item.name)}</button><span class="person-meta">${esc(item.candidate_address)}</span><span class="cell-note">${esc(fmt(item.latest_time))}</span></td><td class="study">${esc(item.study)}<span class="cell-note">${esc(item.academic_display)} · ${esc(item.rank)}</span></td><td class="direction"><div class="tags">${projects}</div></td><td class="reply">${reply}</td><td class="workflow">${status}</td><td class="interview"><div class="inline">${assigned}${interview}</div></td><td><div class="row-actions">${document}<button onclick="openRecord('${item.thread_key}')" title="查看详情">···</button></div></td></tr>`;
-      }).join('')||'<tr><td colspan="7" class="empty">当前筛选下没有邮件</td></tr>';
+        return `<tr data-thread="${item.thread_key}"><td class="person"><button class="person-button" onclick="openRecord('${item.thread_key}')">${esc(item.name)}</button><span class="person-meta">${esc(item.candidate_address)}</span><span class="cell-note">${esc(fmt(item.latest_time))}</span></td><td class="study">${esc(item.study)}<span class="cell-note">${esc(item.academic_display)} · ${esc(item.rank)}</span></td><td class="direction"><div class="tags">${projects}</div></td><td class="reply">${reply}</td><td><div class="row-actions">${document}<button onclick="openRecord('${item.thread_key}')" title="查看详情">···</button></div></td></tr>`;
+      }).join('')||'<tr><td colspan="5" class="empty">当前筛选下没有邮件</td></tr>';
       const start=recordState.total?recordState.offset+1:0;const end=Math.min(recordState.offset+recordState.limit,recordState.total);$('record-page').textContent=`${start}–${end} / ${recordState.total}`;$('record-prev').disabled=recordState.offset<=0;$('record-next').disabled=recordState.offset+recordState.limit>=recordState.total;
     }
     function queueRecordLoad(){clearTimeout(recordState.timer);recordState.timer=setTimeout(()=>{recordState.offset=0;loadRecords();},280);}
     function resetAndLoadRecords(){recordState.offset=0;loadRecords();}
     function changeRecordPage(direction){const next=Math.max(0,recordState.offset+direction*recordState.limit);if(next===recordState.offset)return;recordState.offset=next;loadRecords();document.querySelector('.record-table-wrap').scrollTo({top:0,behavior:'smooth'});}
     function setMailView(view){const operations=view==='operations';$('candidate-panel').classList.toggle('hidden',operations);$('operations-panel').classList.toggle('hidden',!operations);document.querySelectorAll('.tabs button').forEach(button=>button.classList.toggle('active',button.dataset.view===view));}
-    async function updateRecord(threadKey,changes){
-      const item=recordState.items.find(row=>row.thread_key===threadKey);if(!item)return;document.querySelectorAll(`tr[data-thread="${threadKey}"] select,tr[data-thread="${threadKey}"] input`).forEach(control=>control.disabled=true);
-      try{const result=await api('api/admin/mail/record',{method:'POST',body:JSON.stringify({thread_key:threadKey,changes,expected_updated_at:item.updated_at})});toast(result.sync_status==='committed'?'已同步网页和飞书 Base':'本地已保存，等待飞书同步');await Promise.all([loadStatus(false),loadRecords()]);}catch(error){toast(error.message);await loadRecords();}
-    }
     function openRecord(threadKey){
       const item=recordState.items.find(row=>row.thread_key===threadKey);if(!item)return;$('detail-title').textContent=item.name;$('detail-subtitle').textContent=`${item.candidate_address} · ${fmt(item.latest_time)}`;
-      const values=[['邮件类型',item.mail_type==='candidate'?'候选人来信':'其他邮件'],['回复状态',item.has_replied?'已回复':'未回复'],['主题',item.subject],['院校 / 就读',item.study],['专业',item.major],['学业表现',item.academic_display],['排名',`${item.rank}\n${item.rank_evidence}`],['申请方向',(item.projects||[]).join('、')||'—'],['摘要',item.purpose_summary||'—'],['来源邮箱',(item.source_accounts||[]).join('、')||'—'],['筛选状态',item.screening_status],['面试',`${item.interview_assigned?'已分配':'未分配'} · ${item.interview_result}`],['处理错误',item.last_error||'无']];
+      const values=[['邮件类型',item.mail_type==='candidate'?'候选人来信':'其他邮件'],['回复状态',item.has_replied?'已回复':'未回复'],['主题',item.subject],['院校 / 就读',item.study],['专业',item.major],['学业表现',item.academic_display],['排名',`${item.rank}\n${item.rank_evidence}`],['申请方向',(item.projects||[]).join('、')||'—'],['摘要',item.purpose_summary||'—'],['来源邮箱',(item.source_accounts||[]).join('、')||'—'],['处理错误',item.last_error||'无']];
       $('detail-grid').innerHTML=values.map(([label,value])=>`<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join('');$('record-dialog').showModal();
     }
     async function refreshAll(announce=false){await loadStatus(false);if(!$('dashboard').classList.contains('hidden'))await loadRecords();if(announce)toast('已刷新 5090 邮件与候选状态');}
