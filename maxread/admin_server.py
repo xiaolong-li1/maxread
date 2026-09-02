@@ -223,7 +223,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/web/admin/accounts":
             if not self._require_admin():
                 return
-            self._json_response(self._with_store(lambda store: store.list_web_accounts()))
+            self._json_response(self._with_store(lambda store: _resolved_web_accounts(self.server.settings, store)))
             return
         if parsed.path == "/architecture":
             self._html(architecture_html())
@@ -923,6 +923,22 @@ def _attach_user_names(settings: Settings, rows, store=None):
     for row in rows:
         row["sender_name"] = names.get(row.get("sender_id", ""), "")
     return rows
+
+
+def _resolved_web_accounts(settings: Settings, store: Store) -> list[dict[str, Any]]:
+    accounts = store.list_web_accounts()
+    probes = [
+        {
+            "sender_id": str(account.get("feishu_open_id") or ""),
+            "message_id": str(account.get("binding_message_id") or ""),
+        }
+        for account in accounts
+        if str(account.get("feishu_open_id") or "").strip()
+    ]
+    if probes:
+        _attach_user_names(settings, probes, store)
+        accounts = store.list_web_accounts()
+    return accounts
 
 def _limit(query: str) -> int:
     values = parse_qs(query).get("limit", [str(DEFAULT_LIMIT)])

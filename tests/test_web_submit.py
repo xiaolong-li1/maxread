@@ -897,6 +897,11 @@ def test_feishu_binding_command_claims_code_and_replies(tmp_path):
     class Feishu:
         replies = []
 
+        def message_sender_name(self, message_id, expected_sender_id=""):
+            assert message_id == "om_bind"
+            assert expected_sender_id == "ou_feishu_user"
+            return "绑定用户"
+
         def reply_text(self, message_id, text, **_kwargs):
             self.replies.append((message_id, text))
 
@@ -913,6 +918,8 @@ def test_feishu_binding_command_claims_code_and_replies(tmp_path):
     assert "已绑定" in feishu.replies[0][1]
     assert store.get_web_identity(identity["session_hash"])["feishu_open_id"] == "ou_feishu_user"
     assert store.get_web_identity(identity["session_hash"])["binding_message_id"] == "om_bind"
+    assert store.get_web_identity(identity["session_hash"])["display_name"] == "绑定用户"
+    assert store.get_user_names(["ou_feishu_user"])["ou_feishu_user"] == "绑定用户"
     store.close()
 
 

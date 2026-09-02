@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS recruiting_threads (
     last_outgoing_time TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     interview_assigned INTEGER NOT NULL DEFAULT 0,
+    is_interested INTEGER NOT NULL DEFAULT 0,
     screening_status TEXT NOT NULL DEFAULT '未筛选',
     interview_result TEXT NOT NULL DEFAULT '未开始',
     attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -158,6 +159,8 @@ class PipelineStore:
                 conn.execute("ALTER TABLE recruiting_threads ADD COLUMN screening_status TEXT NOT NULL DEFAULT '未筛选'")
             if "interview_result" not in columns:
                 conn.execute("ALTER TABLE recruiting_threads ADD COLUMN interview_result TEXT NOT NULL DEFAULT '未开始'")
+            if "is_interested" not in columns:
+                conn.execute("ALTER TABLE recruiting_threads ADD COLUMN is_interested INTEGER NOT NULL DEFAULT 0")
             message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
             if message_columns and "artifacts_released_at" not in message_columns:
                 conn.execute("ALTER TABLE messages ADD COLUMN artifacts_released_at TEXT")

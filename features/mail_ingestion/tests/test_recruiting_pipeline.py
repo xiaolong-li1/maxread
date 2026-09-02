@@ -667,6 +667,7 @@ class RecruitingPipelineTest(unittest.TestCase):
                 base_record_id="rec-a",
                 latest_time="2026-09-02 10:00",
                 screening_status="未筛选",
+                is_interested=1,
             )
             with store.connect() as connection:
                 connection.execute("update recruiting_threads set updated_at='2026-09-01T00:00:00+00:00'")
@@ -689,6 +690,7 @@ class RecruitingPipelineTest(unittest.TestCase):
             self.assertEqual(result["updated"], 1)
             self.assertEqual(store.fields_from_row(row).name, "人工姓名")
             self.assertEqual(row["screening_status"], "面试资格")
+            self.assertEqual(row["is_interested"], 1)
             self.assertEqual(row["doc_url"], "https://example/doc")
 
     def test_base_snapshot_does_not_overwrite_pending_or_newer_local_transactions(self) -> None:

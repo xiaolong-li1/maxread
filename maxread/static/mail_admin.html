@@ -48,6 +48,16 @@
     .tabs button.active { color:var(--text); border-bottom-color:var(--green); font-weight:650; }
     .workspace { margin-top:10px; background:var(--paper); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
     .workspace-head { min-height:46px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 12px; border-bottom:1px solid var(--line); }
+    .focus-area { padding:10px 12px 12px; background:#fcfbf8; border-bottom:1px solid var(--line); }
+    .focus-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+    .focus-head h3 { margin:0; font-size:14px; }
+    .focus-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:8px; max-height:250px; overflow:auto; }
+    .focus-card { min-width:0; padding:9px 10px; background:var(--paper); border:1px solid #eadbc9; border-left:3px solid var(--orange); border-radius:6px; }
+    .focus-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+    .focus-card strong,.focus-card a { overflow-wrap:anywhere; }
+    .focus-card .tags { margin-top:6px; }
+    .focus-card-actions { display:flex; align-items:center; gap:4px; }
+    .focus-empty { padding:8px 0 2px; color:var(--muted); }
     .record-toolbar { display:grid; grid-template-columns:minmax(190px,1.35fr) repeat(6,minmax(100px,.65fr)); gap:7px; padding:9px 12px; background:#fafbf9; border-bottom:1px solid var(--line); }
     .record-toolbar input,.record-toolbar select,.workflow-select { width:100%; height:34px; padding:0 8px; color:var(--text); background:var(--paper); border:1px solid var(--line); border-radius:6px; }
     .record-table-wrap { min-height:300px; max-height:calc(100dvh - 344px); overflow:auto; }
@@ -69,6 +79,8 @@
     .assigned input { width:15px; height:15px; accent-color:var(--green); }
     .row-actions { display:flex; justify-content:flex-end; gap:5px; }
     .row-actions a,.row-actions button { width:32px; min-height:32px; padding:0; }
+    .star-button { width:32px; min-height:32px; padding:0; color:var(--muted); font-size:19px; line-height:1; }
+    .star-button.active { color:var(--orange); background:var(--orange-soft); border-color:#e3c7a8; }
     .pager { min-height:46px; display:flex; align-items:center; justify-content:flex-end; gap:8px; padding:6px 12px; }
     .pager span { color:var(--muted); font-size:12px; }
     .page-jump { display:inline-flex; align-items:center; gap:5px; color:var(--muted); white-space:nowrap; }
@@ -111,7 +123,7 @@
     .hidden { display:none !important; }
     .toast { position:fixed; z-index:20; right:20px; bottom:20px; padding:10px 13px; color:#fff; background:#202621; border-radius:7px; opacity:0; transform:translateY(8px); transition:.2s; pointer-events:none; }
     .toast.show { opacity:1; transform:none; }
-    @media (max-width:760px) { .wrap{width:calc(100% - 16px);padding-top:10px;} header{align-items:flex-start;flex-direction:column;} .status,.data-contract{align-items:flex-start;flex-direction:column;} .overview-bar{grid-template-columns:1fr;} #overview-metrics{grid-template-columns:1fr 1fr;} .base-menu{justify-self:end;} .record-toolbar{grid-template-columns:1fr 1fr;} .record-toolbar input{grid-column:1/-1;} .record-table-wrap{max-height:55dvh;} .record-table{display:block;min-width:0;} .record-table thead{display:none;} .record-table tbody{display:block;} .record-table tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;padding:12px;border-bottom:1px solid var(--line);} .record-table td{display:block;padding:0;border:0;width:auto!important;min-width:0;} .record-table td:nth-child(2){grid-column:1/-1;} .record-table td:last-child{grid-column:1/-1;} .pager{justify-content:center;flex-wrap:wrap;} .ops-grid{grid-template-columns:1fr;} .wide{grid-column:auto;} .account{grid-template-columns:1fr 1fr;} .account .address{grid-column:1/-1;} .account div:nth-child(4){display:none;} .config{grid-template-columns:1fr;} .table-links{position:fixed;left:8px;right:8px;top:auto;width:auto;} dialog{width:100vw;} .detail-grid{grid-template-columns:96px minmax(0,1fr);} }
+    @media (max-width:760px) { .wrap{width:calc(100% - 16px);padding-top:10px;} header{align-items:flex-start;flex-direction:column;} .status,.data-contract{align-items:flex-start;flex-direction:column;} .overview-bar{grid-template-columns:1fr;} #overview-metrics{grid-template-columns:1fr 1fr;} .base-menu{justify-self:end;} .focus-list{grid-template-columns:1fr;max-height:310px;} .record-toolbar{grid-template-columns:1fr 1fr;} .record-toolbar input{grid-column:1/-1;} .record-table-wrap{max-height:55dvh;} .record-table{display:block;min-width:0;} .record-table thead{display:none;} .record-table tbody{display:block;} .record-table tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;padding:12px;border-bottom:1px solid var(--line);} .record-table td{display:block;padding:0;border:0;width:auto!important;min-width:0;} .record-table td:nth-child(2){grid-column:1/-1;} .record-table td:last-child{grid-column:1/-1;} .pager{justify-content:center;flex-wrap:wrap;} .ops-grid{grid-template-columns:1fr;} .wide{grid-column:auto;} .account{grid-template-columns:1fr 1fr;} .account .address{grid-column:1/-1;} .account div:nth-child(4){display:none;} .config{grid-template-columns:1fr;} .table-links{position:fixed;left:8px;right:8px;top:auto;width:auto;} dialog{width:100vw;} .detail-grid{grid-template-columns:96px minmax(0,1fr);} }
   </style>
 </head>
 <body>
@@ -136,6 +148,7 @@
       <nav class="tabs" aria-label="邮件管理视图"><button class="active" data-view="candidates" onclick="setMailView('candidates')">候选人</button><button data-view="operations" onclick="setMailView('operations')">运维</button></nav>
       <section id="candidate-panel" class="workspace">
           <div class="workspace-head"><div><h2>候选人与邮件</h2><div class="muted">按回复状态、院校、方向和排名筛选；点击姓名查看完整材料</div></div><span class="muted" id="record-count"></span></div>
+          <section class="focus-area" aria-labelledby="focus-title"><div class="focus-head"><div><h3 id="focus-title">重点候选人</h3><span class="muted">集中保留值得进一步联系的人</span></div><span class="muted" id="focus-count"></span></div><div class="focus-list" id="focus-list"><div class="focus-empty">在候选人列表点击星标后，会集中显示在这里。</div></div></section>
           <div class="record-toolbar">
             <input id="record-search" type="search" placeholder="搜索姓名、学校、邮箱、方向" oninput="queueRecordLoad()" />
             <select id="record-account" onchange="resetAndLoadRecords()"><option value="">全部邮箱</option><option value="zip-lab">ZIP Lab</option><option value="bohan">Bohan</option></select>
@@ -193,7 +206,7 @@
     function toast(text){$('toast').textContent=text;$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),2200);}
     function metric(label,value){return `<div class="metric"><span class="muted">${esc(label)}</span><strong>${esc(value)}</strong></div>`;}
     function pill(status,bad=false,warn=false){return `<span class="pill ${bad?'bad':warn?'warn':''}">${esc(status)}</span>`;}
-    const recordState={items:[],offset:0,limit:20,total:0,timer:null,filters:null};
+    const recordState={items:[],featured:[],offset:0,limit:20,total:0,timer:null,filters:null};
     const selectOptions=(values,current)=>values.map(value=>`<option value="${esc(value)}" ${value===current?'selected':''}>${esc(value)}</option>`).join('');
     async function loadStatus(announce=false){
       try{
@@ -233,7 +246,7 @@
     async function loadRecords(){
       const params=new URLSearchParams({q:$('record-search').value.trim(),mail_type:'candidate',account:$('record-account').value,reply:$('record-reply').value,project:$('record-project').value,tier:$('record-tier').value,rank_percentile:$('record-rank').value,days:$('record-days').value,offset:String(recordState.offset),limit:String(recordState.limit)});
       try{
-        const data=await api(`api/admin/mail/records?${params}`);recordState.items=data.items||[];recordState.total=Number(data.total||0);recordState.filters=data.filters||recordState.filters||{};
+        const data=await api(`api/admin/mail/records?${params}`);recordState.items=data.items||[];recordState.featured=data.featured||[];recordState.total=Number(data.total||0);recordState.filters=data.filters||recordState.filters||{};
         const currentProject=$('record-project').value;
         $('record-project').innerHTML='<option value="">全部方向</option>'+selectOptions(recordState.filters.projects||[],currentProject);$('record-project').value=currentProject;
         renderRecords();
@@ -241,13 +254,27 @@
     }
     function renderRecords(){
       $('record-count').textContent=`${recordState.total} 条`;
+      renderFeatured();
       $('record-rows').innerHTML=recordState.items.map(item=>{
         const projects=(item.projects||[]).map(value=>`<span class="tag">${esc(value)}</span>`).join('')||'—';
         const document=item.doc_url?`<a class="button" href="${esc(item.doc_url)}" target="_blank" rel="noopener" title="打开材料文档">↗</a>`:'';
         const reply=pill(item.has_replied?'已回复':'未回复',false,!item.has_replied);
-        return `<tr data-thread="${item.thread_key}"><td class="person"><button class="person-button" onclick="openRecord('${item.thread_key}')">${esc(item.name)}</button><span class="person-meta">${esc(item.candidate_address)}</span><span class="cell-note">${esc(fmt(item.latest_time))}</span></td><td class="study">${esc(item.study)}<span class="cell-note">${esc(item.academic_display)} · ${esc(item.rank)}</span></td><td class="direction"><div class="tags">${projects}</div></td><td class="reply">${reply}</td><td><div class="row-actions">${document}<button onclick="openRecord('${item.thread_key}')" title="查看详情">···</button></div></td></tr>`;
+        const star=`<button class="star-button ${item.is_interested?'active':''}" aria-pressed="${item.is_interested?'true':'false'}" onclick="toggleInterested(event,'${item.thread_key}')" title="${item.is_interested?'取消重点关注':'标记为重点候选人'}">${item.is_interested?'★':'☆'}</button>`;
+        return `<tr data-thread="${item.thread_key}"><td class="person"><button class="person-button" onclick="openRecord('${item.thread_key}')">${esc(item.name)}</button><span class="person-meta">${esc(item.candidate_address)}</span><span class="cell-note">${esc(fmt(item.latest_time))}</span></td><td class="study">${esc(item.study)}<span class="cell-note">${esc(item.academic_display)} · ${esc(item.rank)}</span></td><td class="direction"><div class="tags">${projects}</div></td><td class="reply">${reply}</td><td><div class="row-actions">${star}${document}<button onclick="openRecord('${item.thread_key}')" title="查看详情">···</button></div></td></tr>`;
       }).join('')||'<tr><td colspan="5" class="empty">当前筛选下没有邮件</td></tr>';
       const start=recordState.total?recordState.offset+1:0;const end=Math.min(recordState.offset+recordState.limit,recordState.total);const pageCount=Math.max(1,Math.ceil(recordState.total/recordState.limit));const currentPage=Math.min(pageCount,Math.floor(recordState.offset/recordState.limit)+1);$('record-page').textContent=`${start}–${end} / ${recordState.total}`;$('record-page-input').max=String(pageCount);$('record-page-input').value=String(currentPage);$('record-page-input').disabled=!recordState.total;$('record-jump').disabled=!recordState.total;$('record-prev').disabled=recordState.offset<=0;$('record-next').disabled=recordState.offset+recordState.limit>=recordState.total;
+    }
+    function renderFeatured(){
+      $('focus-count').textContent=recordState.featured.length?`${recordState.featured.length} 人`:'';
+      $('focus-list').innerHTML=recordState.featured.map(item=>{
+        const projects=(item.projects||[]).slice(0,3).map(value=>`<span class="tag">${esc(value)}</span>`).join('');
+        const document=item.doc_url?`<a class="button" href="${esc(item.doc_url)}" target="_blank" rel="noopener" title="打开材料文档">↗</a>`:'';
+        return `<article class="focus-card"><div class="focus-card-head"><div><button class="person-button" onclick="openRecord('${item.thread_key}')">${esc(item.name)}</button><span class="person-meta"><a href="mailto:${esc(item.candidate_address)}">${esc(item.candidate_address)}</a></span></div><div class="focus-card-actions">${document}<button class="star-button active" aria-pressed="true" onclick="toggleInterested(event,'${item.thread_key}')" title="取消重点关注">★</button></div></div><span class="cell-note">${esc(item.study)} · ${esc(item.rank)}</span><div class="tags">${projects}</div></article>`;
+      }).join('')||'<div class="focus-empty">在候选人列表点击星标后，会集中显示在这里。</div>';
+    }
+    async function toggleInterested(event,threadKey){
+      event?.stopPropagation();const item=[...recordState.items,...recordState.featured].find(row=>row.thread_key===threadKey);if(!item)return;const button=event?.currentTarget;if(button)button.disabled=true;
+      try{await api('api/admin/mail/record',{method:'POST',body:JSON.stringify({thread_key:threadKey,changes:{is_interested:!item.is_interested},expected_updated_at:item.updated_at})});toast(item.is_interested?'已移出重点候选人':'已加入重点候选人');await loadRecords();}catch(error){toast(error.message);}finally{if(button)button.disabled=false;}
     }
     function queueRecordLoad(){clearTimeout(recordState.timer);recordState.timer=setTimeout(()=>{recordState.offset=0;loadRecords();},280);}
     function resetAndLoadRecords(){recordState.offset=0;loadRecords();}
@@ -255,8 +282,8 @@
     function jumpRecordPage(){const pageCount=Math.max(1,Math.ceil(recordState.total/recordState.limit));const requested=Number.parseInt($('record-page-input').value,10);if(!Number.isFinite(requested)){toast('请输入页码');return;}const page=Math.max(1,Math.min(pageCount,requested));$('record-page-input').value=String(page);const next=(page-1)*recordState.limit;if(next===recordState.offset)return;recordState.offset=next;loadRecords();document.querySelector('.record-table-wrap').scrollTo({top:0,behavior:'smooth'});}
     function setMailView(view){const operations=view==='operations';$('candidate-panel').classList.toggle('hidden',operations);$('operations-panel').classList.toggle('hidden',!operations);document.querySelectorAll('.tabs button').forEach(button=>button.classList.toggle('active',button.dataset.view===view));}
     function openRecord(threadKey){
-      const item=recordState.items.find(row=>row.thread_key===threadKey);if(!item)return;$('detail-title').textContent=item.name;$('detail-subtitle').textContent=`${item.candidate_address} · ${fmt(item.latest_time)}`;
-      const values=[['邮件类型',item.mail_type==='candidate'?'候选人来信':'其他邮件'],['筛选状态',item.screening_label||item.screening_status],['回复状态',item.has_replied?'已回复':'未回复'],['主题',item.subject],['院校 / 就读',item.study],['专业',item.major],['学业表现',item.academic_display],['排名',`${item.rank}\n${item.rank_evidence}`],['申请方向',(item.projects||[]).join('、')||'—'],['摘要',item.purpose_summary||'—'],['来源邮箱',(item.source_accounts||[]).join('、')||'—'],['处理错误',item.last_error||'无']];
+      const item=[...recordState.items,...recordState.featured].find(row=>row.thread_key===threadKey);if(!item)return;$('detail-title').textContent=item.name;$('detail-subtitle').textContent=`${item.candidate_address} · ${fmt(item.latest_time)}`;
+      const values=[['重点关注',item.is_interested?'是':'否'],['邮件类型',item.mail_type==='candidate'?'候选人来信':'其他邮件'],['筛选状态',item.screening_label||item.screening_status],['回复状态',item.has_replied?'已回复':'未回复'],['主题',item.subject],['院校 / 就读',item.study],['专业',item.major],['学业表现',item.academic_display],['排名',`${item.rank}\n${item.rank_evidence}`],['申请方向',(item.projects||[]).join('、')||'—'],['摘要',item.purpose_summary||'—'],['来源邮箱',(item.source_accounts||[]).join('、')||'—'],['处理错误',item.last_error||'无']];
       $('detail-grid').innerHTML=values.map(([label,value])=>`<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join('');$('record-dialog').showModal();
     }
     async function refreshAll(announce=false){await loadStatus(false);if(!$('dashboard').classList.contains('hidden'))await loadRecords();if(announce)toast('已刷新 5090 邮件与候选状态');}

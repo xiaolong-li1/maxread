@@ -528,15 +528,26 @@ def _handle_web_binding_event(settings: Settings, store: Store, feishu: FeishuCl
         return False
     identity = claim_binding_code(store, match.group(1), str(getattr(event, "sender_id", "") or ""))
     if identity:
+        sender_id = str(getattr(event, "sender_id", "") or "")
+        message_id = str(getattr(event, "message_id", "") or "")
         store.update_web_identity_binding_message(
-            str(getattr(event, "sender_id", "") or ""),
-            str(getattr(event, "message_id", "") or ""),
+            sender_id,
+            message_id,
         )
-        rows = _attach_user_names(settings, [{"sender_id": str(getattr(event, "sender_id", "") or "")}])
-        display_name = str(rows[0].get("sender_name") or "").strip()
+        display_name = ""
+        if hasattr(feishu, "message_sender_name"):
+            try:
+                display_name = str(
+                    feishu.message_sender_name(message_id, expected_sender_id=sender_id) or ""
+                ).strip()
+            except Exception:
+                display_name = ""
+        if not display_name:
+            rows = _attach_user_names(settings, [{"sender_id": sender_id, "message_id": message_id}])
+            display_name = str(rows[0].get("sender_name") or "").strip()
         if display_name:
-            store.save_user_names({str(event.sender_id): display_name})
-            store.update_web_identity_display_name(str(event.sender_id), display_name)
+            store.save_user_names({sender_id: display_name})
+            store.update_web_identity_display_name(sender_id, display_name)
     key = sha256(f"web-bind:{event.event_id}:{event.message_id}".encode("utf-8")).hexdigest()[:32]
     message = "网页账号已绑定，之后的网页提交会计入你的飞书账号。" if identity else "绑定码无效或已过期，请回网页重新生成。"
     try:

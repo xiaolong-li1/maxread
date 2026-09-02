@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import maxread.admin_server as admin_server
 from maxread.admin_architecture import architecture_html, architecture_spec
-from maxread.admin_server import ADMIN_SESSION_SECONDS, AdminHandler, AdminServer, INDEX_HTML, _admin_summary, _attach_user_names, _limit, _record_filters
+from maxread.admin_server import ADMIN_SESSION_SECONDS, AdminHandler, AdminServer, INDEX_HTML, _admin_summary, _attach_user_names, _limit, _record_filters, _resolved_web_accounts
 from maxread.db import Store
 from maxread.workflow import transition
 
@@ -176,6 +176,33 @@ def test_binding_message_is_used_to_recover_real_name(tmp_path):
 
     assert rows[0]["sender_name"] == "真实姓名"
     assert store.get_user_names(["ou_bound"])["ou_bound"] == "真实姓名"
+    store.close()
+
+
+def test_web_account_list_resolves_names_from_saved_binding_messages(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    identity = store.get_or_create_web_identity("session", "web_123456")
+    store.issue_web_binding_code(int(identity["id"]), "code", 10)
+    store.claim_web_binding_code("code", "ou_bound")
+    store.update_web_identity_binding_message("ou_bound", "om_binding")
+
+    def fake_run(cmd, **_kwargs):
+        if "+search-user" in cmd:
+            return SimpleNamespace(returncode=1, stdout="", stderr="not visible")
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"data":{"messages":[{"sender":{"id":"ou_bound","name":"绑定姓名"}}]}}',
+            stderr="",
+        )
+
+    original_run = admin_server.subprocess.run
+    admin_server.subprocess.run = fake_run
+    try:
+        accounts = _resolved_web_accounts(SimpleNamespace(lark_cli="lark-cli"), store)
+    finally:
+        admin_server.subprocess.run = original_run
+
+    assert accounts[0]["display_name"] == "绑定姓名"
     store.close()
 
 

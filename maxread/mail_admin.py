@@ -220,6 +220,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     cutoff = datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=days) if days else None
     db_path = _mail_db_path(_mail_root())
     records: list[dict[str, Any]] = []
+    featured: list[dict[str, Any]] = []
     if db_path.exists():
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as connection:
             connection.row_factory = sqlite3.Row
@@ -240,7 +241,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
                 """
                 select thread_key,candidate_address,normalized_subject,fields_json,
                        base_record_id,doc_url,latest_time,last_incoming_time,last_outgoing_time,
-                       status,screening_status,interview_assigned,interview_result,last_error,updated_at
+                       status,screening_status,interview_assigned,is_interested,interview_result,last_error,updated_at
                 from recruiting_threads
                 where status<>'inactive'
                 order by coalesce(latest_time,'') desc,updated_at desc
@@ -262,6 +263,10 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
                     and not item["has_replied"]
                     and item["screening_status"] == "未筛选"
                 )
+                if item["mail_type"] == "candidate" and item["is_interested"]:
+                    featured_item = dict(item)
+                    featured_item.pop("search_text", None)
+                    featured.append(featured_item)
                 if mail_type != "all" and item["mail_type"] != mail_type:
                     continue
                 if screening and item["screening_status"] != screening:
@@ -295,6 +300,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     return {
         "ok": True,
         "items": records[offset:offset + limit],
+        "featured": featured[:100],
         "total": total,
         "offset": offset,
         "limit": limit,
@@ -1482,11 +1488,29 @@ def update_mail_admin_record(thread_key: str, changes: dict[str, Any], expected_
     clean_key = str(thread_key or "").strip()
     if not re.fullmatch(r"[0-9a-f]{32}", clean_key):
         raise ValueError("无效邮件线程")
-    allowed = {"screening_status", "interview_assigned", "interview_result"}
+    allowed = {"screening_status", "interview_assigned", "interview_result", "is_interested"}
     requested = {str(key): value for key, value in dict(changes or {}).items() if key in allowed}
     if not requested:
         raise ValueError("没有可更新字段")
     db_path = _mail_db_path(_mail_root())
+    if "is_interested" in requested:
+        if len(requested) != 1:
+            raise ValueError("重点候选人收纳不能与飞书流程字段合并提交")
+        local = _update_local_interest(
+            db_path,
+            clean_key,
+            bool(requested["is_interested"]),
+            expected_updated_at,
+        )
+        return {
+            "ok": True,
+            "thread_key": clean_key,
+            "state": local["state"],
+            "updated_at": local["updated_at"],
+            "sync_status": "local",
+            "sync_attempts": 0,
+            "sync_error": "",
+        }
     with _ADMIN_ACTION_LOCK:
         action = _stage_mail_admin_action(
             db_path,
@@ -1507,6 +1531,48 @@ def update_mail_admin_record(thread_key: str, changes: dict[str, Any], expected_
         "sync_attempts": delivery["attempts"],
         "sync_error": delivery["last_error"],
     }
+
+
+def _update_local_interest(
+    db_path: Path,
+    thread_key: str,
+    is_interested: bool,
+    expected_updated_at: str,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_admin_actions_schema(connection)
+        connection.execute("begin immediate")
+        row = connection.execute(
+            "select * from recruiting_threads where thread_key=?",
+            (thread_key,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("邮件记录不存在")
+        if expected_updated_at and str(row["updated_at"] or "") != str(expected_updated_at):
+            raise ValueError("记录已被其他操作更新，请刷新后重试")
+        try:
+            fields = json.loads(str(row["fields_json"] or "{}"))
+        except json.JSONDecodeError:
+            fields = {}
+        if str(fields.get("mail_type") or "other") == "other":
+            raise ValueError("其他邮件不能加入重点候选人")
+        desired = int(bool(is_interested))
+        if int(row["is_interested"] or 0) == desired:
+            connection.rollback()
+            return {
+                "state": {"is_interested": bool(desired)},
+                "updated_at": str(row["updated_at"] or ""),
+            }
+        cursor = connection.execute(
+            "update recruiting_threads set is_interested=?,updated_at=? where thread_key=? and updated_at=?",
+            (desired, now, thread_key, str(row["updated_at"] or "")),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("记录在写入期间发生变化")
+        connection.commit()
+    return {"state": {"is_interested": bool(desired)}, "updated_at": now}
 
 
 def _stage_mail_admin_action(
@@ -1790,6 +1856,9 @@ def _ensure_admin_actions_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "create index if not exists recruiting_admin_actions_status_idx on recruiting_admin_actions(status,id)"
     )
+    thread_columns = {str(row[1]) for row in connection.execute("pragma table_info(recruiting_threads)")}
+    if thread_columns and "is_interested" not in thread_columns:
+        connection.execute("alter table recruiting_threads add column is_interested integer not null default 0")
     connection.commit()
 
 
@@ -1845,6 +1914,7 @@ def _mail_record(row: sqlite3.Row) -> dict[str, Any]:
         "screening_status": str(row["screening_status"] or "未筛选"),
         "screening_label": SCREENING_LABELS.get(str(row["screening_status"] or "未筛选"), str(row["screening_status"] or "未筛选")),
         "interview_assigned": bool(row["interview_assigned"]),
+        "is_interested": bool(row["is_interested"]),
         "interview_result": str(row["interview_result"] or "未开始"),
         "doc_url": str(row["doc_url"] or ""),
         "base_record_id": str(row["base_record_id"] or ""),

@@ -223,7 +223,7 @@ def _record_fixture(tmp_path: Path):
             create table recruiting_threads(
               thread_key text primary key,candidate_address text,normalized_subject text,fields_json text,
               base_record_id text,doc_url text,latest_time text,last_incoming_time text,last_outgoing_time text,
-              status text,screening_status text,interview_assigned integer,interview_result text,
+              status text,screening_status text,interview_assigned integer,is_interested integer,interview_result text,
               last_error text,updated_at text
             )
             """
@@ -236,12 +236,12 @@ def _record_fixture(tmp_path: Path):
         }
         other = {"name": "系统通知", "mail_type": "other", "projects": ["unknown"], "purpose_summary": "安全通知"}
         connection.execute(
-            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("a" * 32, "candidate@example.com", "申请", json.dumps(candidate, ensure_ascii=False), "rec1", "https://doc", "2026-09-01T10:00:00+08:00", "", "2026-09-01T11:00:00+08:00", "active", "未筛选", 0, "未开始", "", "v1"),
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("a" * 32, "candidate@example.com", "申请", json.dumps(candidate, ensure_ascii=False), "rec1", "https://doc", "2026-09-01T10:00:00+08:00", "", "2026-09-01T11:00:00+08:00", "active", "未筛选", 0, 1, "未开始", "", "v1"),
         )
         connection.execute(
-            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("b" * 32, "notice@example.com", "通知", json.dumps(other, ensure_ascii=False), "rec2", "", "2026-08-31T10:00:00+08:00", "", "", "active", "未筛选", 0, "未开始", "", "v2"),
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("b" * 32, "notice@example.com", "通知", json.dumps(other, ensure_ascii=False), "rec2", "", "2026-08-31T10:00:00+08:00", "", "", "active", "未筛选", 0, 0, "未开始", "", "v2"),
         )
     return root, db
 
@@ -268,7 +268,7 @@ def _rejection_fixture(tmp_path: Path):
             create table recruiting_threads(
               thread_key text primary key,candidate_address text,normalized_subject text,fields_json text,
               base_record_id text,doc_id text,doc_url text,latest_time text,last_incoming_time text,last_outgoing_time text,
-              status text,screening_status text,interview_assigned integer,interview_result text,
+              status text,screening_status text,interview_assigned integer,is_interested integer,interview_result text,
               last_error text,updated_at text
             );
             """
@@ -283,12 +283,12 @@ def _rejection_fixture(tmp_path: Path):
         }
         bohan_fields = {**zip_fields, "name": "王同学", "source_accounts": ["Bohan"]}
         connection.execute(
-            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("c" * 32, "15836992650@163.com", "测试申请", json.dumps(zip_fields, ensure_ascii=False), "rec-zip", "doc-zip", "https://doc", "2026-09-02 16:18", "", "", "active", "未筛选", 0, "未开始", "", "v1"),
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("c" * 32, "15836992650@163.com", "测试申请", json.dumps(zip_fields, ensure_ascii=False), "rec-zip", "doc-zip", "https://doc", "2026-09-02 16:18", "", "", "active", "未筛选", 0, 0, "未开始", "", "v1"),
         )
         connection.execute(
-            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("d" * 32, "bohan-only@example.com", "测试申请", json.dumps(bohan_fields, ensure_ascii=False), "rec-bohan", "", "", "2026-09-02 16:18", "", "", "active", "未筛选", 0, "未开始", "", "v1"),
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("d" * 32, "bohan-only@example.com", "测试申请", json.dumps(bohan_fields, ensure_ascii=False), "rec-bohan", "", "", "2026-09-02 16:18", "", "", "active", "未筛选", 0, 0, "未开始", "", "v1"),
         )
     return root, db
 
@@ -338,8 +338,8 @@ def _add_zip_candidate(db: Path, thread_key: str, message_id: int, address: str,
         )
         connection.execute("insert into recruiting_messages values(?,?,'incoming')", (message_id, thread_key))
         connection.execute(
-            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (thread_key, address, "实习生申请", json.dumps(fields, ensure_ascii=False), f"rec-{message_id}", f"doc-{message_id}", "https://doc", "2026-09-02 17:00", "", "", "active", "未筛选", 0, "未开始", "", "v1"),
+            "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (thread_key, address, "实习生申请", json.dumps(fields, ensure_ascii=False), f"rec-{message_id}", f"doc-{message_id}", "https://doc", "2026-09-02 17:00", "", "", "active", "未筛选", 0, 0, "未开始", "", "v1"),
         )
 
 
@@ -546,6 +546,8 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     assert result["total"] == 1
     assert result["items"][0]["name"] == "张三"
     assert result["items"][0]["has_replied"] is True
+    assert result["items"][0]["is_interested"] is True
+    assert [item["name"] for item in result["featured"]] == ["张三"]
     assert result["filters"]["screening_statuses"] == ["未筛选", "面试资格", "面试通过", "未通过", "实习生"]
 
     ranked = mail_admin.mail_admin_records("mail_type=candidate&tier=c9&rank_percentile=5&days=0&limit=10")
@@ -616,6 +618,33 @@ def test_mail_record_base_failure_keeps_durable_pending_outbox(tmp_path, monkeyp
     with sqlite3.connect(db) as connection:
         assert connection.execute("select screening_status from recruiting_threads where thread_key=?", ("a" * 32,)).fetchone()[0] == "未通过"
         assert connection.execute("select status,attempts,last_error from recruiting_admin_actions").fetchone() == ("pending", 1, "base unavailable")
+
+
+def test_interest_marker_uses_the_same_local_first_outbox_transaction(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    delivered = []
+    monkeypatch.setattr(
+        mail_admin,
+        "_update_base_workflow",
+        lambda record_id, state: delivered.append((record_id, dict(state))),
+    )
+
+    result = mail_admin.update_mail_admin_record(
+        "a" * 32,
+        {"is_interested": False},
+        "v1",
+    )
+
+    assert result["sync_status"] == "local"
+    assert result["state"]["is_interested"] is False
+    assert delivered == []
+    with sqlite3.connect(db) as connection:
+        assert connection.execute(
+            "select is_interested from recruiting_threads where thread_key=?",
+            ("a" * 32,),
+        ).fetchone()[0] == 0
+        assert connection.execute("select count(*) from recruiting_admin_actions").fetchone()[0] == 0
 
 
 def test_pending_admin_action_replays_idempotently_after_restart_window(tmp_path, monkeypatch):
@@ -733,7 +762,7 @@ def test_mail_admin_page_contains_candidate_workbench_controls():
     html = mail_admin.MAIL_ADMIN_HTML
     assert "邮件记录" in html
     assert "api/admin/mail/records" in html
-    assert "api('api/admin/mail/record'" not in html
+    assert "api('api/admin/mail/record'" in html
     assert "最近一周新增候选人" not in html  # links arrive only after authenticated API response
 
 
@@ -746,7 +775,7 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="operations-panel"' in html
     assert 'class="record-table-wrap"' in html
     assert "max-height:calc(100dvh - 344px)" in html
-    assert "recordState={items:[],offset:0,limit:20" in html
+    assert "recordState={items:[],featured:[],offset:0,limit:20" in html
     assert "按回复状态、院校、方向和排名筛选" in html
     assert "<th>摘要</th>" not in html
     assert "<th>回复</th>" in html
@@ -780,6 +809,11 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="record-jump"' in html
     assert "jumpRecordPage()" in html
     assert "Math.ceil(recordState.total/recordState.limit)" in html
+    assert 'id="focus-list"' in html
+    assert "重点候选人" in html
+    assert "toggleInterested(event" in html
+    assert "changes:{is_interested:!item.is_interested}" in html
+    assert "recordState.featured=data.featured||[]" in html
     assert "rejection" not in html.casefold()
     assert "拒信" not in html
 
