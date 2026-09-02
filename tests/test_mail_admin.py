@@ -213,7 +213,7 @@ def _record_fixture(tmp_path: Path):
             "name": "张三", "mail_type": "candidate", "school": "浙江大学", "education_stage": "本科",
             "current_grade": "大三", "major": "计算机", "academic_display": "4.5/5.0 · Top 5%",
             "rank": "Top 5%", "rank_evidence": "专业排名前 5%", "projects": ["World Model"],
-            "purpose_summary": "申请目的：世界模型研究", "source_accounts": ["ZIP Lab"], "is_985": "是", "is_c9": "是",
+            "purpose_summary": "申请目的：世界模型研究；竞赛获得哈尔滨站铜奖", "source_accounts": ["ZIP Lab"], "is_985": "是", "is_c9": "是",
         }
         other = {"name": "系统通知", "mail_type": "other", "projects": ["unknown"], "purpose_summary": "安全通知"}
         connection.execute(
@@ -243,6 +243,7 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     assert ranked["items"][0]["best_rank_percentile"] == 5.0
     assert mail_admin.mail_admin_records("mail_type=candidate&reply=replied&days=0&limit=10")["total"] == 1
     assert mail_admin.mail_admin_records("mail_type=candidate&reply=unreplied&days=0&limit=10")["total"] == 0
+    assert mail_admin.mail_admin_records("mail_type=candidate&q=哈尔滨&days=0&limit=10")["total"] == 0
 
 
 def test_rank_filter_accepts_any_qualifying_rank_and_ignores_gpa_ratios():

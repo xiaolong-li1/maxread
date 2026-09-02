@@ -534,9 +534,8 @@ def _mail_record(row: sqlite3.Row) -> dict[str, Any]:
     }
     item["search_text"] = " ".join(
         str(value) for value in (
-            item["name"], item["candidate_address"], item["subject"], item["school"],
-            item["study"], item["major"], item["academic_display"], item["rank"],
-            item["purpose_summary"], " ".join(item["projects"]),
+            item["name"], item["candidate_address"], item["school"],
+            item["study"], item["major"], " ".join(item["projects"]),
         )
     ).casefold()
     return item
