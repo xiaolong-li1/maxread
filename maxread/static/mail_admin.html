@@ -45,7 +45,7 @@
     .tabs button.active { color:var(--text); border-bottom-color:var(--green); font-weight:650; }
     .workspace { margin-top:10px; background:var(--paper); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
     .workspace-head { min-height:46px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 12px; border-bottom:1px solid var(--line); }
-    .record-toolbar { display:grid; grid-template-columns:minmax(210px,1.5fr) repeat(4,minmax(118px,.7fr)); gap:7px; padding:9px 12px; background:#fafbf9; border-bottom:1px solid var(--line); }
+    .record-toolbar { display:grid; grid-template-columns:minmax(190px,1.35fr) repeat(6,minmax(100px,.65fr)); gap:7px; padding:9px 12px; background:#fafbf9; border-bottom:1px solid var(--line); }
     .record-toolbar input,.record-toolbar select,.workflow-select { width:100%; height:34px; padding:0 8px; color:var(--text); background:var(--paper); border:1px solid var(--line); border-radius:6px; }
     .record-table-wrap { min-height:300px; max-height:calc(100dvh - 344px); overflow:auto; }
     table { width:100%; border-collapse:collapse; }
@@ -128,6 +128,8 @@
             <select id="record-type" onchange="resetAndLoadRecords()"><option value="candidate">候选人来信</option><option value="other">其他邮件</option><option value="all">全部邮件</option></select>
             <select id="record-status" onchange="resetAndLoadRecords()"><option value="">全部筛选状态</option></select>
             <select id="record-project" onchange="resetAndLoadRecords()"><option value="">全部方向</option></select>
+            <select id="record-tier" onchange="resetAndLoadRecords()"><option value="">全部院校</option><option value="c9">C9</option><option value="985">985</option></select>
+            <select id="record-rank" onchange="resetAndLoadRecords()"><option value="0">全部排名</option><option value="5">Top 5%</option><option value="10">Top 10%</option><option value="20">Top 20%</option><option value="30">Top 30%</option></select>
             <select id="record-days" onchange="resetAndLoadRecords()"><option value="7">最近 7 天</option><option value="30" selected>最近 30 天</option><option value="90">最近 90 天</option><option value="0">全部时间</option></select>
           </div>
           <div class="record-table-wrap"><table class="record-table"><thead><tr><th>候选人 / 来信</th><th>院校 / 学业</th><th>方向</th><th>回复</th><th>筛选状态</th><th>面试</th><th></th></tr></thead><tbody id="record-rows"></tbody></table></div>
@@ -215,7 +217,7 @@
       $('errors').innerHTML=(data.errors||[]).map(e=>`<div class="error-row"><strong>${Number(e.count||0)}</strong><span>${esc(e.error||'未知错误')}</span><span class="time muted">${esc(fmt(e.last_seen))}</span></div>`).join('')||'<div class="empty">没有近期错误</div>';
     }
     async function loadRecords(){
-      const params=new URLSearchParams({q:$('record-search').value.trim(),mail_type:$('record-type').value,screening:$('record-status').value,project:$('record-project').value,days:$('record-days').value,offset:String(recordState.offset),limit:String(recordState.limit)});
+      const params=new URLSearchParams({q:$('record-search').value.trim(),mail_type:$('record-type').value,screening:$('record-status').value,project:$('record-project').value,tier:$('record-tier').value,rank_percentile:$('record-rank').value,days:$('record-days').value,offset:String(recordState.offset),limit:String(recordState.limit)});
       try{
         const data=await api(`api/admin/mail/records?${params}`);recordState.items=data.items||[];recordState.total=Number(data.total||0);recordState.filters=data.filters||recordState.filters||{};
         const currentStatus=$('record-status').value;const currentProject=$('record-project').value;

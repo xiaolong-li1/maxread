@@ -139,6 +139,8 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     mail_type = str(query.get("mail_type", ["candidate"])[0] or "candidate").strip()
     screening = str(query.get("screening", [""])[0] or "").strip()
     project = str(query.get("project", [""])[0] or "").strip()
+    tier = str(query.get("tier", [""])[0] or "").strip().lower()
+    rank_percentile = _bounded_int(query.get("rank_percentile", ["0"])[0], 0, 0, 100)
     days = _bounded_int(query.get("days", ["30"])[0], 30, 0, 3650)
     limit = _bounded_int(query.get("limit", ["30"])[0], 30, 10, 100)
     offset = _bounded_int(query.get("offset", ["0"])[0], 0, 0, 100_000)
@@ -146,6 +148,8 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
         raise ValueError("不支持的邮件类型")
     if screening and screening not in SCREENING_STATUSES:
         raise ValueError("不支持的筛选状态")
+    if tier not in {"", "c9", "985"}:
+        raise ValueError("不支持的院校层级")
     cutoff = datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=days) if days else None
     db_path = _mail_db_path(_mail_root())
     records: list[dict[str, Any]] = []
@@ -169,6 +173,16 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
                 if screening and item["screening_status"] != screening:
                     continue
                 if project and project not in item["projects"]:
+                    continue
+                if tier == "c9" and not _truthy_school_flag(item["is_c9"]):
+                    continue
+                if tier == "985" and not (
+                    _truthy_school_flag(item["is_985"]) or _truthy_school_flag(item["is_c9"])
+                ):
+                    continue
+                if rank_percentile and not any(
+                    percentile <= rank_percentile for percentile in item["rank_percentiles"]
+                ):
                     continue
                 parsed = _parse_datetime(item["latest_time"])
                 if cutoff is not None and (parsed is None or parsed < cutoff):
@@ -481,6 +495,7 @@ def _mail_record(row: sqlite3.Row) -> dict[str, Any]:
         study_parts.append(f"入学 {fields['entry_year']}")
     if str(fields.get("expected_grad_year") or "unknown") != "unknown":
         study_parts.append(f"预计毕业 {fields['expected_grad_year']}")
+    rank_percentiles = _rank_percentiles(fields)
     item = {
         "thread_key": str(row["thread_key"]),
         "candidate_address": str(row["candidate_address"] or ""),
@@ -493,6 +508,8 @@ def _mail_record(row: sqlite3.Row) -> dict[str, Any]:
         "academic_display": str(fields.get("academic_display") or "unknown"),
         "rank": str(fields.get("rank") or "未提供"),
         "rank_evidence": str(fields.get("rank_evidence") or "未提供"),
+        "rank_percentiles": rank_percentiles,
+        "best_rank_percentile": min(rank_percentiles) if rank_percentiles else None,
         "projects": [str(value) for value in fields.get("projects") or [] if str(value)],
         "purpose_summary": str(fields.get("purpose_summary") or ""),
         "source_accounts": [str(value) for value in fields.get("source_accounts") or [] if str(value)],
@@ -516,6 +533,45 @@ def _mail_record(row: sqlite3.Row) -> dict[str, Any]:
         )
     ).casefold()
     return item
+
+
+def _truthy_school_flag(value: Any) -> bool:
+    text = str(value or "").strip().casefold()
+    return text in {"1", "true", "yes", "y", "是", "985", "c9"}
+
+
+def _rank_percentiles(fields: dict[str, Any]) -> list[float]:
+    values: list[float] = []
+    rank_texts = [
+        str(fields.get("rank") or ""),
+        str(fields.get("rank_evidence") or ""),
+    ]
+    explicit_texts = rank_texts + [str(fields.get("academic_display") or "")]
+    for text in explicit_texts:
+        for match in re.finditer(
+            r"(?i)(?:top|前|百分位|排名(?:为|约)?)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*%",
+            text,
+        ):
+            value = float(match.group(1))
+            if 0 <= value <= 100:
+                values.append(value)
+    for text in rank_texts:
+        for match in re.finditer(r"(?:第\s*)?(\d+)\s*(?:名\s*)?/\s*(\d+)", text):
+            prefix = text[max(0, match.start() - 12):match.start()].casefold()
+            if "gpa" in prefix or "绩点" in prefix:
+                continue
+            position, cohort = int(match.group(1)), int(match.group(2))
+            if 0 < position <= cohort:
+                values.append(position / cohort * 100)
+        for match in re.finditer(
+            r"(?:排名|第)\s*(\d+)\s*名?\s*(?:，|,|；|;)?\s*(?:共|of)?\s*(\d+)\s*(?:人|名)?",
+            text,
+            flags=re.I,
+        ):
+            position, cohort = int(match.group(1)), int(match.group(2))
+            if 0 < position <= cohort:
+                values.append(position / cohort * 100)
+    return sorted({round(value, 4) for value in values})
 
 
 def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:

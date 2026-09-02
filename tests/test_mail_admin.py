@@ -238,6 +238,22 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     assert result["items"][0]["has_replied"] is True
     assert result["filters"]["screening_statuses"] == ["未筛选", "面试资格", "面试通过", "未通过", "实习生"]
 
+    ranked = mail_admin.mail_admin_records("mail_type=candidate&tier=c9&rank_percentile=5&days=0&limit=10")
+    assert ranked["total"] == 1
+    assert ranked["items"][0]["best_rank_percentile"] == 5.0
+
+
+def test_rank_filter_accepts_any_qualifying_rank_and_ignores_gpa_ratios():
+    values = mail_admin._rank_percentiles({
+        "rank": "大一专业排名 30/100；大二专业排名 4/100",
+        "rank_evidence": "年级第 12 名，共 120 人",
+        "academic_display": "GPA 4.43/5.00",
+    })
+
+    assert values == [4.0, 10.0, 30.0]
+    assert any(value <= 5 for value in values)
+    assert mail_admin._rank_percentiles({"academic_display": "GPA 4.43/5.00"}) == []
+
 
 def test_mail_record_update_commits_local_outbox_then_base(tmp_path, monkeypatch):
     root, db = _record_fixture(tmp_path)
@@ -409,3 +425,6 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "margin:0 0 0 auto" in html
     assert "本地已保存，等待飞书同步" in html
     assert "data.admin_sync?.pending" in html
+    assert 'id="record-tier"' in html
+    assert 'id="record-rank"' in html
+    assert "rank_percentile:$('record-rank').value" in html
