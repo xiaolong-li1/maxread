@@ -620,12 +620,9 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
         rel_tex = str(tex_path.relative_to(source_dir))
         text = _expand_simple_macros(_strip_latex_comments(_decode_text(tex_path.read_bytes())), macros)
         graphics_macros = _extract_graphics_macro_definitions(text)
-        appendix_match = re.search(
-            r"\\appendix\b|\\section\*?\s*\{\s*(?:appendix|supplementary\s+material)",
-            text,
-            flags=re.I,
-        )
-        appendix_at = appendix_match.start() if appendix_match else -1
+        document_match = re.search(r"\\begin\s*\{document\}", text, flags=re.I)
+        document_at = document_match.start() if document_match else -1
+        appendix_at = _find_appendix_start(text)
         search_cursor = 0
         for raw_block in _figure_blocks(text):
             block_at = text.find(raw_block, search_cursor)
@@ -634,7 +631,12 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
             if block_at >= 0:
                 search_cursor = block_at + len(raw_block)
             block = _expand_graphics_macros(raw_block, graphics_macros)
-            is_appendix = appendix_at >= 0 and block_at >= appendix_at
+            is_appendix = _figure_is_appendix(
+                text,
+                block_at,
+                document_at=document_at,
+                appendix_at=appendix_at,
+            )
             if _is_subfigure_block(block):
                 caption = _last_caption(block)
                 label = _last_label(block) or _first_label(block)
@@ -695,6 +697,57 @@ def _extract_figures_from_dir(source_dir: Path, max_items: int = 220, macros: Op
                 if segment_figures:
                     figure_index += 1
     return figures
+
+
+_COMMAND_DEFINITION_PATTERNS = (
+    re.compile(
+        r"\\(?:re)?newcommand\*?\s*(?:\{\\(?P<name1>[A-Za-z@]+)\}|\\(?P<name2>[A-Za-z@]+))"
+        r"\s*(?:\[[0-9]+\])?\s*(?:\[[^\]]*\])?\s*\{",
+        flags=re.I,
+    ),
+    re.compile(
+        r"\\(?:long\s+)?def\s*\\(?P<name>[A-Za-z@]+)(?:\s*#[1-9])*\s*\{",
+        flags=re.I,
+    ),
+)
+
+
+def _figure_is_appendix(
+    tex_text: str,
+    block_at: int,
+    *,
+    document_at: int,
+    appendix_at: int,
+) -> bool:
+    """Classify figures by TeX execution order, not macro definition order."""
+    if document_at < 0 or block_at >= document_at:
+        return appendix_at >= 0 and block_at >= appendix_at
+
+    definition = _command_definition_containing(tex_text, block_at)
+    if definition is None:
+        return False
+    name, body = definition
+    if "appendix" in name.casefold() or "supplement" in name.casefold():
+        return True
+    if re.search(r"\\(?:appendix|beginappendix)\b|\\begin\s*\{appendices\}", body, flags=re.I):
+        return True
+    return bool(
+        appendix_at >= 0
+        and re.search(rf"\\{re.escape(name)}(?![A-Za-z@])", tex_text[appendix_at:])
+    )
+
+
+def _command_definition_containing(tex_text: str, position: int) -> Optional[Tuple[str, str]]:
+    for pattern in _COMMAND_DEFINITION_PATTERNS:
+        for match in pattern.finditer(tex_text, 0, max(0, int(position))):
+            open_brace = match.end() - 1
+            close_brace = _balanced_brace_end_index(tex_text, open_brace)
+            if close_brace < position:
+                continue
+            if open_brace < position < close_brace:
+                name = next((value for value in match.groupdict().values() if value), "")
+                return name, tex_text[open_brace + 1:close_brace]
+    return None
 
 
 _SECTION_COMMAND_RE = re.compile(
@@ -1185,13 +1238,22 @@ def _clip_source_with_appendix(text: str, max_chars: int) -> str:
 
 
 def _find_appendix_start(text: str) -> int:
+    document = re.search(r"\\begin\s*\{document\}", text, flags=re.I)
+    search_from = document.end() if document else 0
     patterns = [
         r"\\appendix\b",
+        r"\\beginappendix\b",
+        r"\\begin\s*\{appendices\}",
         r"\\section\*?\{Appendix",
         r"\\section\*?\{Supplement",
         r"% FILE: [^\n]*(?:appendix|supplement)[^\n]*",
     ]
-    starts = [match.start() for pattern in patterns for match in re.finditer(pattern, text, re.I)]
+    starts = [
+        match.start()
+        for pattern in patterns
+        for match in re.finditer(pattern, text[search_from:], re.I)
+    ]
+    starts = [search_from + start for start in starts]
     return min(starts) if starts else -1
 
 

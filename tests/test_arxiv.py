@@ -422,6 +422,40 @@ def test_fetch_source_text_marks_figures_after_appendix_boundary(tmp_path):
     assert [figure.is_appendix for figure in figures] == [False, True]
 
 
+def test_deferred_appendix_macro_does_not_hide_main_document_figures(tmp_path):
+    source_dir = tmp_path / "source"
+    (source_dir / "fig").mkdir(parents=True)
+    for name in ("extra", "method", "result"):
+        (source_dir / "fig" / f"{name}.png").write_bytes(b"png")
+    (source_dir / "main.tex").write_text(
+        r"""
+\newcommand{\inputappendix}{%
+  \appendix
+  \section{Extra Results}
+  \begin{figure}\includegraphics{fig/extra.png}\caption{Extra plot.}\label{fig:extra}\end{figure}
+}
+\begin{document}
+\section{Method}
+\begin{figure}\includegraphics{fig/method.png}\caption{Method overview.}\label{fig:method}\end{figure}
+\section{Experiments}
+\begin{figure}\includegraphics{fig/result.png}\caption{Main result.}\label{fig:result}\end{figure}
+\beginappendix
+\inputappendix
+\end{document}
+""",
+        encoding="utf-8",
+    )
+
+    figures = arxiv_module._extract_figures_from_dir(source_dir)
+
+    by_asset = {figure.asset: figure for figure in figures}
+    assert by_asset["fig/extra.png"].is_appendix is True
+    assert by_asset["fig/method.png"].is_appendix is False
+    assert by_asset["fig/result.png"].is_appendix is False
+    assert by_asset["fig/method.png"].owner_section == "method"
+    assert by_asset["fig/result.png"].owner_section == "experiments"
+
+
 def test_fetch_source_text_splits_multiple_captions_in_one_figure_block(tmp_path):
     paper_dir = tmp_path / "papers" / "2508.10774"
     paper_dir.mkdir(parents=True)
