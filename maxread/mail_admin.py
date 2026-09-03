@@ -201,6 +201,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     project = str(query.get("project", [""])[0] or "").strip()
     account = str(query.get("account", [""])[0] or "").strip().casefold()
     reply = str(query.get("reply", [""])[0] or "").strip().lower()
+    interest = str(query.get("interest", [""])[0] or "").strip().lower()
     tier = str(query.get("tier", [""])[0] or "").strip().lower()
     rank_percentile = _bounded_int(query.get("rank_percentile", ["0"])[0], 0, 0, 100)
     days = _bounded_int(query.get("days", ["30"])[0], 30, 0, 3650)
@@ -214,13 +215,15 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
         raise ValueError("不支持的院校层级")
     if reply not in {"", "replied", "unreplied"}:
         raise ValueError("不支持的回复状态")
+    if interest not in {"", "only"}:
+        raise ValueError("不支持的重点候选人视图")
     account_labels = {"zip-lab": "ZIP Lab", "bohan": "Bohan"}
     if account and account not in account_labels:
         raise ValueError("不支持的来源邮箱")
     cutoff = datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=days) if days else None
     db_path = _mail_db_path(_mail_root())
     records: list[dict[str, Any]] = []
-    featured: list[dict[str, Any]] = []
+    interest_total = 0
     if db_path.exists():
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as connection:
             connection.row_factory = sqlite3.Row
@@ -264,10 +267,10 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
                     and item["screening_status"] == "未筛选"
                 )
                 if item["mail_type"] == "candidate" and item["is_interested"]:
-                    featured_item = dict(item)
-                    featured_item.pop("search_text", None)
-                    featured.append(featured_item)
+                    interest_total += 1
                 if mail_type != "all" and item["mail_type"] != mail_type:
+                    continue
+                if interest == "only" and not item["is_interested"]:
                     continue
                 if screening and item["screening_status"] != screening:
                     continue
@@ -300,7 +303,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     return {
         "ok": True,
         "items": records[offset:offset + limit],
-        "featured": featured[:100],
+        "interest_total": interest_total,
         "total": total,
         "offset": offset,
         "limit": limit,
