@@ -771,7 +771,7 @@ class RecruitingRunner:
                 f"### {self._document_message_heading(envelope, message)}",
                 f"发件人：{message.sender_address}",
                 "```text",
-                message.body_text[:50000],
+                self._message_body_for_document(message),
                 "```",
                 "",
             ])
@@ -815,6 +815,11 @@ class RecruitingRunner:
             return ["- 邮件包含邮箱超大附件外链；IMAP 未同步文件实体，请从原邮件打开链接下载。"]
         return ["- 未发现可下载的本地附件。"]
 
+    @staticmethod
+    def _message_body_for_document(message: StoredMessage) -> str:
+        body = str(message.body_text or "").strip()
+        return body[:50000] if body else "（原始邮件正文为空；如有材料，请查看文末附件。）"
+
     def _document_delta_content(self, envelope: ThreadEnvelope, messages: list[StoredMessage]) -> str:
         """Render only newly arrived thread material for an existing doc."""
         parts = ["## 新增邮件线程片段", ""]
@@ -823,7 +828,7 @@ class RecruitingRunner:
                 f"### {self._document_message_heading(envelope, message)}",
                 f"发件人：{message.sender_address}",
                 "```text",
-                message.body_text[:50000],
+                self._message_body_for_document(message),
                 "```",
                 "",
             ])

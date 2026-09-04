@@ -126,6 +126,14 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertTrue(_needs_material_document(CandidateFields(mail_type="candidate").normalized()))
         self.assertFalse(_needs_material_document(CandidateFields(mail_type="other").normalized()))
 
+    def test_empty_original_message_body_is_explained_in_document(self) -> None:
+        message = StoredMessage(1, "1", "INBOX", "申请", "候选人", "a@example.com", None, "", Path("/tmp/1"))
+
+        self.assertEqual(
+            RecruitingRunner._message_body_for_document(message),
+            "（原始邮件正文为空；如有材料，请查看文末附件。）",
+        )
+
     def test_read_headers_does_not_load_attachment_body(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "large.eml"
