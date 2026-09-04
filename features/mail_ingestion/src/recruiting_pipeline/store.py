@@ -385,6 +385,19 @@ class PipelineStore:
         with self.connect() as conn:
             return {str(row[0]) for row in conn.execute("SELECT digest FROM recruiting_uploaded_attachments WHERE thread_key=?", (thread_key,))}
 
+    def attachment_inventory(self, message_ids: Iterable[int]) -> list[dict[str, Any]]:
+        ids = [int(value) for value in message_ids]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT message_record_id,filename,size_bytes,sha256,local_path,skipped_reason "
+                f"FROM attachments WHERE message_record_id IN ({placeholders}) ORDER BY message_record_id,id",
+                ids,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def mark_attachment_uploaded(self, thread_key: str, digest: str, filename: str, doc_id: str) -> None:
         with self.connect() as conn:
             conn.execute(

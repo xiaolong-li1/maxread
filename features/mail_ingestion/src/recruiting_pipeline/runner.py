@@ -603,6 +603,9 @@ class RecruitingRunner:
                 # Some document update calls replay tokenized media blocks;
                 # remove any replayed file cards before the run completes.
                 self.docs.deduplicate_files(document_id)
+            if attachment_messages:
+                self.docs.replace_attachment_summary(document_id, self._attachment_summary_lines(envelope))
+            document_updated = document_updated or uploaded_any
         else:
             document_id, document_url = thread.document_id, thread.document_url
 
@@ -772,15 +775,45 @@ class RecruitingRunner:
                 "```",
                 "",
             ])
-        names = [path.name for path in self._attachment_paths(envelope, messages)]
-        if names:
-            attachment_lines = [f"- {name}" for name in names]
-        elif any(token in message.body_text for message in envelope.messages for token in ("超大附件", "在线预览", "下载")):
-            attachment_lines = ["- 邮件包含邮箱超大附件外链；IMAP 未同步文件实体，请从原邮件打开链接下载。"]
-        else:
-            attachment_lines = ["- 未发现可下载的本地附件。"]
+        attachment_lines = self._attachment_summary_lines(envelope, messages)
         parts.extend(["## 附件", "", *attachment_lines, "", "> 本文档由 ZIP Lab 招聘邮箱只读管线生成。"])
         return "\n".join(parts)
+
+    def _attachment_summary_lines(
+        self,
+        envelope: ThreadEnvelope,
+        messages: list[StoredMessage] | None = None,
+    ) -> list[str]:
+        selected = messages or list(envelope.messages)
+        paths = self._attachment_paths(envelope, selected)
+        inventory = self.store.attachment_inventory(message.id for message in selected)
+        lines: list[str] = []
+        uploaded = self.store.uploaded_attachment_digests(envelope.key)
+        indexed_paths: set[Path] = set()
+        for item in inventory:
+            name = str(item.get("filename") or "附件")
+            digest = str(item.get("sha256") or "")
+            reason = str(item.get("skipped_reason") or "")
+            local_path = Path(str(item["local_path"])).resolve() if item.get("local_path") else None
+            if local_path:
+                indexed_paths.add(local_path)
+            if digest and digest in uploaded:
+                lines.append(f"- {name}（已附加到本文档）")
+            elif local_path and local_path.exists():
+                lines.append(f"- {name}")
+            elif reason == "attachment_too_large":
+                size_mb = int(item.get("size_bytes") or 0) / (1024 * 1024)
+                lines.append(f"- {name}（{size_mb:.1f} MB，超过自动下载上限，尚未附加；请从原邮件查看）")
+            elif reason and reason != "processed_cleanup":
+                lines.append(f"- {name}（未能自动附加：{reason}）")
+        for path in paths:
+            if path.resolve() not in indexed_paths:
+                lines.append(f"- {path.name}")
+        if lines:
+            return list(dict.fromkeys(lines))
+        if any(token in message.body_text for message in selected for token in ("超大附件", "在线预览", "下载")):
+            return ["- 邮件包含邮箱超大附件外链；IMAP 未同步文件实体，请从原邮件打开链接下载。"]
+        return ["- 未发现可下载的本地附件。"]
 
     def _document_delta_content(self, envelope: ThreadEnvelope, messages: list[StoredMessage]) -> str:
         """Render only newly arrived thread material for an existing doc."""

@@ -80,7 +80,7 @@ class Settings:
             oauth2_token_cache=token_cache,
             lookback_days=_positive_int("MAIL_LOOKBACK_DAYS", 30),
             scan_limit=_positive_int("MAIL_SCAN_LIMIT", 100),
-            max_attachment_bytes=_positive_int("MAIL_MAX_ATTACHMENT_MB", 25) * 1024 * 1024,
+            max_attachment_bytes=_positive_int("MAIL_MAX_ATTACHMENT_MB", 64) * 1024 * 1024,
             read_only=True,
             data_dir=data_dir,
             db_path=db_path,

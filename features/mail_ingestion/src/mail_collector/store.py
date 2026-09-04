@@ -172,6 +172,80 @@ class Store:
                     ),
                 )
             return message_record_id, True
+
+    def restore_attachments(
+        self,
+        mailbox: str,
+        source_uid: str,
+        message: ParsedMessage,
+        *,
+        apply: bool = False,
+    ) -> dict[str, object]:
+        """Restore skipped payloads without duplicating the existing message."""
+        self.initialize()
+        with self.connect() as connection:
+            stored = connection.execute(
+                "SELECT id,raw_path FROM messages WHERE mailbox=? AND source_uid=?",
+                (mailbox, source_uid),
+            ).fetchone()
+            if stored is None:
+                raise ValueError(f"message not found: {mailbox} UID {source_uid}")
+            rows = connection.execute(
+                "SELECT id,filename,size_bytes,sha256,local_path,skipped_reason "
+                "FROM attachments WHERE message_record_id=? ORDER BY id",
+                (int(stored["id"]),),
+            ).fetchall()
+
+        payloads = {item.sha256: item for item in message.attachments}
+        plan: list[dict[str, object]] = []
+        for index, row in enumerate(rows, start=1):
+            existing_path = Path(str(row["local_path"])) if row["local_path"] else None
+            if existing_path and existing_path.exists():
+                continue
+            if str(row["skipped_reason"] or "") not in {"attachment_too_large", "processed_cleanup"}:
+                continue
+            attachment = payloads.get(str(row["sha256"]))
+            if attachment is None:
+                plan.append({"filename": str(row["filename"]), "status": "missing_from_server"})
+                continue
+            if len(attachment.payload) > self.max_attachment_bytes:
+                plan.append({
+                    "filename": attachment.filename,
+                    "bytes": len(attachment.payload),
+                    "status": "still_too_large",
+                })
+                continue
+            target = Path(str(stored["raw_path"])).parent / f"{index:02d}-{attachment.filename}"
+            plan.append({
+                "attachment_id": int(row["id"]),
+                "filename": attachment.filename,
+                "bytes": len(attachment.payload),
+                "status": "restored" if apply else "would_restore",
+                "target": str(target),
+            })
+            if not apply:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(target.name + ".part")
+            temporary.write_bytes(attachment.payload)
+            temporary.replace(target)
+            with self.connect() as connection:
+                connection.execute(
+                    "UPDATE attachments SET local_path=?,skipped_reason=NULL WHERE id=?",
+                    (str(target), int(row["id"])),
+                )
+                connection.execute(
+                    "UPDATE messages SET artifacts_released_at=NULL WHERE id=?",
+                    (int(stored["id"]),),
+                )
+        return {
+            "mailbox": mailbox,
+            "source_uid": source_uid,
+            "subject": message.subject,
+            "attachments": plan,
+            "restored": sum(item["status"] == "restored" for item in plan),
+        }
+
     def summary(self) -> dict[str, int]:
         self.initialize()
         with self.connect() as connection:

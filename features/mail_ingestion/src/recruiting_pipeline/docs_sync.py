@@ -155,6 +155,50 @@ class DocsSync:
             changed = True
         return changed
 
+    def replace_attachment_summary(self, document_id: str, lines: list[str]) -> bool:
+        """Refresh the human-readable attachment list without touching file cards."""
+        fetched = self._call([
+            self.settings.lark_cli,
+            "docs",
+            "+fetch",
+            "--doc",
+            document_id,
+            "--doc-format",
+            "markdown",
+            "--detail",
+            "simple",
+            "--scope",
+            "full",
+            "--as",
+            self.settings.feishu_as,
+        ])
+        content = str(fetched.get("data", {}).get("document", {}).get("content") or "")
+        match = re.search(r"(?ms)^## 附件\n\n(.*?)(?=\n\n(?:## |>|$))", content)
+        if not match:
+            return False
+        previous = match.group(1).strip()
+        replacement = "\n".join(lines).strip()
+        if not replacement or replacement == previous:
+            return False
+        self._call([
+            self.settings.lark_cli,
+            "docs",
+            "+update",
+            "--doc",
+            document_id,
+            "--command",
+            "str_replace",
+            "--pattern",
+            previous,
+            "--content",
+            replacement,
+            "--doc-format",
+            "markdown",
+            "--as",
+            self.settings.feishu_as,
+        ])
+        return True
+
     def insert_file(self, document_id: str, path: Path) -> None:
         resolved = path.expanduser().resolve()
         self._call([
@@ -174,7 +218,7 @@ class DocsSync:
         ], cwd=resolved.parent)
 
     def deduplicate_files(self, document_id: str) -> int:
-        """Remove repeated file-card blocks, retaining the first by name."""
+        """Remove replayed file cards while retaining distinct file versions."""
         # Drive applies text edits and media replay asynchronously; wait for
         # tokenized blocks to settle before reading the document back.
         time.sleep(3)
@@ -194,12 +238,17 @@ class DocsSync:
             self.settings.feishu_as,
         ])
         content = str(fetched.get("data", {}).get("document", {}).get("content") or "")
-        figures = re.findall(r'<figure id="([^"]+)"[^>]*>.*?<source[^>]*\bname="([^"]+)"[^>]*/>.*?</figure>', content, flags=re.S)
-        seen: set[str] = set()
+        figures = re.findall(r'<figure id="([^"]+)"[^>]*>.*?<source([^>]*)/>.*?</figure>', content, flags=re.S)
+        seen: set[tuple[str, str]] = set()
         removed = 0
-        for block_id, name in figures:
-            if name not in seen:
-                seen.add(name)
+        for block_id, attributes in figures:
+            name_match = re.search(r'\bname="([^"]+)"', attributes)
+            size_match = re.search(r'\bsize="([^"]+)"', attributes)
+            if not name_match:
+                continue
+            identity = (name_match.group(1), size_match.group(1) if size_match else "")
+            if identity not in seen:
+                seen.add(identity)
                 continue
             self._call([
                 self.settings.lark_cli,

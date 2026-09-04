@@ -236,6 +236,25 @@ def command_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_restore_attachments(args: argparse.Namespace) -> int:
+    if not args.dry_run and not args.confirm:
+        raise ValueError("restore-attachments requires --dry-run or --confirm")
+    settings = _settings(True, args.env_file)
+    folder = args.folder or settings.mailbox
+    with ImapClient(settings) as mailbox:
+        mailbox.select_folder(folder)
+        parsed = parse_message(mailbox.fetch_raw(args.uid))
+    storage_folder = f"{settings.username.casefold()}::{folder}"
+    result = _store(settings).restore_attachments(
+        storage_folder,
+        str(args.uid),
+        parsed,
+        apply=bool(args.confirm),
+    )
+    print(json.dumps({"ok": True, "dry_run": not args.confirm, **result}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def command_folders(args: argparse.Namespace) -> int:
     settings = _settings(True, args.env_file)
     with ImapClient(settings) as mailbox:
@@ -265,7 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure_parser.add_argument("--auth", choices=("oauth2", "password"), default="password")
     configure_parser.add_argument("--lookback-days", type=int, default=30)
     configure_parser.add_argument("--scan-limit", type=int, default=100)
-    configure_parser.add_argument("--max-attachment-mb", type=int, default=25)
+    configure_parser.add_argument("--max-attachment-mb", type=int, default=64)
     configure_parser.add_argument("--env-file", default=".env")
     configure_parser.add_argument("--force", action="store_true")
     configure_parser.set_defaults(func=command_configure)
@@ -294,6 +313,14 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--exclude-folder", action="append", default=[], help="exclude a folder name; may be repeated")
     scan_parser.add_argument("--dry-run", action="store_true", help="read and parse without writing SQLite or advancing the watermark")
     scan_parser.set_defaults(func=command_scan)
+
+    restore_parser = subparsers.add_parser("restore-attachments", help="refetch skipped attachments for one existing IMAP UID")
+    restore_parser.add_argument("--env-file", default=".env")
+    restore_parser.add_argument("--folder", default="INBOX")
+    restore_parser.add_argument("--uid", type=int, required=True)
+    restore_parser.add_argument("--dry-run", action="store_true")
+    restore_parser.add_argument("--confirm", action="store_true")
+    restore_parser.set_defaults(func=command_restore_attachments)
 
     folders_parser = subparsers.add_parser("folders", help="list selectable IMAP folders without changing mailbox state")
     folders_parser.add_argument("--env-file", default=".env")

@@ -107,6 +107,36 @@ class StoreTest(unittest.TestCase):
             store.persist("INBOX", "42", parsed)
             self.assertEqual(inbox_raw.read_bytes(), b"sentinel")
 
+    def test_skipped_attachment_can_be_restored_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            parsed = parse_message(sample_message())
+            small_store = Store(root / "collector.sqlite3", root / "data", 1)
+            record_id, _ = small_store.persist("mail@example.com::INBOX", "42", parsed)
+            with small_store.connect() as connection:
+                row = connection.execute(
+                    "SELECT local_path,skipped_reason FROM attachments WHERE message_record_id=?",
+                    (record_id,),
+                ).fetchone()
+                self.assertIsNone(row["local_path"])
+                self.assertEqual(row["skipped_reason"], "attachment_too_large")
+
+            restored = Store(root / "collector.sqlite3", root / "data", 1024 * 1024).restore_attachments(
+                "mail@example.com::INBOX",
+                "42",
+                parsed,
+                apply=True,
+            )
+
+            self.assertEqual(restored["restored"], 1)
+            with small_store.connect() as connection:
+                row = connection.execute(
+                    "SELECT local_path,skipped_reason FROM attachments WHERE message_record_id=?",
+                    (record_id,),
+                ).fetchone()
+            self.assertTrue(Path(row["local_path"]).exists())
+            self.assertIsNone(row["skipped_reason"])
+
 
 class ConfigureTest(unittest.TestCase):
     def test_secret_is_written_to_private_env_without_being_returned(self) -> None:

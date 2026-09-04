@@ -78,6 +78,50 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertEqual(args[file_index + 1], "./resume.pdf")
         self.assertEqual(cwd, Path("/mnt/data/user/maxread/mail"))
 
+    def test_file_deduplication_keeps_same_name_with_different_sizes(self) -> None:
+        settings = SimpleNamespace(root=Path("/tmp"), lark_cli="lark-cli", feishu_as="bot")
+        sync = DocsSync(settings)
+        updates = []
+        xml = (
+            '<figure id="first"><source name="materials.zip" size="10"/></figure>'
+            '<figure id="replayed"><source name="materials.zip" size="10"/></figure>'
+            '<figure id="new-version"><source name="materials.zip" size="20"/></figure>'
+        )
+
+        def call(args, cwd=None):
+            if "+fetch" in args:
+                return {"data": {"document": {"content": xml}}}
+            updates.append(args)
+            return {"ok": True}
+
+        sync._call = call
+        with patch("recruiting_pipeline.docs_sync.time.sleep"):
+            removed = sync.deduplicate_files("doc")
+
+        self.assertEqual(removed, 1)
+        self.assertIn("replayed", updates[0])
+        self.assertNotIn("new-version", updates[0])
+
+    def test_attachment_summary_distinguishes_oversized_file_from_no_attachment(self) -> None:
+        runner = RecruitingRunner.__new__(RecruitingRunner)
+        runner._attachment_paths = lambda *_args: []
+        runner.store = SimpleNamespace(
+            uploaded_attachment_digests=lambda _key: set(),
+            attachment_inventory=lambda _ids: [{
+                "filename": "保研材料.pdf",
+                "size_bytes": 29349000,
+                "sha256": "digest",
+                "local_path": None,
+                "skipped_reason": "attachment_too_large",
+            }],
+        )
+        message = StoredMessage(1, "1", "INBOX", "申请", "", "a@example.com", None, "附件附上简历", Path("/tmp/1"))
+        envelope = ThreadEnvelope("thread", "a@example.com", "申请", (message,), (message,), (), frozenset())
+
+        lines = runner._attachment_summary_lines(envelope)
+
+        self.assertEqual(lines, ["- 保研材料.pdf（28.0 MB，超过自动下载上限，尚未附加；请从原邮件查看）"])
+
     def test_only_candidate_mail_materializes_full_document(self) -> None:
         self.assertTrue(_needs_material_document(CandidateFields(mail_type="candidate").normalized()))
         self.assertFalse(_needs_material_document(CandidateFields(mail_type="other").normalized()))
@@ -424,6 +468,7 @@ class RecruitingPipelineTest(unittest.TestCase):
             document_materialized_message_ids=lambda _key, _doc: set(),
             mark_document_messages_materialized=lambda key, doc, ids: materialized.append((key, doc, list(ids))),
             uploaded_attachment_digests=lambda _key: set(),
+            attachment_inventory=lambda _ids: [],
             save_thread=lambda *_args, **_kwargs: None,
             mark_message_processed=lambda _id: None,
         )
@@ -439,6 +484,7 @@ class RecruitingPipelineTest(unittest.TestCase):
             replace_summary=lambda *_args: False,
             append=lambda *_args: appended.append(True),
             deduplicate_files=lambda *_args: 0,
+            replace_attachment_summary=lambda *_args: False,
         )
         thread = ProcessedThread(
             "thread",
