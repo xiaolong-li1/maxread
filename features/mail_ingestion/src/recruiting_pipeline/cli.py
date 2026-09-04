@@ -65,6 +65,9 @@ def build_parser() -> argparse.ArgumentParser:
     academics.add_argument("--days", type=int, default=None, help="only inspect threads updated within this window")
     academics.add_argument("--dry-run", action="store_true", help="preview changes without writing")
     academics.add_argument("--confirm", action="store_true", help="required before updating SQLite, Base, and document summaries")
+    identities = sub.add_parser("repair-identities", help="recover missing candidate names from stored mail evidence")
+    identities.add_argument("--dry-run", action="store_true", help="preview changes without writing")
+    identities.add_argument("--confirm", action="store_true", help="required before updating SQLite, Base, and document summaries")
     tags = sub.add_parser("tag-records", help="refresh AI extraction and write school/rank/reply tags to Base")
     tags.add_argument("--days", type=int, default=None, help="only reprocess threads updated within this window")
     tags.add_argument("--max-threads", type=int, default=None, help="bound reprocessing to the newest N threads")
@@ -155,6 +158,14 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("repair-academics requires --dry-run or --confirm")
         runner = RecruitingRunner(settings)
         result = runner.repair_academics(apply=bool(args.confirm), since_days=args.days)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "repair-identities":
+        if not args.dry_run and not args.confirm:
+            raise SystemExit("repair-identities requires --dry-run or --confirm")
+        runner = RecruitingRunner(settings)
+        result = runner.repair_identities(apply=bool(args.confirm))
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 

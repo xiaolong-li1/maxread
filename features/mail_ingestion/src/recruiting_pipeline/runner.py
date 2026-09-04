@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -278,6 +279,7 @@ class RecruitingRunner:
             fields = previous_fields
         else:
             fields = CandidateFields(name=envelope.candidate_address, purpose_summary=envelope.subject).normalized()
+        fields = _restore_candidate_name(fields, envelope)
         fields.source_accounts = sorted({_source_account_label(account) for account in envelope.source_accounts})
         folder_status = next((FOLDER_STATUS[name] for name in ("面试通过", "面试寄") if name in envelope.folders), None)
         assigned = self.settings.mark_interview_assigned if "面试寄" in envelope.folders else None
@@ -381,6 +383,63 @@ class RecruitingRunner:
             "failures": failures,
         }
 
+    def repair_identities(self, *, apply: bool = False) -> dict[str, Any]:
+        """Recover missing names and remove obvious administrative mail from candidates."""
+        envelopes, _changed = self._load_threads()
+        self._envelope_cache = envelopes
+        changes: list[dict[str, str]] = []
+        failures: list[dict[str, str]] = []
+        for row in self.store.list_threads():
+            key = str(row["thread_key"])
+            envelope = envelopes.get(key)
+            fields = self.store.fields_from_row(row)
+            if envelope is None or fields is None or fields.mail_type != "candidate" or not _candidate_name_is_missing(fields.name):
+                continue
+            before = fields.name
+            if self._is_obvious_other(envelope):
+                refreshed = _other_fields(envelope, summary=fields.purpose_summary)
+                action = "reclassified_other"
+            else:
+                refreshed = _restore_candidate_name(fields, envelope)
+                if _candidate_name_is_missing(refreshed.name):
+                    failures.append({"thread_key": key, "name": before, "error": "no deterministic name evidence"})
+                    continue
+                action = "name_recovered"
+            refreshed.source_accounts = sorted({_source_account_label(account) for account in envelope.source_accounts})
+            changes.append({
+                "thread_key": key,
+                "before": before,
+                "after": refreshed.name,
+                "action": action,
+            })
+            if not apply:
+                continue
+            try:
+                self._sync_thread(
+                    ProcessedThread(
+                        thread_key=key,
+                        candidate_address=str(row["candidate_address"] or envelope.candidate_address),
+                        latest_time=str(row["latest_time"] or _base_time(envelope.latest_time) or ""),
+                        fields=refreshed,
+                        folder_status=None,
+                        interview_assigned=None,
+                        document_id=str(row["doc_id"] or "") or None,
+                        document_url=str(row["doc_url"] or "") or None,
+                        changed=True,
+                    ),
+                    authoritative_identity=True,
+                )
+            except Exception as exc:
+                failures.append({"thread_key": key, "name": before, "error": str(exc)[:500]})
+        return {
+            "ok": not failures,
+            "dry_run": not apply,
+            "changed": len(changes),
+            "failed": len(failures),
+            "changes": changes,
+            "failures": failures,
+        }
+
     def sync_provenance(self, *, apply: bool = False, since_days: int | None = None) -> dict[str, Any]:
         envelopes, _changed = self._load_threads()
         self._envelope_cache = envelopes
@@ -434,7 +493,7 @@ class RecruitingRunner:
             "failures": failures,
         }
 
-    def _sync_thread(self, thread: ProcessedThread) -> dict[str, bool]:
+    def _sync_thread(self, thread: ProcessedThread, *, authoritative_identity: bool = False) -> dict[str, bool]:
         envelope = self._envelope_cache.get(thread.thread_key) or self._load_envelope(thread.thread_key)
         self._download_external(envelope)
         row = self.store.get_thread(thread.thread_key)
@@ -455,6 +514,10 @@ class RecruitingRunner:
             ) or ""
         base_state = self.base.current_state(base_record_id)
         resolved_fields = merge_base_profile(thread.fields, base_state)
+        if authoritative_identity:
+            resolved_fields.name = thread.fields.name
+            resolved_fields.mail_type = thread.fields.mail_type
+            resolved_fields.normalized()
         if base_state:
             status = _merge_status(previous_status, str(base_state.get("screening_status") or ""), status)
             assigned = bool(base_state.get("interview_assigned")) or assigned
@@ -675,6 +738,7 @@ class RecruitingRunner:
                 "azure free account",
                 "azure free trial",
                 "quickstart guides for popular azure services",
+                "学位论文答辩",
                 "云程奖",
             )
         )
@@ -763,6 +827,82 @@ def _other_fields(envelope: ThreadEnvelope, summary: str | None = None) -> Candi
         academic_display="—",
         purpose_summary=(summary or title).strip()[:500],
     ).normalized()
+
+
+_MISSING_CANDIDATE_NAMES = {"", "unknown", "未知", "未提供", "none", "n/a", "-", "—"}
+
+
+def _restore_candidate_name(fields: CandidateFields, envelope: ThreadEnvelope) -> CandidateFields:
+    """Recover a missing model field from deterministic sender evidence."""
+    if fields.mail_type != "candidate" or not _candidate_name_is_missing(fields.name):
+        return fields
+    candidate_address = str(envelope.candidate_address or "").strip().casefold()
+    for message in reversed(envelope.incoming):
+        if str(message.sender_address or "").strip().casefold() != candidate_address:
+            continue
+        name = _clean_candidate_name(message.sender_name)
+        if name:
+            fields.name = name
+            return fields
+    for message in reversed(envelope.incoming):
+        name = _candidate_name_from_subject(message.subject)
+        if name:
+            fields.name = name
+            return fields
+    for message in reversed(envelope.incoming):
+        name = _candidate_name_from_body(message.body_text)
+        if name:
+            fields.name = name
+            return fields
+    return fields
+
+
+def _candidate_name_is_missing(value: str) -> bool:
+    text = str(value or "").strip()
+    return text.casefold() in _MISSING_CANDIDATE_NAMES or "@" in text
+
+
+def _clean_candidate_name(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n\"'<>，,；;")
+    if _candidate_name_is_missing(text) or text.isdigit():
+        return ""
+    if text.casefold() in {"zip lab", "bohan", "bohan zhuang", "招生", "老师", "同学"}:
+        return ""
+    if re.fullmatch(r"[\u3400-\u9fff·]{2,8}", text):
+        return text
+    if 2 <= len(text) <= 60 and re.fullmatch(r"[A-Za-z][A-Za-z .'-]+", text):
+        return text
+    return ""
+
+
+def _candidate_name_from_subject(subject: str) -> str:
+    text = str(subject or "").strip()
+    patterns = (
+        r"(?:申请|咨询|简历|cv)\s*[-—_：:/]+\s*([\u3400-\u9fff·]{2,8})(?=$|[-—_：:/])",
+        r"^([\u3400-\u9fff·]{2,8})\s*[-—_]",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            name = _clean_candidate_name(match.group(1))
+            if name:
+                return name
+    return ""
+
+
+def _candidate_name_from_body(body: str) -> str:
+    text = str(body or "")[:4000]
+    patterns = (
+        r"(?:我叫|姓名\s*[：:])\s*([\u3400-\u9fff·]{2,8})",
+        r"(?:本科生|硕士生|博士生|研究生|学生)\s*([\u3400-\u9fff·]{2,8})(?=[，。,.；;\s])",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            name = _clean_candidate_name(match.group(1))
+            if name:
+                return name
+    return ""
 
 
 def _needs_material_document(fields: CandidateFields) -> bool:

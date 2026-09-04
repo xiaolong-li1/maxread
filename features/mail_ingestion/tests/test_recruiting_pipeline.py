@@ -18,7 +18,7 @@ from recruiting_pipeline.cli import build_parser
 from recruiting_pipeline.base_sync import BASE_RECORD_FIELDS, BaseSync, _cell_url, merge_base_profile
 from recruiting_pipeline.attachment_text import extract_attachment_text
 from recruiting_pipeline.models import ProcessedThread, StoredMessage, ThreadEnvelope
-from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _needs_material_document, _other_fields, _within_days
+from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _needs_material_document, _other_fields, _restore_candidate_name, _within_days
 from recruiting_pipeline.llm import _fields_from_json, _strip_json_fence
 from recruiting_pipeline.institution_tags import C9, PROJECT_985, classify_institution
 from recruiting_pipeline.models import CandidateFields
@@ -28,6 +28,38 @@ from recruiting_pipeline.weekly_report import markdown_to_post, render_weekly_re
 
 
 class RecruitingPipelineTest(unittest.TestCase):
+    def test_missing_candidate_name_is_restored_from_sender_header(self) -> None:
+        message = StoredMessage(
+            1,
+            "1",
+            "INBOX",
+            "zzb研究方向咨询-吴非桐",
+            "吴非桐",
+            "3230102212@zju.edu.cn",
+            "2026-09-03T13:10:29+08:00",
+            "庄老师好，我是计算机学院27届本科生吴非桐。",
+            Path("/tmp/message.eml"),
+        )
+        envelope = ThreadEnvelope(
+            "thread",
+            "3230102212@zju.edu.cn",
+            message.subject,
+            (message,),
+            (message,),
+            (),
+            frozenset({"INBOX"}),
+        )
+        fields = CandidateFields(name="unknown", mail_type="candidate").normalized()
+
+        assert _restore_candidate_name(fields, envelope).name == "吴非桐"
+
+    def test_deterministic_name_fallback_never_overwrites_model_name(self) -> None:
+        message = StoredMessage(1, "1", "INBOX", "申请-张三", "张三", "a@example.com", None, "", Path("/tmp/message.eml"))
+        envelope = ThreadEnvelope("thread", "a@example.com", message.subject, (message,), (message,), (), frozenset())
+        fields = CandidateFields(name="李四", mail_type="candidate").normalized()
+
+        assert _restore_candidate_name(fields, envelope).name == "李四"
+
     def test_docs_sync_accepts_cloud_attachment_outside_project_root(self) -> None:
         settings = SimpleNamespace(
             root=Path("/home/user/maxread"),
@@ -493,6 +525,13 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertTrue(apply.confirm)
         self.assertEqual(apply.days, 30)
 
+    def test_identity_repair_cli_requires_explicit_mode(self) -> None:
+        preview = build_parser().parse_args(["repair-identities", "--dry-run"])
+        apply = build_parser().parse_args(["repair-identities", "--confirm"])
+
+        self.assertTrue(preview.dry_run)
+        self.assertTrue(apply.confirm)
+
     def test_tag_records_cli_requires_explicit_mode(self) -> None:
         preview = build_parser().parse_args(["tag-records", "--dry-run"])
         apply = build_parser().parse_args(["tag-records", "--confirm", "--days", "30"])
@@ -779,6 +818,22 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertEqual(fields.mail_type, "other")
         self.assertEqual(fields.name, message.subject)
         self.assertEqual(fields.academic_display, "—")
+
+    def test_academic_defense_notice_stays_out_of_candidate_list(self) -> None:
+        message = StoredMessage(
+            1,
+            "1",
+            "INBOX",
+            "26年夏季大数据技术与工程项目学位论文答辩_第一组",
+            "Chen, Wenzhou",
+            "wenzhouchen@intl.zju.edu.cn",
+            "2026-06-01T13:00:00+08:00",
+            "各位老师好，答辩材料已随附件发送，请查阅。",
+            Path("/tmp/1.eml"),
+        )
+        envelope = ThreadEnvelope("k", message.sender_address, message.subject, (message,), (message,), (), frozenset({"INBOX"}))
+
+        self.assertTrue(RecruitingRunner._is_obvious_other(envelope))
 
     def test_personal_group_reply_stays_in_candidate_thread(self) -> None:
         candidate = StoredMessage(1, "1", "INBOX", "咨询", "", "candidate@example.com", "2026-08-01T10:00:00+08:00", "简历", Path("/tmp/1.eml"))
