@@ -40,6 +40,19 @@ def test_compiler_restores_pseudo_label_example_as_inline_code():
     assert not any(item.code == "unknown-html-in-formula" for item in result.diagnostics)
 
 
+def test_compiler_restores_protocol_tag_example_as_inline_code():
+    result = compile_formula_markup('<latex><focus magic_chunks="7"></latex>')
+
+    assert result.text == '`<focus magic_chunks="7">`'
+    assert not any(item.code == "unknown-html-in-formula" for item in result.diagnostics)
+
+
+def test_compiler_keeps_mixed_html_formula_as_blocking_diagnostic():
+    result = compile_formula_markup("<latex>x<focus>y</focus></latex>")
+
+    assert any(item.code == "unknown-html-in-formula" for item in result.diagnostics)
+
+
 def test_compiler_recovers_overescaped_latex_commands_but_keeps_row_breaks():
     result = compile_formula_markup(
         r"<latex>\\mathbf{x}=\\mathcal{N}(x)\\mathrm{d}x\\begin{aligned}a\\ b\\j\\le i</latex>"

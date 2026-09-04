@@ -441,6 +441,30 @@ def test_pipeline_refreshes_legacy_document_in_place(tmp_path):
     store.close()
 
 
+def test_pipeline_rebuilds_quality_failed_document_in_place(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    store.upsert_paper(
+        "2604.12946",
+        "quality_failed",
+        title="Old title",
+        doc_url="https://tenant.feishu.cn/docx/existing",
+        doc_token="existing",
+        error="image-insert-failed:overview.png",
+    )
+    feishu = ExistingLegacyDocFeishu()
+    pipeline = MaxReadPipeline(store, FakeArxiv(), feishu, FakeLLM(), require_source=True)
+
+    result = pipeline.process_ref(
+        PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"),
+        force_rebuild=True,
+    )
+
+    assert result.error == ""
+    assert result.doc_url == "https://tenant.feishu.cn/docx/existing"
+    assert feishu.overwritten == ["https://tenant.feishu.cn/docx/existing"]
+    store.close()
+
+
 def test_pipeline_emits_durable_workflow_milestones(tmp_path):
     store = Store(tmp_path / "maxread.sqlite3")
     usage_id = store.add_usage_event("evt", "om", "oc", "p2p", "ou", "paper", "2604.12946", "url", status="queued")

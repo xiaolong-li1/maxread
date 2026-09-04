@@ -46,6 +46,11 @@ class FormulaCompilation:
 
 _LATEX_BLOCK_RE = re.compile(r"<latex\b[^>]*>(.*?)</latex\s*>", re.I | re.S)
 _PSEUDO_LABEL_RE = re.compile(r"^\s*<\s*[A-Za-z][A-Za-z0-9_.-]*\s*:\s*>")
+_LITERAL_PROTOCOL_TAG_RE = re.compile(
+    r"^\s*<\s*/?\s*[A-Za-z][A-Za-z0-9_.-]{1,}"
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+))?)*"
+    r"\s*/?>\s*$"
+)
 _KNOWN_WRAPPER_RE = re.compile(
     r"<\s*/?\s*(?:p|div|br)\b[^>]*>",
     re.I,
@@ -94,7 +99,9 @@ def compile_formula_markup(markdown: str) -> FormulaCompilation:
     corrupting the mathematical source.
     """
 
-    source = _restore_pseudo_label_formulas(str(markdown or ""))
+    source = _restore_literal_protocol_formulas(
+        _restore_pseudo_label_formulas(str(markdown or ""))
+    )
     source = _decode_wrapper_entities(source)
     diagnostics: List[FormulaDiagnostic] = []
     if _FORMULA_WRAPPER_RE.search(source):
@@ -153,6 +160,18 @@ def _restore_pseudo_label_formulas(source: str) -> str:
         # a TeX command inside inline code.
         body = re.sub(r"\s+", " ", body.replace("\\n", " ")).strip()
         return f"`{body}`"
+
+    return _LATEX_BLOCK_RE.sub(replace, source)
+
+
+def _restore_literal_protocol_formulas(source: str) -> str:
+    """Compile a formula-wrapped protocol tag as code, not mathematics."""
+    def replace(match: re.Match[str]) -> str:
+        body = html.unescape(match.group(1)).strip()
+        if not _LITERAL_PROTOCOL_TAG_RE.fullmatch(body):
+            return match.group(0)
+        value = re.sub(r"\s+", " ", body)
+        return f"`{value}`"
 
     return _LATEX_BLOCK_RE.sub(replace, source)
 

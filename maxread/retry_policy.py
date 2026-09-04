@@ -32,6 +32,11 @@ _DETERMINISTIC_QUALITY_MARKERS = (
     "raw-tex-formatting-command",
     "missing-image",
     "missing-figure",
+    "marker-left-after-publish",
+    "image-insert-failed",
+    "image-anchor-",
+    "image-block-id-missing",
+    "image-move-failed",
     "table-overflow",
     "table-clipped",
 )

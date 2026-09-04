@@ -875,8 +875,8 @@ def _safe_relative_path(path: str) -> str:
     try:
         cached = _copy_into_upload_cache(source, cwd)
         return cached.relative_to(cwd).as_posix()
-    except OSError:
-        return str(raw)
+    except OSError as exc:
+        raise OSError(f"failed to stage upload inside {cwd}: {exc}") from exc
 
 
 def _copy_into_upload_cache(source: Path, cwd: Path) -> Path:
@@ -894,7 +894,14 @@ def _copy_into_upload_cache(source: Path, cwd: Path) -> Path:
         except OSError:
             should_copy = True
     if should_copy:
-        shutil.copy2(source, target)
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        try:
+            shutil.copyfile(source, temporary)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
     return target
 
 

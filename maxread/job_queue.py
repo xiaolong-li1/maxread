@@ -362,7 +362,7 @@ def auto_retry_queue_job(settings, store: Store, job, error: str, worker_id: str
         reason=f"automatic retry {auto_retries + 1}/{budget}: {str(error)[:700]}",
         event_type="auto_retry",
         suppress_progress_notifications=bool(job.get("suppress_progress_notifications")),
-        rebuild_pipeline=False if resume_published else bool(current.get("rebuild_pipeline")),
+        rebuild_pipeline=not resume_published,
         reset_watcher_notifications=not bool(job.get("suppress_progress_notifications")),
     )
 

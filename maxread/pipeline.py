@@ -600,7 +600,7 @@ class MaxReadPipeline:
                 self._reply(event, f"[敲键盘] 在写飞书文档：{ref.paper_id}", "writing", ref.paper_id)
             refresh_existing = bool(
                 record
-                and record.status in {"legacy", "cache_expired"}
+                and record.status in {"legacy", "cache_expired", "quality_failed"}
                 and record.doc_url
             )
             if refresh_existing:

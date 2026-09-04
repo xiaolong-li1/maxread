@@ -388,3 +388,31 @@ def test_visual_auto_retry_uses_latest_published_checkpoint_after_many_manual_at
     assert row["rebuild_pipeline"] == 0
     assert "retry_mode=resume" in store.list_job_events(queued["job_id"])[0]["detail"]
     store.close()
+
+
+def test_auto_retry_rebuilds_when_image_insertion_left_markers(tmp_path):
+    store = Store(tmp_path / "maxread.sqlite3")
+    usage_id = store.add_usage_event("evt", "om_1", "oc", "group", "ou", "paper", "2512.04040", "url", status="queued")
+    queued = store.enqueue_job("paper", "2512.04040", "url", "evt", "om_1", "oc", "group", "ou", usage_id)
+    claimed = store.claim_next_queue_job(worker_id="worker-a")
+    store.conn.execute(
+        "update queue_jobs set checkpoint_json=?,doc_url=?,rebuild_pipeline=0 where id=?",
+        ('{"doc_url":"https://published-doc"}', "https://published-doc", queued["job_id"]),
+    )
+    store.conn.commit()
+    manager = object.__new__(QueueManager)
+    manager.settings = type("Settings", (), {"auto_retry_attempts": 1})()
+
+    assert manager._auto_retry(
+        store,
+        claimed,
+        "image-insert-failed:teaser.png:unsafe file path; visual-qa:remote-error:no space",
+        "worker-a",
+    ) is True
+
+    row = store.get_queue_job(queued["job_id"])
+    assert row["status"] == "queued"
+    assert row["checkpoint_json"] == ""
+    assert row["rebuild_pipeline"] == 1
+    assert "retry_mode=rebuild" in store.list_job_events(queued["job_id"])[0]["detail"]
+    store.close()

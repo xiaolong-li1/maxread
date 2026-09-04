@@ -352,6 +352,26 @@ def test_safe_relative_path_uses_nested_symlink_alias_for_external_workdir():
             os.chdir(old_cwd)
 
 
+def test_safe_relative_path_never_falls_back_to_an_absolute_upload(tmp_path, monkeypatch):
+    source = tmp_path / "external" / "figure.png"
+    source.parent.mkdir()
+    source.write_bytes(b"png")
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    old_cwd = Path.cwd()
+    os.chdir(cwd)
+    monkeypatch.setattr("maxread.feishu.shutil.copyfile", lambda *_args: (_ for _ in ()).throw(OSError("disk error")))
+    try:
+        try:
+            _safe_relative_path(str(source))
+        except OSError as exc:
+            assert "failed to stage upload" in str(exc)
+        else:
+            raise AssertionError("an unsafe absolute path must never reach lark-cli")
+    finally:
+        os.chdir(old_cwd)
+
+
 def test_reply_text_defaults_to_thread_reply():
     client = CapturingFeishu()
     client.reply_text("om_1", "[了解] 收到了", idempotency_key="k")
