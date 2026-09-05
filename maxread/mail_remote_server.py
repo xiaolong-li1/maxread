@@ -35,6 +35,7 @@ from .mail_admin import (
     trigger_mail_scan,
     update_mail_admin_config,
     update_mail_admin_record,
+    update_mail_interest_groups,
 )
 
 
@@ -110,6 +111,14 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
                     str(payload.get("thread_key") or ""),
                     payload.get("changes") if isinstance(payload.get("changes"), dict) else {},
                     str(payload.get("expected_updated_at") or ""),
+                ))
+                return
+            if parsed.path == "/interest-groups":
+                self._json(update_mail_interest_groups(
+                    str(payload.get("action") or ""),
+                    name=str(payload.get("name") or ""),
+                    group_id=int(payload.get("group_id") or 0),
+                    thread_keys=[str(value) for value in payload.get("thread_keys") or []],
                 ))
                 return
             if parsed.path == "/shares":

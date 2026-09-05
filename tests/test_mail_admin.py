@@ -187,6 +187,7 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
     assert mail_admin.list_mail_candidate_shares(20)["ok"] is True
     assert mail_admin.mail_candidate_share(share_token)["ok"] is True
     assert mail_admin.revoke_mail_candidate_share(3)["ok"] is True
+    assert mail_admin.update_mail_interest_groups("create", name="待联系")["ok"] is True
     assert [item[0] for item in requests] == [
         "http://127.0.0.1:18766/status",
         "http://127.0.0.1:18766/scan",
@@ -202,6 +203,7 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
         "http://127.0.0.1:18766/shares?limit=20",
         f"http://127.0.0.1:18766/shares/{share_token}",
         "http://127.0.0.1:18766/shares/revoke",
+        "http://127.0.0.1:18766/interest-groups",
     ]
     assert all(item[2]["Authorization"] == "Bearer secret-token" for item in requests)
     assert requests[9][4] == 300
@@ -570,6 +572,61 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     focused = mail_admin.mail_admin_records("mail_type=candidate&interest=only&days=0&limit=10")
     assert focused["total"] == 1
     assert focused["items"][0]["name"] == "张三"
+    assert focused["interest_ungrouped"] == 1
+    assert focused["interest_groups"] == []
+
+
+def test_interest_groups_create_assign_rename_and_delete_to_ungrouped(tmp_path, monkeypatch):
+    root, _db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
+
+    created = mail_admin.update_mail_interest_groups("create", name="待联系")
+    group_id = created["group"]["id"]
+    assigned = mail_admin.update_mail_interest_groups(
+        "assign",
+        group_id=group_id,
+        thread_keys=["a" * 32],
+    )
+    grouped = mail_admin.mail_admin_records(
+        f"mail_type=candidate&interest=only&interest_group={group_id}&days=0&limit=10"
+    )
+
+    assert assigned["updated"] == 1
+    assert grouped["total"] == 1
+    assert grouped["items"][0]["interest_group_name"] == "待联系"
+    assert len(grouped["interest_groups"]) == 1
+    assert grouped["interest_groups"][0]["id"] == group_id
+    assert grouped["interest_groups"][0]["name"] == "待联系"
+    assert grouped["interest_groups"][0]["position"] == 1
+    assert grouped["interest_groups"][0]["count"] == 1
+    assert grouped["interest_ungrouped"] == 0
+
+    renamed = mail_admin.update_mail_interest_groups("rename", group_id=group_id, name="优先联系")
+    assert renamed["group"]["name"] == "优先联系"
+    deleted = mail_admin.update_mail_interest_groups("delete", group_id=group_id)
+    assert deleted["moved_to_ungrouped"] == 1
+    ungrouped = mail_admin.mail_admin_records(
+        "mail_type=candidate&interest=only&interest_group=ungrouped&days=0&limit=10"
+    )
+    assert ungrouped["total"] == 1
+    assert ungrouped["interest_ungrouped"] == 1
+
+
+def test_unstarring_candidate_removes_interest_group_membership(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
+    group_id = mail_admin.update_mail_interest_groups("create", name="待联系")["group"]["id"]
+    mail_admin.update_mail_interest_groups("assign", group_id=group_id, thread_keys=["a" * 32])
+
+    mail_admin.update_mail_admin_record("a" * 32, {"is_interested": False}, "v1")
+
+    with sqlite3.connect(db) as connection:
+        assert connection.execute(
+            "select count(*) from recruiting_interest_group_members where thread_key=?",
+            ("a" * 32,),
+        ).fetchone()[0] == 0
 
 
 def test_candidate_share_is_revocable_complete_snapshot(tmp_path, monkeypatch):
@@ -872,6 +929,14 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "interest:{q:'',account:'',reply:'',project:'',tier:'',rank:'0',days:'0'}" in html
     assert "saveRecordFilters()" in html
     assert "applyRecordFilters(recordState.view)" in html
+    assert 'id="interest-group-bar"' in html
+    assert 'id="interest-group-tabs"' in html
+    assert 'id="bulk-interest-group"' in html
+    assert 'id="interest-group-dialog"' in html
+    assert "interest_group:recordState.view==='interest'?recordState.interestGroup:'all'" in html
+    assert "api('api/admin/mail/interest-groups'" in html
+    assert "deleteInterestGroup()" in html
+    assert "assignSelectedInterestGroup()" in html
     assert "toggleInterested(event" in html
     assert "changes:{is_interested:!item.is_interested}" in html
     assert "focus-card" not in html
@@ -899,7 +964,7 @@ def test_public_candidate_share_page_renders_complete_candidate_fields():
 
 def test_nginx_post_allowlist_excludes_rejection_actions():
     config = Path("deploy/nginx/maxread-location.conf.example").read_text(encoding="utf-8")
-    assert "mail/(scan|config|record|shares)" in config
+    assert "mail/(scan|config|record|shares|interest-groups)" in config
     assert "rejection" not in config
 
 

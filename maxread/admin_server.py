@@ -40,6 +40,7 @@ from .mail_admin import (
     trigger_mail_scan,
     update_mail_admin_config,
     update_mail_admin_record,
+    update_mail_interest_groups,
 )
 from .review import visible_review_issues
 from .remote_worker import (
@@ -535,6 +536,20 @@ class AdminHandler(BaseHTTPRequestHandler):
                         str(payload.get("title") or ""),
                         int(payload.get("expires_days") if payload.get("expires_days") is not None else 7),
                     ))
+            except (TypeError, ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/interest-groups":
+            if not self._require_admin():
+                return
+            payload = self._read_json()
+            try:
+                self._json_response(update_mail_interest_groups(
+                    str(payload.get("action") or ""),
+                    name=str(payload.get("name") or ""),
+                    group_id=int(payload.get("group_id") or 0),
+                    thread_keys=[str(value) for value in payload.get("thread_keys") or []],
+                ))
             except (TypeError, ValueError, RuntimeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return

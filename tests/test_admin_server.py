@@ -273,6 +273,7 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
     monkeypatch.setattr(admin_server, "save_mail_rejection_draft", lambda key, subject, body, application_type, generation_source: {"ok": True, "thread_key": key, "subject": subject, "body": body})
     monkeypatch.setattr(admin_server, "save_mail_rejection_template", lambda subject, body, application_type: {"ok": True, "subject": subject, "body": body})
     monkeypatch.setattr(admin_server, "send_mail_rejection", lambda draft_id, confirmation: {"ok": True, "draft_id": draft_id, "confirmation": confirmation})
+    monkeypatch.setattr(admin_server, "update_mail_interest_groups", lambda action, **kwargs: {"ok": True, "action": action, **kwargs})
     server = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -293,6 +294,14 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
         assert body == {"authenticated": False, "username": ""}
 
         response, body = request("GET", "/api/summary")
+        assert response.status == 401
+        assert body["error"] == "需要管理员登录"
+
+        response, body = request(
+            "POST",
+            "/api/admin/mail/interest-groups",
+            {"action": "create", "name": "待联系"},
+        )
         assert response.status == 401
         assert body["error"] == "需要管理员登录"
 
@@ -332,6 +341,16 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
         response, body = request("GET", "/api/summary", cookie=cookie)
         assert response.status == 200
         assert "jobs" in body
+
+        response, body = request(
+            "POST",
+            "/api/admin/mail/interest-groups",
+            {"action": "create", "name": "待联系"},
+            cookie,
+        )
+        assert response.status == 200
+        assert body["action"] == "create"
+        assert body["name"] == "待联系"
 
         response, body = request("GET", "/api/admin/mail/rejection?thread_key=" + "a" * 32, cookie=cookie)
         assert response.status == 200 and body["thread_key"] == "a" * 32

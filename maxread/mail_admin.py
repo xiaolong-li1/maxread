@@ -205,6 +205,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     account = str(query.get("account", [""])[0] or "").strip().casefold()
     reply = str(query.get("reply", [""])[0] or "").strip().lower()
     interest = str(query.get("interest", [""])[0] or "").strip().lower()
+    interest_group = str(query.get("interest_group", ["all"])[0] or "all").strip().lower()
     tier = str(query.get("tier", [""])[0] or "").strip().lower()
     rank_percentile = _bounded_int(query.get("rank_percentile", ["0"])[0], 0, 0, 100)
     days = _bounded_int(query.get("days", ["30"])[0], 30, 0, 3650)
@@ -220,6 +221,8 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
         raise ValueError("不支持的回复状态")
     if interest not in {"", "only"}:
         raise ValueError("不支持的重点候选人视图")
+    if interest_group not in {"all", "ungrouped"} and not re.fullmatch(r"\d+", interest_group):
+        raise ValueError("不支持的重点候选人分组")
     account_labels = {"zip-lab": "ZIP Lab", "bohan": "Bohan"}
     if account and account not in account_labels:
         raise ValueError("不支持的来源邮箱")
@@ -227,9 +230,29 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     db_path = _mail_db_path(_mail_root())
     records: list[dict[str, Any]] = []
     interest_total = 0
+    interest_ungrouped = 0
+    interest_groups: list[dict[str, Any]] = []
     if db_path.exists():
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as connection:
             connection.row_factory = sqlite3.Row
+            group_by_id: dict[int, dict[str, Any]] = {}
+            membership: dict[str, int] = {}
+            if connection.execute(
+                "select 1 from sqlite_master where type='table' and name='recruiting_interest_groups'"
+            ).fetchone():
+                for group in connection.execute(
+                    "select id,name,position,created_at,updated_at from recruiting_interest_groups order by position,id"
+                ):
+                    payload = {**dict(group), "count": 0}
+                    group_by_id[int(group["id"])] = payload
+                    interest_groups.append(payload)
+            if group_by_id and connection.execute(
+                "select 1 from sqlite_master where type='table' and name='recruiting_interest_group_members'"
+            ).fetchone():
+                membership = {
+                    str(row["thread_key"]): int(row["group_id"])
+                    for row in connection.execute("select thread_key,group_id from recruiting_interest_group_members")
+                }
             rejection_by_thread: dict[str, dict[str, Any]] = {}
             if connection.execute(
                 "select 1 from sqlite_master where type='table' and name='recruiting_outbound_drafts'"
@@ -271,9 +294,24 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
                 )
                 if item["mail_type"] == "candidate" and item["is_interested"]:
                     interest_total += 1
+                    group_id = membership.get(item["thread_key"])
+                    group = group_by_id.get(group_id) if group_id is not None else None
+                    item["interest_group_id"] = int(group["id"]) if group else None
+                    item["interest_group_name"] = str(group["name"]) if group else ""
+                    if group:
+                        group["count"] += 1
+                    else:
+                        interest_ungrouped += 1
+                else:
+                    item["interest_group_id"] = None
+                    item["interest_group_name"] = ""
                 if mail_type != "all" and item["mail_type"] != mail_type:
                     continue
                 if interest == "only" and not item["is_interested"]:
+                    continue
+                if interest == "only" and interest_group == "ungrouped" and item["interest_group_id"] is not None:
+                    continue
+                if interest == "only" and interest_group.isdigit() and item["interest_group_id"] != int(interest_group):
                     continue
                 if screening and item["screening_status"] != screening:
                     continue
@@ -307,6 +345,8 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
         "ok": True,
         "items": records[offset:offset + limit],
         "interest_total": interest_total,
+        "interest_ungrouped": interest_ungrouped,
+        "interest_groups": interest_groups,
         "total": total,
         "offset": offset,
         "limit": limit,
@@ -317,6 +357,110 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
             "accounts": account_labels,
         },
     }
+
+
+def update_mail_interest_groups(
+    action: str,
+    *,
+    name: str = "",
+    group_id: int = 0,
+    thread_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    clean_action = str(action or "").strip().lower()
+    if clean_action not in {"create", "rename", "delete", "assign"}:
+        raise ValueError("不支持的重点候选人分组操作")
+    keys = list(dict.fromkeys(_validated_thread_key(value) for value in (thread_keys or [])))
+    if len(keys) > 50:
+        raise ValueError("一次最多移动 50 位候选人")
+    clean_group_id = max(0, int(group_id or 0))
+    clean_name = _validated_interest_group_name(name) if clean_action in {"create", "rename"} else ""
+    if _remote_url():
+        return _remote_request(
+            "/interest-groups",
+            {
+                "action": clean_action,
+                "name": clean_name,
+                "group_id": clean_group_id,
+                "thread_keys": keys,
+            },
+        )
+
+    db_path = _mail_db_path(_mail_root())
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+            connection.row_factory = sqlite3.Row
+            _ensure_interest_group_schema(connection)
+            connection.execute("begin immediate")
+            if clean_action == "create":
+                position = int(connection.execute(
+                    "select coalesce(max(position),0)+1 from recruiting_interest_groups"
+                ).fetchone()[0])
+                created_id = int(connection.execute(
+                    "insert into recruiting_interest_groups(name,position,created_at,updated_at) values(?,?,?,?)",
+                    (clean_name, position, now, now),
+                ).lastrowid)
+                connection.commit()
+                return {"ok": True, "action": clean_action, "group": {"id": created_id, "name": clean_name}}
+            group = connection.execute(
+                "select id,name from recruiting_interest_groups where id=?",
+                (clean_group_id,),
+            ).fetchone()
+            if clean_action in {"rename", "delete"} and group is None:
+                raise ValueError("重点关注分组不存在")
+            if clean_action == "rename":
+                connection.execute(
+                    "update recruiting_interest_groups set name=?,updated_at=? where id=?",
+                    (clean_name, now, clean_group_id),
+                )
+                connection.commit()
+                return {"ok": True, "action": clean_action, "group": {"id": clean_group_id, "name": clean_name}}
+            if clean_action == "delete":
+                moved = int(connection.execute(
+                    "delete from recruiting_interest_group_members where group_id=?",
+                    (clean_group_id,),
+                ).rowcount)
+                connection.execute("delete from recruiting_interest_groups where id=?", (clean_group_id,))
+                connection.commit()
+                return {"ok": True, "action": clean_action, "group_id": clean_group_id, "moved_to_ungrouped": moved}
+            if not keys:
+                raise ValueError("请至少选择一位重点候选人")
+            if clean_group_id and connection.execute(
+                "select 1 from recruiting_interest_groups where id=?",
+                (clean_group_id,),
+            ).fetchone() is None:
+                raise ValueError("重点关注分组不存在")
+            placeholders = ",".join("?" for _ in keys)
+            rows = connection.execute(
+                f"select thread_key,fields_json,is_interested,status from recruiting_threads where thread_key in ({placeholders})",
+                keys,
+            ).fetchall()
+            if len(rows) != len(keys):
+                raise ValueError("部分候选人记录不存在")
+            for row in rows:
+                try:
+                    fields = json.loads(str(row["fields_json"] or "{}"))
+                except json.JSONDecodeError:
+                    fields = {}
+                if str(row["status"] or "") == "inactive" or str(fields.get("mail_type") or "other") == "other" or not bool(row["is_interested"]):
+                    raise ValueError("只能移动仍在重点关注中的候选人")
+            if clean_group_id:
+                connection.executemany(
+                    """
+                    insert into recruiting_interest_group_members(thread_key,group_id,updated_at)
+                    values(?,?,?) on conflict(thread_key) do update set group_id=excluded.group_id,updated_at=excluded.updated_at
+                    """,
+                    [(key, clean_group_id, now) for key in keys],
+                )
+            else:
+                connection.execute(
+                    f"delete from recruiting_interest_group_members where thread_key in ({placeholders})",
+                    keys,
+                )
+            connection.commit()
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("分组名称已经存在") from exc
+    return {"ok": True, "action": clean_action, "group_id": clean_group_id or None, "updated": len(keys)}
 
 
 def create_mail_candidate_share(
@@ -1049,6 +1193,15 @@ def _validated_candidate_share_token(token: str) -> str:
     return clean
 
 
+def _validated_interest_group_name(name: str) -> str:
+    clean = re.sub(r"\s+", " ", str(name or "")).strip()
+    if not clean or len(clean) > 30 or any(character in clean for character in "\r\n\t"):
+        raise ValueError("分组名称必须是 1–30 个字符")
+    if clean.casefold() in {"全部", "未分组", "all", "ungrouped"}:
+        raise ValueError("该名称由系统保留")
+    return clean
+
+
 def _candidate_share_token_hash(token: str) -> str:
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
@@ -1183,6 +1336,28 @@ def _ensure_candidate_share_schema(connection: sqlite3.Connection) -> None:
         );
         create index if not exists recruiting_candidate_shares_created_idx
         on recruiting_candidate_shares(created_at desc);
+        """
+    )
+    connection.commit()
+
+
+def _ensure_interest_group_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        create table if not exists recruiting_interest_groups(
+            id integer primary key autoincrement,
+            name text not null collate nocase unique,
+            position integer not null,
+            created_at text not null,
+            updated_at text not null
+        );
+        create table if not exists recruiting_interest_group_members(
+            thread_key text primary key,
+            group_id integer not null,
+            updated_at text not null
+        );
+        create index if not exists recruiting_interest_group_members_group_idx
+        on recruiting_interest_group_members(group_id,thread_key);
         """
     )
     connection.commit()
@@ -1775,6 +1950,7 @@ def _update_local_interest(
     with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
         connection.row_factory = sqlite3.Row
         _ensure_admin_actions_schema(connection)
+        _ensure_interest_group_schema(connection)
         connection.execute("begin immediate")
         row = connection.execute(
             "select * from recruiting_threads where thread_key=?",
@@ -1792,7 +1968,13 @@ def _update_local_interest(
             raise ValueError("其他邮件不能加入重点候选人")
         desired = int(bool(is_interested))
         if int(row["is_interested"] or 0) == desired:
-            connection.rollback()
+            removed = 0
+            if not desired:
+                removed = int(connection.execute(
+                    "delete from recruiting_interest_group_members where thread_key=?",
+                    (thread_key,),
+                ).rowcount)
+            connection.commit() if removed else connection.rollback()
             return {
                 "state": {"is_interested": bool(desired)},
                 "updated_at": str(row["updated_at"] or ""),
@@ -1803,6 +1985,11 @@ def _update_local_interest(
         )
         if cursor.rowcount != 1:
             raise RuntimeError("记录在写入期间发生变化")
+        if not desired:
+            connection.execute(
+                "delete from recruiting_interest_group_members where thread_key=?",
+                (thread_key,),
+            )
         connection.commit()
     return {"state": {"is_interested": bool(desired)}, "updated_at": now}
 
