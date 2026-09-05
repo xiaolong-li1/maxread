@@ -653,7 +653,9 @@ def test_candidate_share_is_revocable_complete_snapshot(tmp_path, monkeypatch):
         ).fetchone()
     assert token not in stored[0]
     assert token not in stored[1]
-    assert mail_admin.list_mail_candidate_shares()["items"][0]["status"] == "active"
+    listed = mail_admin.list_mail_candidate_shares()["items"][0]
+    assert listed["status"] == "active"
+    assert listed["candidate_names"] == ["张三"]
 
     mail_admin.revoke_mail_candidate_share(created["share"]["id"])
 
@@ -668,6 +670,16 @@ def test_candidate_share_rejects_non_candidate_rows(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="只能包含候选人"):
         mail_admin.create_mail_candidate_share(["b" * 32], "通知", 7)
+
+
+def test_candidate_share_default_title_uses_candidate_names(tmp_path, monkeypatch):
+    root, _db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
+
+    created = mail_admin.create_mail_candidate_share(["a" * 32], "", 7)
+
+    assert created["share"]["title"] == "张三"
 
 
 def test_rank_filter_accepts_any_qualifying_rank_and_ignores_gpa_ratios():
@@ -949,6 +961,9 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "recordState.selected" in html
     assert "api('api/admin/mail/shares'" in html
     assert "一次最多分享 50 位候选人" in html
+    assert "candidate_names" in html
+    assert "候选人：" in html
+    assert "names.slice(0,3)" in html
 
 
 def test_public_candidate_share_page_renders_complete_candidate_fields():

@@ -505,6 +505,7 @@ def create_mail_candidate_share(
         if any(by_key[key]["mail_type"] != "candidate" for key in clean_keys):
             raise ValueError("分享中只能包含候选人记录")
         items = [_candidate_share_item(by_key[key]) for key in clean_keys]
+        share_title = clean_title or _candidate_share_default_title(items)
         token = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
         created_at = now.isoformat()
@@ -520,7 +521,7 @@ def create_mail_candidate_share(
             (
                 _candidate_share_token_hash(token),
                 token[:8],
-                clean_title or f"候选人分享 · {len(items)} 人",
+                share_title,
                 json.dumps(snapshot, ensure_ascii=False),
                 len(items),
                 created_at,
@@ -534,7 +535,7 @@ def create_mail_candidate_share(
             "id": share_id,
             "token": token,
             "token_prefix": token[:8],
-            "title": clean_title or f"候选人分享 · {len(items)} 人",
+            "title": share_title,
             "item_count": len(items),
             "created_at": created_at,
             "expires_at": expires_at,
@@ -590,7 +591,7 @@ def list_mail_candidate_shares(limit: int = 30) -> dict[str, Any]:
         connection.row_factory = sqlite3.Row
         _ensure_candidate_share_schema(connection)
         rows = connection.execute(
-            "select id,token_prefix,title,item_count,created_at,expires_at,revoked_at "
+            "select id,token_prefix,title,snapshot_json,item_count,created_at,expires_at,revoked_at "
             "from recruiting_candidate_shares order by id desc limit ?",
             (clean_limit,),
         ).fetchall()
@@ -598,6 +599,15 @@ def list_mail_candidate_shares(limit: int = 30) -> dict[str, Any]:
     for row in rows:
         expires = _parse_datetime(str(row["expires_at"] or ""))
         status = "revoked" if str(row["revoked_at"] or "") else "expired" if expires and expires <= now else "active"
+        try:
+            snapshot = json.loads(str(row["snapshot_json"] or "{}"))
+        except json.JSONDecodeError:
+            snapshot = {}
+        candidate_names = [
+            str(item.get("name") or "unknown")
+            for item in (snapshot.get("items") or [] if isinstance(snapshot, dict) else [])
+            if isinstance(item, dict)
+        ]
         items.append({
             "id": int(row["id"]),
             "token_prefix": str(row["token_prefix"] or ""),
@@ -607,6 +617,7 @@ def list_mail_candidate_shares(limit: int = 30) -> dict[str, Any]:
             "expires_at": str(row["expires_at"] or ""),
             "revoked_at": str(row["revoked_at"] or ""),
             "status": status,
+            "candidate_names": candidate_names,
         })
     return {"ok": True, "items": items}
 
@@ -1229,6 +1240,12 @@ def _candidate_share_item(item: dict[str, Any]) -> dict[str, Any]:
         "is_interested": bool(item.get("is_interested")),
         "doc_url": str(item.get("doc_url") or ""),
     }
+
+
+def _candidate_share_default_title(items: list[dict[str, Any]]) -> str:
+    names = [str(item.get("name") or "unknown") for item in items]
+    visible = "、".join(names[:3])
+    return visible if len(names) <= 3 else f"{visible}等{len(names)}人"
 
 
 def _validated_rejection_content(subject: str, body: str) -> tuple[str, str]:
