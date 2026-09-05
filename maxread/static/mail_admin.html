@@ -26,36 +26,23 @@
     .dot { width:8px; height:8px; border-radius:50%; background:var(--green); }
     .degraded .dot { background:var(--orange); }
     .down .dot { background:var(--red); }
-    .data-contract { min-height:38px; display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 10px; padding:7px 12px; color:var(--muted); background:#fafbf9; border:1px solid var(--line); border-radius:7px; }
-    .data-contract strong { color:var(--text); }
-    .data-contract .failed { color:var(--red); }
     .overview-bar { min-height:72px; display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:16px; padding:10px 12px; background:var(--paper); border:1px solid var(--line); border-radius:7px; }
     .metric-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
     #overview-metrics { grid-template-columns:repeat(4,minmax(100px,1fr)); }
     .metric { padding-left:10px; border-left:2px solid var(--line); }
     .metric strong { display:block; margin-top:1px; font-size:18px; font-variant-numeric:tabular-nums; }
-    .base-menu { position:relative; }
-    .base-menu summary { list-style:none; min-height:34px; display:flex; align-items:center; padding:0 11px; border:1px solid var(--line); border-radius:7px; white-space:nowrap; }
-    .base-menu summary::-webkit-details-marker { display:none; }
-    .table-links { position:absolute; z-index:5; top:42px; right:0; width:360px; padding:6px 12px; background:var(--paper); border:1px solid var(--line); border-radius:7px; box-shadow:0 16px 40px rgba(30,40,33,.14); }
-    .table-link { min-height:52px; display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; padding:8px 2px; border-top:1px solid var(--line-soft); text-decoration:none; }
-    .table-link:first-child { border-top:0; }
-    .table-link strong { display:block; }
-    .table-link span { color:var(--muted); font-size:12px; }
-    .table-link b { color:var(--green); font-size:17px; font-weight:500; }
     .tabs { display:flex; gap:18px; margin-top:14px; border-bottom:1px solid var(--line); }
     .tabs button { min-height:38px; padding:0 2px; color:var(--muted); background:transparent; border:0; border-bottom:2px solid transparent; border-radius:0; }
     .tabs button.active { color:var(--text); border-bottom-color:var(--green); font-weight:650; }
+    .tabs .star { color:var(--orange); }
+    .tab-count { min-width:18px; padding:1px 5px; color:var(--muted); background:#eef1ee; border-radius:9px; font-size:10px; font-variant-numeric:tabular-nums; }
+    .tabs button.active .tab-count { color:var(--green); background:var(--green-soft); }
     .workspace { margin-top:10px; background:var(--paper); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
     .workspace-head { min-height:46px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 12px; border-bottom:1px solid var(--line); }
-    .view-switch { display:inline-flex; align-items:center; gap:2px; padding:2px; background:#f1f4f1; border:1px solid var(--line); border-radius:7px; }
-    .view-switch button { min-height:28px; padding:0 10px; color:var(--muted); background:transparent; border:0; border-radius:5px; }
-    .view-switch button.active { color:var(--text); background:var(--paper); box-shadow:0 1px 2px rgba(30,40,33,.08); font-weight:650; }
-    .view-switch .star { color:var(--orange); font-size:16px; }
-    .view-switch .count { min-width:16px; color:inherit; font-size:11px; font-variant-numeric:tabular-nums; }
     .record-toolbar { display:grid; grid-template-columns:minmax(190px,1.35fr) repeat(6,minmax(100px,.65fr)); gap:7px; padding:9px 12px; background:#fafbf9; border-bottom:1px solid var(--line); }
     .record-toolbar input,.record-toolbar select,.workflow-select { width:100%; height:34px; padding:0 8px; color:var(--text); background:var(--paper); border:1px solid var(--line); border-radius:6px; }
-    .record-table-wrap { min-height:300px; max-height:calc(100dvh - 344px); overflow:auto; }
+    .selection-bar { min-height:44px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:6px 12px; color:#315f50; background:var(--green-soft); border-bottom:1px solid #cfe1d9; }
+    .record-table-wrap { min-height:300px; max-height:calc(100dvh - 296px); overflow:auto; }
     table { width:100%; border-collapse:collapse; }
     th,td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--line-soft); white-space:nowrap; }
     th { color:var(--muted); background:var(--paper); font-size:12px; font-weight:600; }
@@ -136,7 +123,7 @@
     .hidden { display:none !important; }
     .toast { position:fixed; z-index:20; right:20px; bottom:20px; padding:10px 13px; color:#fff; background:#202621; border-radius:7px; opacity:0; transform:translateY(8px); transition:.2s; pointer-events:none; }
     .toast.show { opacity:1; transform:none; }
-    @media (max-width:760px) { .wrap{width:calc(100% - 16px);padding-top:10px;} header{align-items:flex-start;flex-direction:column;} .status,.data-contract{align-items:flex-start;flex-direction:column;} .overview-bar{grid-template-columns:1fr;} #overview-metrics{grid-template-columns:1fr 1fr;} .base-menu{justify-self:end;} .workspace-head{align-items:flex-start;flex-direction:column;} .record-toolbar{grid-template-columns:1fr 1fr;} .record-toolbar input{grid-column:1/-1;} .record-table-wrap{max-height:55dvh;} .record-table{display:block;min-width:0;} .record-table thead{display:none;} .record-table tbody{display:block;} .record-table tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;padding:12px;border-bottom:1px solid var(--line);} .record-table td{display:block;padding:0;border:0;width:auto!important;min-width:0;} .record-table td:nth-child(2){grid-column:1/-1;} .record-table td:last-child{grid-column:1/-1;} .pager{justify-content:center;flex-wrap:wrap;} .ops-grid{grid-template-columns:1fr;} .wide{grid-column:auto;} .account{grid-template-columns:1fr 1fr;} .account .address{grid-column:1/-1;} .account div:nth-child(4){display:none;} .config{grid-template-columns:1fr;} .table-links{position:fixed;left:8px;right:8px;top:auto;width:auto;} dialog{width:100vw;} dialog.share-dialog{width:calc(100vw - 16px);} .share-fields{grid-template-columns:1fr;} .detail-grid{grid-template-columns:96px minmax(0,1fr);} }
+    @media (max-width:760px) { .wrap{width:calc(100% - 16px);padding-top:10px;} header{align-items:flex-start;flex-direction:column;} .status{align-items:flex-start;flex-direction:column;} .overview-bar{grid-template-columns:1fr;} #overview-metrics{grid-template-columns:1fr 1fr;} .workspace-head{align-items:flex-start;flex-direction:column;} .selection-bar{align-items:flex-start;flex-direction:column;} .record-toolbar{grid-template-columns:1fr 1fr;} .record-toolbar input{grid-column:1/-1;} .record-table-wrap{max-height:55dvh;} .record-table{display:block;min-width:0;} .record-table thead{display:none;} .record-table tbody{display:block;} .record-table tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 10px;padding:12px;border-bottom:1px solid var(--line);} .record-table td{display:block;padding:0;border:0;width:auto!important;min-width:0;} .record-table td:nth-child(2){grid-column:1/-1;} .record-table td:last-child{grid-column:1/-1;} .pager{justify-content:center;flex-wrap:wrap;} .ops-grid{grid-template-columns:1fr;} .wide{grid-column:auto;} .account{grid-template-columns:1fr 1fr;} .account .address{grid-column:1/-1;} .account div:nth-child(4){display:none;} .config{grid-template-columns:1fr;} dialog{width:100vw;} dialog.share-dialog{width:calc(100vw - 16px);} .share-fields{grid-template-columns:1fr;} .detail-grid{grid-template-columns:96px minmax(0,1fr);} }
   </style>
 </head>
 <body>
@@ -153,14 +140,13 @@
     </section>
     <main id="dashboard" class="hidden">
       <section id="status" class="status"><div class="inline"><span class="dot"></span><strong id="status-label">读取中</strong></div><span class="muted" id="status-detail"></span></section>
-      <section class="data-contract"><span><strong>权威主库：飞书 Base</strong> · 本页读取：5090 SQLite 缓存 · 材料 Docx：派生产物</span><span id="base-pull-status">等待同步状态</span></section>
       <section class="overview-bar">
         <div class="metric-grid" id="overview-metrics"></div>
-        <div class="inline"><span class="muted" id="overview-updated"></span><details class="base-menu"><summary>打开云端主库</summary><div class="table-links" id="table-links"></div></details></div>
+        <span class="muted" id="overview-updated"></span>
       </section>
-      <nav class="tabs" aria-label="邮件管理视图"><button class="active" data-view="candidates" onclick="setMailView('candidates')">候选人</button><button data-view="operations" onclick="setMailView('operations')">运维</button></nav>
+      <nav class="tabs" aria-label="邮件管理视图"><button class="active" data-view="candidates" onclick="setMailView('candidates')">候选人</button><button data-view="interest" onclick="setMailView('interest')"><span class="star">★</span> 重点关注 <span class="tab-count" id="tab-interest-count">0</span></button><button data-view="operations" onclick="setMailView('operations')">运维</button></nav>
       <section id="candidate-panel" class="workspace">
-          <div class="workspace-head"><div><h2>候选人与邮件</h2><div class="muted">按回复状态、院校、方向和排名筛选；点击姓名查看完整材料</div></div><div class="inline"><button id="share-selected" onclick="openShareDialog()" disabled>分享候选人 <span id="selected-count">0</span></button><div class="view-switch" role="tablist" aria-label="候选人视图"><button id="view-all" class="active" role="tab" aria-selected="true" onclick="setCandidateView('all')">全部候选人</button><button id="view-interest" role="tab" aria-selected="false" onclick="setCandidateView('interest')"><span class="star">★</span> 重点关注 <span class="count" id="view-interest-count">0</span></button></div><span class="muted" id="record-count"></span></div></div>
+          <div class="workspace-head"><div><h2 id="workspace-title">候选人与邮件</h2><div class="muted" id="workspace-subtitle">候选人资料与来信状态</div></div><span class="muted" id="record-count"></span></div>
           <div class="record-toolbar">
             <input id="record-search" type="search" placeholder="搜索姓名、学校、邮箱、方向" oninput="queueRecordLoad()" />
             <select id="record-account" onchange="resetAndLoadRecords()"><option value="">全部邮箱</option><option value="zip-lab">ZIP Lab</option><option value="bohan">Bohan</option></select>
@@ -170,6 +156,7 @@
             <select id="record-rank" onchange="resetAndLoadRecords()"><option value="0">全部排名</option><option value="5">Top 5%</option><option value="10">Top 10%</option><option value="20">Top 20%</option><option value="30">Top 30%</option></select>
             <select id="record-days" onchange="resetAndLoadRecords()"><option value="7">最近 7 天</option><option value="30" selected>最近 30 天</option><option value="90">最近 90 天</option><option value="0">全部时间</option></select>
           </div>
+          <div id="selection-bar" class="selection-bar hidden"><span>已选择 <strong id="selected-count">0</strong> 位候选人</span><div class="inline"><button class="primary" onclick="openShareDialog()">生成分享链接</button><button onclick="clearCandidateSelection()">清除选择</button></div></div>
           <div class="record-table-wrap"><table class="record-table"><thead><tr><th><label class="head-check"><input id="select-page" type="checkbox" onchange="toggleCurrentPage(this.checked)" aria-label="选择本页候选人" />候选人 / 来信</label></th><th>院校 / 学业</th><th>方向</th><th>回复</th><th></th></tr></thead><tbody id="record-rows"></tbody></table></div>
           <div class="pager"><button id="record-prev" onclick="changeRecordPage(-1)">上一页</button><span id="record-page"></span><label class="page-jump">跳到第 <input id="record-page-input" type="number" min="1" step="1" inputmode="numeric" aria-label="跳转页码" onkeydown="if(event.key==='Enter'){event.preventDefault();jumpRecordPage();}" /> 页</label><button id="record-jump" onclick="jumpRecordPage()">跳转</button><button id="record-next" onclick="changeRecordPage(1)">下一页</button></div>
       </section>
@@ -227,8 +214,11 @@
     function toast(text){$('toast').textContent=text;$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),2200);}
     function metric(label,value){return `<div class="metric"><span class="muted">${esc(label)}</span><strong>${esc(value)}</strong></div>`;}
     function pill(status,bad=false,warn=false){return `<span class="pill ${bad?'bad':warn?'warn':''}">${esc(status)}</span>`;}
-    const recordState={items:[],view:'all',offset:0,limit:20,total:0,timer:null,filters:null,selected:new Map(),activeShare:null};
+    const recordState={items:[],view:'all',offset:0,limit:20,total:0,timer:null,filters:null,selected:new Map(),activeShare:null,filterSets:{all:{q:'',account:'',reply:'',project:'',tier:'',rank:'0',days:'30'},interest:{q:'',account:'',reply:'',project:'',tier:'',rank:'0',days:'0'}}};
     const selectOptions=(values,current)=>values.map(value=>`<option value="${esc(value)}" ${value===current?'selected':''}>${esc(value)}</option>`).join('');
+    function readRecordFilters(){return {q:$('record-search').value.trim(),account:$('record-account').value,reply:$('record-reply').value,project:$('record-project').value,tier:$('record-tier').value,rank:$('record-rank').value,days:$('record-days').value};}
+    function saveRecordFilters(){recordState.filterSets[recordState.view]=readRecordFilters();}
+    function applyRecordFilters(view){const values=recordState.filterSets[view];$('record-search').value=values.q;$('record-account').value=values.account;$('record-reply').value=values.reply;$('record-project').value=values.project;$('record-tier').value=values.tier;$('record-rank').value=values.rank;$('record-days').value=values.days;}
     async function loadStatus(announce=false){
       try{
         const data=await api('api/admin/mail/status');
@@ -251,8 +241,6 @@
       const overview=data.overview||{};const metrics=overview.metrics||{};
       $('overview-updated').textContent=overview.updated_at?`更新至 ${overview.updated_at}`:'';
       $('overview-metrics').innerHTML=metric('候选人',metrics.candidate_total||0)+metric('未筛选',metrics.unscreened||0)+metric('最近一周新增',metrics.recent_candidates||0)+metric('其他邮件',metrics.other_total||0);
-      const pull=data.admin_sync?.base_pull||{};const pullFailed=pull.status==='failed';$('base-pull-status').className=pullFailed?'failed':'';$('base-pull-status').textContent=pullFailed?`回拉失败：${pull.error||'未知错误'}`:pull.status==='completed'?`缓存同步于 ${fmt(pull.finished_at)}`:'尚未完成首次回拉';
-      $('table-links').innerHTML=(overview.links||[]).map(link=>`<a class="table-link" href="${esc(link.url)}" target="_blank" rel="noopener"><div><strong>${esc(link.title)}</strong><span>${esc(link.description)}</span></div><b>↗</b></a>`).join('')||'<div class="empty">暂无表格入口</div>';
       $('control-state').textContent=active?`后台任务：${data.control.account==='all'?'全部邮箱':data.control.account||'手动扫描'}`:'当前没有手动扫描';$('scan-all').disabled=active;
       $('accounts').innerHTML=(data.accounts||[]).map(a=>`<div class="account"><div><div class="address">${esc(a.address)}</div><div class="muted">${esc(a.id)}</div></div><div><span class="muted">邮件</span><br><strong>${Number(a.messages||0)}</strong></div><div><span class="muted">最近扫描</span><br>${esc(fmt(a.last_scan))}</div><div><span class="muted">最新来信</span><br>${esc(fmt(a.latest_mail))}</div><button ${active?'disabled':''} onclick="scanMailbox('${esc(a.id)}')">立即扫描</button></div>`).join('')||'<div class="empty">未发现邮箱配置</div>';
       const serviceActive=data.service?.ActiveState==='active';const serviceLabel=active?'手动扫描接管':serviceActive?'active':data.service?.ActiveState||'unknown';$('service-pill').outerHTML=pill(serviceLabel,!serviceActive&&!active,active).replace('<span','<span id="service-pill"');
@@ -265,11 +253,12 @@
       $('errors').innerHTML=(data.errors||[]).map(e=>`<div class="error-row"><strong>${Number(e.count||0)}</strong><span>${esc(e.error||'未知错误')}</span><span class="time muted">${esc(fmt(e.last_seen))}</span></div>`).join('')||'<div class="empty">没有近期错误</div>';
     }
     async function loadRecords(){
-      const params=new URLSearchParams({q:$('record-search').value.trim(),mail_type:'candidate',interest:recordState.view==='interest'?'only':'',account:$('record-account').value,reply:$('record-reply').value,project:$('record-project').value,tier:$('record-tier').value,rank_percentile:$('record-rank').value,days:$('record-days').value,offset:String(recordState.offset),limit:String(recordState.limit)});
+      saveRecordFilters();const values=recordState.filterSets[recordState.view];
+      const params=new URLSearchParams({q:values.q,mail_type:'candidate',interest:recordState.view==='interest'?'only':'',account:values.account,reply:values.reply,project:values.project,tier:values.tier,rank_percentile:values.rank,days:values.days,offset:String(recordState.offset),limit:String(recordState.limit)});
       try{
-        const data=await api(`api/admin/mail/records?${params}`);recordState.items=data.items||[];recordState.items.forEach(item=>{if(recordState.selected.has(item.thread_key))recordState.selected.set(item.thread_key,item);});recordState.total=Number(data.total||0);recordState.filters=data.filters||recordState.filters||{};$('view-interest-count').textContent=String(Number(data.interest_total||0));
-        const currentProject=$('record-project').value;
-        $('record-project').innerHTML='<option value="">全部方向</option>'+selectOptions(recordState.filters.projects||[],currentProject);$('record-project').value=currentProject;
+        const data=await api(`api/admin/mail/records?${params}`);recordState.items=data.items||[];recordState.items.forEach(item=>{if(recordState.selected.has(item.thread_key))recordState.selected.set(item.thread_key,item);});recordState.total=Number(data.total||0);recordState.filters=data.filters||recordState.filters||{};$('tab-interest-count').textContent=String(Number(data.interest_total||0));
+        const currentProject=values.project;
+        $('record-project').innerHTML='<option value="">全部方向</option>'+selectOptions(recordState.filters.projects||[],currentProject);$('record-project').value=currentProject;recordState.filterSets[recordState.view].project=$('record-project').value;
         renderRecords();
       }catch(error){if(error.status!==401)toast(`邮件记录加载失败：${error.message}`);}
     }
@@ -288,18 +277,17 @@
     }
     function toggleCandidateSelection(event,threadKey){event?.stopPropagation();const item=recordState.items.find(row=>row.thread_key===threadKey);if(!item)return;if(event.currentTarget.checked){if(recordState.selected.size>=50){event.currentTarget.checked=false;toast('一次最多分享 50 位候选人');return;}recordState.selected.set(threadKey,item);}else{recordState.selected.delete(threadKey);}updateCandidateSelection();}
     function toggleCurrentPage(checked){const pageItems=recordState.items||[];if(checked&&recordState.selected.size+pageItems.filter(item=>!recordState.selected.has(item.thread_key)).length>50){$('select-page').checked=false;toast('一次最多分享 50 位候选人');return;}pageItems.forEach(item=>checked?recordState.selected.set(item.thread_key,item):recordState.selected.delete(item.thread_key));renderRecords();}
-    function updateCandidateSelection(){const count=recordState.selected.size;$('selected-count').textContent=String(count);$('share-selected').disabled=count===0;const pageItems=recordState.items||[];const selectedOnPage=pageItems.filter(item=>recordState.selected.has(item.thread_key)).length;$('select-page').checked=Boolean(pageItems.length)&&selectedOnPage===pageItems.length;$('select-page').indeterminate=selectedOnPage>0&&selectedOnPage<pageItems.length;}
-    function clearCandidateSelection(){recordState.selected.clear();$('share-result').classList.add('hidden');renderRecords();$('share-dialog').close();}
+    function updateCandidateSelection(){const count=recordState.selected.size;$('selected-count').textContent=String(count);$('selection-bar').classList.toggle('hidden',count===0);const pageItems=recordState.items||[];const selectedOnPage=pageItems.filter(item=>recordState.selected.has(item.thread_key)).length;$('select-page').checked=Boolean(pageItems.length)&&selectedOnPage===pageItems.length;$('select-page').indeterminate=selectedOnPage>0&&selectedOnPage<pageItems.length;}
+    function clearCandidateSelection(){recordState.selected.clear();$('share-result').classList.add('hidden');renderRecords();if($('share-dialog').open)$('share-dialog').close();}
     async function toggleInterested(event,threadKey){
       event?.stopPropagation();const item=recordState.items.find(row=>row.thread_key===threadKey);if(!item)return;const button=event?.currentTarget;if(button)button.disabled=true;
       try{await api('api/admin/mail/record',{method:'POST',body:JSON.stringify({thread_key:threadKey,changes:{is_interested:!item.is_interested},expected_updated_at:item.updated_at})});toast(item.is_interested?'已移出重点候选人':'已加入重点候选人');await loadRecords();}catch(error){toast(error.message);}finally{if(button)button.disabled=false;}
     }
-    function setCandidateView(view){recordState.view=view==='interest'?'interest':'all';recordState.offset=0;$('view-all').classList.toggle('active',recordState.view==='all');$('view-all').setAttribute('aria-selected',recordState.view==='all'?'true':'false');$('view-interest').classList.toggle('active',recordState.view==='interest');$('view-interest').setAttribute('aria-selected',recordState.view==='interest'?'true':'false');loadRecords();}
     function queueRecordLoad(){clearTimeout(recordState.timer);recordState.timer=setTimeout(()=>{recordState.offset=0;loadRecords();},280);}
     function resetAndLoadRecords(){recordState.offset=0;loadRecords();}
     function changeRecordPage(direction){const next=Math.max(0,recordState.offset+direction*recordState.limit);if(next===recordState.offset)return;recordState.offset=next;loadRecords();document.querySelector('.record-table-wrap').scrollTo({top:0,behavior:'smooth'});}
     function jumpRecordPage(){const pageCount=Math.max(1,Math.ceil(recordState.total/recordState.limit));const requested=Number.parseInt($('record-page-input').value,10);if(!Number.isFinite(requested)){toast('请输入页码');return;}const page=Math.max(1,Math.min(pageCount,requested));$('record-page-input').value=String(page);const next=(page-1)*recordState.limit;if(next===recordState.offset)return;recordState.offset=next;loadRecords();document.querySelector('.record-table-wrap').scrollTo({top:0,behavior:'smooth'});}
-    function setMailView(view){const operations=view==='operations';$('candidate-panel').classList.toggle('hidden',operations);$('operations-panel').classList.toggle('hidden',!operations);document.querySelectorAll('.tabs button').forEach(button=>button.classList.toggle('active',button.dataset.view===view));}
+    function setMailView(view){saveRecordFilters();const operations=view==='operations';$('candidate-panel').classList.toggle('hidden',operations);$('operations-panel').classList.toggle('hidden',!operations);document.querySelectorAll('.tabs button').forEach(button=>button.classList.toggle('active',button.dataset.view===view));if(operations)return;recordState.view=view==='interest'?'interest':'all';recordState.offset=0;applyRecordFilters(recordState.view);$('workspace-title').textContent=recordState.view==='interest'?'重点关注':'候选人与邮件';$('workspace-subtitle').textContent=recordState.view==='interest'?'已收藏候选人':'候选人资料与来信状态';loadRecords();}
     function openRecord(threadKey){
       const item=recordState.items.find(row=>row.thread_key===threadKey);if(!item)return;$('detail-title').textContent=item.name;$('detail-subtitle').textContent=`${item.candidate_address} · ${fmt(item.latest_time)}`;
       const values=[['重点关注',item.is_interested?'是':'否'],['邮件类型',item.mail_type==='candidate'?'候选人来信':'其他邮件'],['筛选状态',item.screening_label||item.screening_status],['回复状态',item.has_replied?'已回复':'未回复'],['主题',item.subject],['院校 / 就读',item.study],['专业',item.major],['学业表现',item.academic_display],['排名',`${item.rank}\n${item.rank_evidence}`],['申请方向',(item.projects||[]).join('、')||'—'],['摘要',item.purpose_summary||'—'],['来源邮箱',(item.source_accounts||[]).join('、')||'—'],['处理错误',item.last_error||'无']];

@@ -214,9 +214,11 @@ def test_user_systemd_prefix_is_used_on_compute_worker(monkeypatch):
     ]
 
 
-def test_mail_admin_page_keeps_base_links_behind_authenticated_status_api():
+def test_mail_admin_page_removes_cloud_base_navigation():
     html = mail_admin.MAIL_ADMIN_HTML
-    assert "table-links" in html
+    assert "table-links" not in html
+    assert "权威主库" not in html
+    assert "打开云端主库" not in html
     assert "S4v4bdOCuaWvAQs90vCcek4anHh" not in html
 
 
@@ -827,9 +829,9 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="candidate-panel"' in html
     assert 'id="operations-panel"' in html
     assert 'class="record-table-wrap"' in html
-    assert "max-height:calc(100dvh - 344px)" in html
+    assert "max-height:calc(100dvh - 296px)" in html
     assert "recordState={items:[],view:'all',offset:0,limit:20" in html
-    assert "按回复状态、院校、方向和排名筛选" in html
+    assert "候选人资料与来信状态" in html
     assert "<th>摘要</th>" not in html
     assert "<th>回复</th>" in html
     assert "<th>筛选状态</th>" not in html
@@ -838,9 +840,9 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="record-account"' in html
     assert 'id="record-type"' not in html
     assert "mail_type:'candidate'" in html
-    assert "account:$('record-account').value" in html
+    assert "account:values.account" in html
     assert '<option value="">回复状态</option>' in html
-    assert "reply:$('record-reply').value" in html
+    assert "reply:values.reply" in html
     assert "updateRecord(" not in html
     assert "item.has_replied?'已回复':'未回复'" in html
     assert "['回复状态',item.has_replied?'已回复':'未回复']" in html
@@ -850,9 +852,9 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "data.admin_sync?.pending" in html
     assert 'id="record-tier"' in html
     assert 'id="record-rank"' in html
-    assert "rank_percentile:$('record-rank').value" in html
-    assert "权威主库：飞书 Base" in html
-    assert 'id="base-pull-status"' in html
+    assert "rank_percentile:values.rank" in html
+    assert "权威主库：飞书 Base" not in html
+    assert 'id="base-pull-status"' not in html
     assert 'id="admin-password"' in html
     assert 'id="admin-username"' in html
     assert "username:$('admin-username').value" in html
@@ -862,17 +864,22 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert 'id="record-jump"' in html
     assert "jumpRecordPage()" in html
     assert "Math.ceil(recordState.total/recordState.limit)" in html
-    assert 'id="view-all"' in html
-    assert 'id="view-interest"' in html
-    assert "全部候选人" in html
+    assert 'data-view="interest"' in html
+    assert 'id="tab-interest-count"' in html
     assert "重点关注" in html
-    assert "setCandidateView('interest')" in html
+    assert "setMailView('interest')" in html
+    assert "filterSets:{all:" in html
+    assert "interest:{q:'',account:'',reply:'',project:'',tier:'',rank:'0',days:'0'}" in html
+    assert "saveRecordFilters()" in html
+    assert "applyRecordFilters(recordState.view)" in html
     assert "toggleInterested(event" in html
     assert "changes:{is_interested:!item.is_interested}" in html
     assert "focus-card" not in html
     assert "rejection" not in html.casefold()
     assert "拒信" not in html
-    assert 'id="share-selected"' in html
+    assert 'id="share-selected"' not in html
+    assert 'id="selection-bar"' in html
+    assert "生成分享链接" in html
     assert 'id="select-page"' in html
     assert "recordState.selected" in html
     assert "api('api/admin/mail/shares'" in html
