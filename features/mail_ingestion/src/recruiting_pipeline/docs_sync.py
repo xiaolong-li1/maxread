@@ -176,10 +176,12 @@ class DocsSync:
         match = re.search(r"(?ms)^## 附件\n\n(.*?)(?=\n\n(?:## |>|$))", content)
         if not match:
             return False
-        previous = match.group(1).strip()
-        replacement = "\n".join(lines).strip()
-        if not replacement or replacement == previous:
+        previous_body = match.group(1).strip()
+        replacement_body = "\n".join(lines).strip()
+        if not replacement_body or replacement_body == previous_body:
             return False
+        previous = match.group(0).strip()
+        replacement = f"## 附件\n\n{replacement_body}"
         self._call([
             self.settings.lark_cli,
             "docs",

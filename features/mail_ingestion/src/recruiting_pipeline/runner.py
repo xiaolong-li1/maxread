@@ -643,7 +643,9 @@ class RecruitingRunner:
     def _record_thread_failure(self, thread: ProcessedThread, error: BaseException) -> None:
         row = self.store.get_thread(thread.thread_key)
         attempts = int(row["attempt_count"] if row else 0) + 1
-        self.store.save_thread(thread.thread_key, thread.candidate_address, thread.thread_key, thread.fields, attempt_count=attempts, last_error=str(error)[:1000])
+        envelope = self._envelope_cache.get(thread.thread_key)
+        subject = envelope.subject if envelope else str(row["normalized_subject"] or "") if row else thread.thread_key
+        self.store.save_thread(thread.thread_key, thread.candidate_address, subject, thread.fields, attempt_count=attempts, last_error=str(error)[:1000])
 
     def _load_envelope(self, key: str) -> ThreadEnvelope:
         messages = self.store.messages()

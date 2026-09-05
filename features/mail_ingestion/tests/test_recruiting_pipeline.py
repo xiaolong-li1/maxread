@@ -78,6 +78,23 @@ class RecruitingPipelineTest(unittest.TestCase):
         self.assertEqual(args[file_index + 1], "./resume.pdf")
         self.assertEqual(cwd, Path("/mnt/data/user/maxread/mail"))
 
+    def test_attachment_summary_replacement_includes_section_heading(self) -> None:
+        settings = SimpleNamespace(root=Path("/tmp"), lark_cli="lark-cli", feishu_as="bot")
+        sync = DocsSync(settings)
+        updates = []
+        sync._call = lambda args, cwd=None: (
+            {"data": {"document": {"content": "正文也提到 resume.pdf\n\n## 附件\n\n- resume.pdf\n\n> footer"}}}
+            if "+fetch" in args
+            else updates.append(args) or {"ok": True}
+        )
+
+        assert sync.replace_attachment_summary("doc", ["- resume.pdf（已附加到本文档）"]) is True
+
+        pattern = updates[0][updates[0].index("--pattern") + 1]
+        replacement = updates[0][updates[0].index("--content") + 1]
+        self.assertEqual(pattern, "## 附件\n\n- resume.pdf")
+        self.assertEqual(replacement, "## 附件\n\n- resume.pdf（已附加到本文档）")
+
     def test_file_deduplication_keeps_same_name_with_different_sizes(self) -> None:
         settings = SimpleNamespace(root=Path("/tmp"), lark_cli="lark-cli", feishu_as="bot")
         sync = DocsSync(settings)
