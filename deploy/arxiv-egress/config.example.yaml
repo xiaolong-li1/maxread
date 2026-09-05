@@ -26,5 +26,6 @@ proxy-groups:
     lazy: false
 
 rules:
+  - IP-CIDR,47.103.111.28/32,ARXIV,no-resolve
   - DOMAIN-SUFFIX,arxiv.org,ARXIV
   - MATCH,DIRECT

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+host="${1:?target host is required}"
+port="${2:?target port is required}"
+proxy="${MAXREAD_ALIYUN_PROXY:-127.0.0.1:17890}"
+timeout="${MAXREAD_ALIYUN_DIRECT_TIMEOUT:-3}"
+
+if /usr/bin/nc -z -w "$timeout" "$host" "$port" >/dev/null 2>&1; then
+    exec /usr/bin/nc "$host" "$port"
+fi
+
+exec /usr/bin/nc -X connect -x "$proxy" "$host" "$port"
