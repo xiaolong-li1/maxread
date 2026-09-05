@@ -22,8 +22,12 @@ from .db import Store
 from .feedback import count_feedback_by_status, visible_feedback_rows
 from .mail_admin import (
     MAIL_ADMIN_HTML,
+    MAIL_SHARE_HTML,
+    create_mail_candidate_share,
+    list_mail_candidate_shares,
     mail_admin_records,
     mail_admin_status,
+    mail_candidate_share,
     mail_rejection_context,
     generate_mail_rejection_draft,
     create_mail_rejection_batch,
@@ -32,6 +36,7 @@ from .mail_admin import (
     save_mail_rejection_draft,
     save_mail_rejection_template,
     send_mail_rejection,
+    revoke_mail_candidate_share,
     trigger_mail_scan,
     update_mail_admin_config,
     update_mail_admin_record,
@@ -191,6 +196,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         if parsed.path in {"/mail", "/mail/"}:
             self._html(MAIL_ADMIN_HTML)
             return
+        if re.fullmatch(r"/mail/share/[A-Za-z0-9_-]{40,64}/?", parsed.path):
+            self._html(
+                MAIL_SHARE_HTML,
+                headers={"cache-control": "no-store", "x-robots-tag": "noindex, nofollow"},
+            )
+            return
         if parsed.path in {"/submit", "/submit/", "/projects", "/projects/"}:
             self._html(WEB_SUBMIT_HTML)
             return
@@ -263,6 +274,22 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._json_response(mail_admin_records(parsed.query))
             except (ValueError, RuntimeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/admin/mail/shares":
+            if not self._require_admin():
+                return
+            try:
+                query = parse_qs(parsed.query)
+                self._json_response(list_mail_candidate_shares(int(query.get("limit", ["30"])[0] or 30)))
+            except (TypeError, ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        public_share_match = re.fullmatch(r"/api/mail/share/([A-Za-z0-9_-]{40,64})", parsed.path)
+        if public_share_match:
+            try:
+                self._json_response(mail_candidate_share(public_share_match.group(1)))
+            except (ValueError, RuntimeError):
+                self._error(HTTPStatus.NOT_FOUND, "分享不存在或已失效")
             return
         if parsed.path == "/api/admin/mail/rejection":
             if not self._require_admin():
@@ -494,6 +521,22 @@ class AdminHandler(BaseHTTPRequestHandler):
                 {"ok": True, "authenticated": False},
                 headers={"set-cookie": self._session_cookie("", max_age=0)},
             )
+            return
+        if parsed.path == "/api/admin/mail/shares":
+            if not self._require_admin():
+                return
+            payload = self._read_json()
+            try:
+                if str(payload.get("action") or "create") == "revoke":
+                    self._json_response(revoke_mail_candidate_share(int(payload.get("share_id") or 0)))
+                else:
+                    self._json_response(create_mail_candidate_share(
+                        [str(value) for value in payload.get("thread_keys") or []],
+                        str(payload.get("title") or ""),
+                        int(payload.get("expires_days") if payload.get("expires_days") is not None else 7),
+                    ))
+            except (TypeError, ValueError, RuntimeError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if not self._require_admin():
             return
@@ -733,10 +776,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             parts.append("Secure")
         return "; ".join(parts)
 
-    def _html(self, content: str) -> None:
+    def _html(self, content: str, headers: dict[str, str] | None = None) -> None:
         data = content.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("content-type", "text/html; charset=utf-8")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.send_header("content-length", str(len(data)))
         self.end_headers()
         self._write_body(data)

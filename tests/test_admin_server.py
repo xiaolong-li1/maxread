@@ -385,6 +385,54 @@ def test_admin_mutations_require_authenticated_server_side_session(tmp_path, mon
         thread.join(timeout=3)
 
 
+def test_candidate_share_read_is_public_but_creation_requires_admin(tmp_path, monkeypatch):
+    token = "A" * 43
+    settings = SimpleNamespace(
+        db_path=tmp_path / "maxread.sqlite3",
+        admin_username="zip.lab@outlook.com",
+        admin_password_hash=hashlib.sha256(b"password").hexdigest(),
+        lark_cli="lark-cli",
+    )
+    monkeypatch.setattr(
+        admin_server,
+        "mail_candidate_share",
+        lambda value: {"ok": True, "share": {"title": "候选人", "item_count": 1, "items": [], "token": value}},
+    )
+    server = AdminServer(("127.0.0.1", 0), AdminHandler, settings)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        connection.request("GET", f"/api/mail/share/{token}")
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+        assert payload["share"]["title"] == "候选人"
+
+        connection.request("GET", f"/mail/share/{token}")
+        response = connection.getresponse()
+        page = response.read().decode("utf-8")
+        assert response.status == 200
+        assert "ZIP Lab · 候选人分享" in page
+        assert response.getheader("x-robots-tag") == "noindex, nofollow"
+
+        connection.request(
+            "POST",
+            "/api/admin/mail/shares",
+            body=json.dumps({"thread_keys": ["a" * 32]}),
+            headers={"content-type": "application/json"},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 401
+        assert payload["error"] == "需要管理员登录"
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
 def test_admin_session_survives_server_recreation_and_logout(tmp_path):
     username = "zip.lab@outlook.com"
     password = "persistent-admin-password"

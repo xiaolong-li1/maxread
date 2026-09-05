@@ -4,6 +4,7 @@ import argparse
 import hmac
 import json
 import os
+import re
 import socket
 import threading
 from http import HTTPStatus
@@ -20,12 +21,16 @@ from .mail_admin import (
     mail_rejection_batch,
     queue_mail_rejection_batch_send,
     mail_admin_status,
+    create_mail_candidate_share,
+    list_mail_candidate_shares,
+    mail_candidate_share,
     reconcile_mail_admin_actions,
     reconcile_mail_rejections,
     reconcile_mail_rejection_batches,
     save_mail_rejection_draft,
     save_mail_rejection_template,
     send_mail_rejection,
+    revoke_mail_candidate_share,
     sync_mail_admin_cache,
     trigger_mail_scan,
     update_mail_admin_config,
@@ -54,6 +59,20 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
                 self._json(mail_admin_records(parsed.query))
             except ValueError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path == "/shares":
+            query = parse_qs(parsed.query)
+            try:
+                self._json(list_mail_candidate_shares(int(query.get("limit", ["30"])[0] or 30)))
+            except (TypeError, ValueError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        share_match = re.fullmatch(r"/shares/([A-Za-z0-9_-]{40,64})", parsed.path)
+        if share_match:
+            try:
+                self._json(mail_candidate_share(share_match.group(1)))
+            except ValueError:
+                self._json({"error": "分享不存在或已失效"}, HTTPStatus.NOT_FOUND)
             return
         if parsed.path == "/rejection":
             try:
@@ -92,6 +111,16 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
                     payload.get("changes") if isinstance(payload.get("changes"), dict) else {},
                     str(payload.get("expected_updated_at") or ""),
                 ))
+                return
+            if parsed.path == "/shares":
+                self._json(create_mail_candidate_share(
+                    [str(value) for value in payload.get("thread_keys") or []],
+                    str(payload.get("title") or ""),
+                    int(payload.get("expires_days") if payload.get("expires_days") is not None else 7),
+                ))
+                return
+            if parsed.path == "/shares/revoke":
+                self._json(revoke_mail_candidate_share(int(payload.get("share_id") or 0)))
                 return
             if parsed.path == "/rejection-template":
                 self._json(save_mail_rejection_template(

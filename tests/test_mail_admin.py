@@ -182,6 +182,11 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
     assert mail_admin.mail_rejection_batch(9)["ok"] is True
     assert mail_admin.queue_mail_rejection_batch_send(9, "发送 2 封拒信")["ok"] is True
     assert mail_admin.send_mail_rejection(7, "candidate@example.com")["ok"] is True
+    share_token = "A" * 43
+    assert mail_admin.create_mail_candidate_share(["a" * 32], "候选人", 7)["ok"] is True
+    assert mail_admin.list_mail_candidate_shares(20)["ok"] is True
+    assert mail_admin.mail_candidate_share(share_token)["ok"] is True
+    assert mail_admin.revoke_mail_candidate_share(3)["ok"] is True
     assert [item[0] for item in requests] == [
         "http://127.0.0.1:18766/status",
         "http://127.0.0.1:18766/scan",
@@ -193,9 +198,13 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
         "http://127.0.0.1:18766/rejection-batch?batch_id=9",
         "http://127.0.0.1:18766/rejection-batch-send",
         "http://127.0.0.1:18766/rejection-send",
+        "http://127.0.0.1:18766/shares",
+        "http://127.0.0.1:18766/shares?limit=20",
+        f"http://127.0.0.1:18766/shares/{share_token}",
+        "http://127.0.0.1:18766/shares/revoke",
     ]
     assert all(item[2]["Authorization"] == "Bearer secret-token" for item in requests)
-    assert requests[-1][4] == 300
+    assert requests[9][4] == 300
 
 
 def test_user_systemd_prefix_is_used_on_compute_worker(monkeypatch):
@@ -561,6 +570,45 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     assert focused["items"][0]["name"] == "张三"
 
 
+def test_candidate_share_is_revocable_minimal_snapshot(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
+
+    created = mail_admin.create_mail_candidate_share(["a" * 32], "实验室候选人", 7)
+    token = created["share"]["token"]
+    shared = mail_admin.mail_candidate_share(token)["share"]
+
+    assert shared["title"] == "实验室候选人"
+    assert shared["item_count"] == 1
+    assert shared["items"][0]["name"] == "张三"
+    assert shared["items"][0]["projects"] == ["World Model"]
+    assert "candidate_address" not in shared["items"][0]
+    assert "purpose_summary" not in shared["items"][0]
+    assert "doc_url" not in shared["items"][0]
+    with sqlite3.connect(db) as connection:
+        stored = connection.execute(
+            "select token_hash,snapshot_json from recruiting_candidate_shares"
+        ).fetchone()
+    assert token not in stored[0]
+    assert token not in stored[1]
+    assert mail_admin.list_mail_candidate_shares()["items"][0]["status"] == "active"
+
+    mail_admin.revoke_mail_candidate_share(created["share"]["id"])
+
+    with pytest.raises(ValueError, match="分享不存在或已失效"):
+        mail_admin.mail_candidate_share(token)
+
+
+def test_candidate_share_rejects_non_candidate_rows(tmp_path, monkeypatch):
+    root, _db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="只能包含候选人"):
+        mail_admin.create_mail_candidate_share(["b" * 32], "通知", 7)
+
+
 def test_rank_filter_accepts_any_qualifying_rank_and_ignores_gpa_ratios():
     values = mail_admin._rank_percentiles({
         "rank": "大一专业排名 30/100；大二专业排名 4/100",
@@ -822,11 +870,26 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "focus-card" not in html
     assert "rejection" not in html.casefold()
     assert "拒信" not in html
+    assert 'id="share-selected"' in html
+    assert 'id="select-page"' in html
+    assert "recordState.selected" in html
+    assert "api('api/admin/mail/shares'" in html
+    assert "一次最多分享 50 位候选人" in html
+
+
+def test_public_candidate_share_page_omits_private_material_fields():
+    html = mail_admin.MAIL_SHARE_HTML
+
+    assert "ZIP Lab · 候选人分享" in html
+    assert "credentials:'omit'" in html
+    assert "candidate_address" not in html
+    assert "purpose_summary" not in html
+    assert "doc_url" not in html
 
 
 def test_nginx_post_allowlist_excludes_rejection_actions():
     config = Path("deploy/nginx/maxread-location.conf.example").read_text(encoding="utf-8")
-    assert "mail/(scan|config|record)" in config
+    assert "mail/(scan|config|record|shares)" in config
     assert "rejection" not in config
 
 

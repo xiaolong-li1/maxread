@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow,noarchive" />
+  <meta name="referrer" content="no-referrer" />
+  <title>候选人分享</title>
+  <style>
+    :root { --bg:#f5f7f4; --paper:#fff; --text:#202621; --muted:#6f7871; --line:#dce2dd; --green:#1f755d; --green-soft:#e8f2ee; --orange:#a9601f; --orange-soft:#f8eee3; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--text); background:var(--bg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif; }
+    .wrap { width:min(1080px,calc(100% - 28px)); margin:0 auto; padding:26px 0 42px; }
+    header { display:flex; align-items:flex-end; justify-content:space-between; gap:20px; padding:0 2px 18px; border-bottom:1px solid var(--line); }
+    h1,h2,p { margin:0; letter-spacing:0; }
+    h1 { margin-top:4px; font-size:24px; }
+    h2 { font-size:18px; }
+    .eyebrow,.muted { color:var(--muted); }
+    .count { min-width:72px; text-align:right; }
+    .count strong { display:block; font-size:24px; font-variant-numeric:tabular-nums; }
+    .meta { display:flex; flex-wrap:wrap; gap:8px 16px; padding:12px 2px 4px; color:var(--muted); font-size:12px; }
+    .list { display:grid; gap:10px; margin-top:14px; }
+    article { padding:16px 18px; background:var(--paper); border:1px solid var(--line); border-radius:7px; }
+    .candidate-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+    .candidate-sub { margin-top:3px; color:var(--muted); }
+    .reply { display:inline-flex; flex:0 0 auto; align-items:center; min-height:25px; padding:0 8px; color:var(--green); background:var(--green-soft); border-radius:12px; font-size:12px; }
+    .reply.pending { color:var(--orange); background:var(--orange-soft); }
+    .facts { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:18px; margin-top:14px; padding-top:13px; border-top:1px solid #edf0ed; }
+    .fact-label { display:block; margin-bottom:3px; color:var(--muted); font-size:11px; }
+    .academic { white-space:pre-wrap; }
+    .tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:14px; }
+    .tag { display:inline-flex; padding:3px 7px; color:#315f50; background:var(--green-soft); border-radius:4px; font-size:11px; }
+    .state { padding:70px 18px; color:var(--muted); text-align:center; }
+    .state strong { display:block; margin-bottom:6px; color:var(--text); font-size:18px; }
+    footer { margin-top:22px; padding-top:14px; color:var(--muted); border-top:1px solid var(--line); font-size:11px; }
+    @media (max-width:640px) { .wrap{width:calc(100% - 18px);padding-top:16px;} header{align-items:flex-start;} h1{font-size:21px;} article{padding:14px;} .facts{grid-template-columns:1fr;gap:10px;} .count strong{font-size:20px;} }
+    @media print { body{background:#fff;} .wrap{width:100%;padding:0;} article{break-inside:avoid;} }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <div><div class="eyebrow">ZIP Lab · 候选人分享</div><h1 id="title">读取中</h1></div>
+      <div class="count"><strong id="count">0</strong><span class="muted">位候选人</span></div>
+    </header>
+    <div class="meta"><span id="created"></span><span id="expires"></span></div>
+    <section id="content" class="state">正在读取分享内容</section>
+    <footer>此页面仅展示分享者选中的候选人快照，请勿转发公开传播。</footer>
+  </main>
+  <script>
+    const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const fmt=value=>value?new Intl.DateTimeFormat('zh-CN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(value)):'—';
+    const pathMatch=location.pathname.match(/^(.*)\/mail\/share\/([A-Za-z0-9_-]{40,64})\/?$/);
+    const prefix=pathMatch?.[1]||'';
+    const token=pathMatch?.[2]||'';
+    async function load(){
+      if(!token){showError();return;}
+      try{
+        const response=await fetch(`${prefix}/api/mail/share/${encodeURIComponent(token)}`,{credentials:'omit',cache:'no-store'});
+        const data=await response.json().catch(()=>({}));
+        if(!response.ok||!data.share)throw new Error();
+        render(data.share);
+      }catch(_error){showError();}
+    }
+    function render(share){
+      document.title=share.title||'候选人分享';
+      document.getElementById('title').textContent=share.title||'候选人分享';
+      document.getElementById('count').textContent=String(Number(share.item_count||0));
+      document.getElementById('created').textContent=`创建于 ${fmt(share.created_at)}`;
+      document.getElementById('expires').textContent=share.expires_at?`有效至 ${fmt(share.expires_at)}`:'长期有效';
+      const items=Array.isArray(share.items)?share.items:[];
+      document.getElementById('content').className='list';
+      document.getElementById('content').innerHTML=items.map(item=>{
+        const projects=(item.projects||[]).map(value=>`<span class="tag">${esc(value)}</span>`).join('');
+        const schoolTags=[item.is_c9==='是'?'C9':'',item.is_985==='是'?'985':''].filter(Boolean).map(value=>`<span class="tag">${value}</span>`).join('');
+        const rank=[...new Set([item.rank,item.rank_evidence].filter(value=>value&&value!=='未提供'))].join(' · ')||'未提供';
+        return `<article><div class="candidate-head"><div><h2>${esc(item.name)}</h2><div class="candidate-sub">${esc(item.study)}${item.major&&item.major!=='unknown'?` · ${esc(item.major)}`:''}</div></div><span class="reply ${item.has_replied?'':'pending'}">${item.has_replied?'已回复':'未回复'}</span></div><div class="facts"><div><span class="fact-label">学业表现</span><div class="academic">${esc(item.academic_display||'未提供')}</div></div><div><span class="fact-label">排名</span><div>${esc(rank)}</div></div></div><div class="tags">${projects}${schoolTags}</div></article>`;
+      }).join('')||'<div class="state"><strong>没有可展示的候选人</strong></div>';
+    }
+    function showError(){document.getElementById('title').textContent='分享不可用';document.getElementById('content').className='state';document.getElementById('content').innerHTML='<strong>链接已失效</strong><span>该分享可能已过期、被撤销或地址不完整。</span>';}
+    load();
+  </script>
+</body>
+</html>
