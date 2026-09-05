@@ -33,6 +33,7 @@ from .mail_admin import (
     create_mail_rejection_batch,
     mail_rejection_batch,
     queue_mail_rejection_batch_send,
+    reissue_mail_candidate_share,
     save_mail_rejection_draft,
     save_mail_rejection_template,
     send_mail_rejection,
@@ -528,8 +529,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             payload = self._read_json()
             try:
-                if str(payload.get("action") or "create") == "revoke":
+                action = str(payload.get("action") or "create")
+                if action == "revoke":
                     self._json_response(revoke_mail_candidate_share(int(payload.get("share_id") or 0)))
+                elif action == "reissue":
+                    self._json_response(reissue_mail_candidate_share(
+                        int(payload.get("share_id") or 0),
+                        int(payload.get("expires_days") if payload.get("expires_days") is not None else 7),
+                    ))
                 else:
                     self._json_response(create_mail_candidate_share(
                         [str(value) for value in payload.get("thread_keys") or []],

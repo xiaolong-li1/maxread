@@ -187,6 +187,7 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
     assert mail_admin.list_mail_candidate_shares(20)["ok"] is True
     assert mail_admin.mail_candidate_share(share_token)["ok"] is True
     assert mail_admin.revoke_mail_candidate_share(3)["ok"] is True
+    assert mail_admin.reissue_mail_candidate_share(3, 7)["ok"] is True
     assert mail_admin.update_mail_interest_groups("create", name="待联系")["ok"] is True
     assert [item[0] for item in requests] == [
         "http://127.0.0.1:18766/status",
@@ -203,6 +204,7 @@ def test_remote_mode_proxies_status_scan_and_config(monkeypatch):
         "http://127.0.0.1:18766/shares?limit=20",
         f"http://127.0.0.1:18766/shares/{share_token}",
         "http://127.0.0.1:18766/shares/revoke",
+        "http://127.0.0.1:18766/shares/reissue",
         "http://127.0.0.1:18766/interest-groups",
     ]
     assert all(item[2]["Authorization"] == "Bearer secret-token" for item in requests)
@@ -633,6 +635,7 @@ def test_candidate_share_is_revocable_complete_snapshot(tmp_path, monkeypatch):
     root, db = _record_fixture(tmp_path)
     monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
     monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
+    monkeypatch.setenv("MAXREAD_MAIL_SHARE_SECRET", "test-candidate-share-secret")
 
     created = mail_admin.create_mail_candidate_share(["a" * 32], "实验室候选人", 7)
     token = created["share"]["token"]
@@ -647,6 +650,7 @@ def test_candidate_share_is_revocable_complete_snapshot(tmp_path, monkeypatch):
     assert shared["items"][0]["purpose_summary"].startswith("申请目的")
     assert shared["items"][0]["doc_url"] == "https://doc"
     assert shared["items"][0]["screening_label"] == "待筛选"
+    assert token.startswith("s1_")
     with sqlite3.connect(db) as connection:
         stored = connection.execute(
             "select token_hash,snapshot_json from recruiting_candidate_shares"
@@ -656,6 +660,8 @@ def test_candidate_share_is_revocable_complete_snapshot(tmp_path, monkeypatch):
     listed = mail_admin.list_mail_candidate_shares()["items"][0]
     assert listed["status"] == "active"
     assert listed["candidate_names"] == ["张三"]
+    assert listed["token"] == token
+    assert listed["link_available"] is True
 
     mail_admin.revoke_mail_candidate_share(created["share"]["id"])
 
@@ -676,10 +682,49 @@ def test_candidate_share_default_title_uses_candidate_names(tmp_path, monkeypatc
     root, _db = _record_fixture(tmp_path)
     monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
     monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
+    monkeypatch.setenv("MAXREAD_MAIL_SHARE_SECRET", "test-candidate-share-secret")
 
     created = mail_admin.create_mail_candidate_share(["a" * 32], "", 7)
 
     assert created["share"]["title"] == "张三"
+
+
+def test_legacy_candidate_share_can_be_reissued_without_invalidating_old_link(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
+    monkeypatch.setenv("MAXREAD_MAIL_SHARE_SECRET", "test-candidate-share-secret")
+    legacy_token = "L" * 43
+    snapshot = {"version": 1, "items": [{"name": "张三"}]}
+    with sqlite3.connect(db) as connection:
+        mail_admin._ensure_candidate_share_schema(connection)
+        legacy_id = int(connection.execute(
+            """
+            insert into recruiting_candidate_shares(
+                token_hash,token_prefix,token_version,title,snapshot_json,item_count,created_at,expires_at,revoked_at
+            ) values(?,?,0,?,?,?,?,?,'')
+            """,
+            (
+                mail_admin._candidate_share_token_hash(legacy_token),
+                legacy_token[:8],
+                "旧分享",
+                json.dumps(snapshot, ensure_ascii=False),
+                1,
+                "2026-09-05T00:00:00+00:00",
+                "",
+            ),
+        ).lastrowid)
+
+    listed = mail_admin.list_mail_candidate_shares()["items"][0]
+    assert listed["link_available"] is False
+    assert listed["token"] == ""
+    assert mail_admin.mail_candidate_share(legacy_token)["share"]["title"] == "旧分享"
+
+    reissued = mail_admin.reissue_mail_candidate_share(legacy_id, 7)["share"]
+
+    assert reissued["token"].startswith("s1_")
+    assert mail_admin.mail_candidate_share(reissued["token"])["share"]["title"] == "旧分享"
+    assert mail_admin.mail_candidate_share(legacy_token)["share"]["title"] == "旧分享"
 
 
 def test_rank_filter_accepts_any_qualifying_rank_and_ignores_gpa_ratios():
@@ -964,6 +1009,9 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "candidate_names" in html
     assert "候选人：" in html
     assert "names.slice(0,3)" in html
+    assert "copyStoredShare" in html
+    assert "reissueCandidateShare" in html
+    assert "生成新链接" in html
 
 
 def test_public_candidate_share_page_renders_complete_candidate_fields():

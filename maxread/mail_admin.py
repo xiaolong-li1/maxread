@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -506,42 +507,17 @@ def create_mail_candidate_share(
             raise ValueError("分享中只能包含候选人记录")
         items = [_candidate_share_item(by_key[key]) for key in clean_keys]
         share_title = clean_title or _candidate_share_default_title(items)
-        token = secrets.token_urlsafe(32)
-        now = datetime.now(timezone.utc)
-        created_at = now.isoformat()
-        expires_at = (now + timedelta(days=clean_days)).isoformat() if clean_days else ""
         snapshot = {"version": 1, "items": items}
         connection.execute("begin immediate")
-        share_id = int(connection.execute(
-            """
-            insert into recruiting_candidate_shares(
-                token_hash,token_prefix,title,snapshot_json,item_count,created_at,expires_at,revoked_at
-            ) values(?,?,?,?,?,?,?,'')
-            """,
-            (
-                _candidate_share_token_hash(token),
-                token[:8],
-                share_title,
-                json.dumps(snapshot, ensure_ascii=False),
-                len(items),
-                created_at,
-                expires_at,
-            ),
-        ).lastrowid)
+        share = _insert_signed_candidate_share(
+            connection,
+            title=share_title,
+            snapshot=snapshot,
+            item_count=len(items),
+            expires_days=clean_days,
+        )
         connection.commit()
-    return {
-        "ok": True,
-        "share": {
-            "id": share_id,
-            "token": token,
-            "token_prefix": token[:8],
-            "title": share_title,
-            "item_count": len(items),
-            "created_at": created_at,
-            "expires_at": expires_at,
-            "status": "active",
-        },
-    }
+    return {"ok": True, "share": share}
 
 
 def mail_candidate_share(token: str) -> dict[str, Any]:
@@ -552,10 +528,20 @@ def mail_candidate_share(token: str) -> dict[str, Any]:
     with sqlite3.connect(db_path, timeout=10) as connection:
         connection.row_factory = sqlite3.Row
         _ensure_candidate_share_schema(connection)
-        row = connection.execute(
-            "select * from recruiting_candidate_shares where token_hash=?",
-            (_candidate_share_token_hash(clean_token),),
-        ).fetchone()
+        signed = re.fullmatch(r"s1_([1-9]\d*)_([A-Za-z0-9_-]{43})", clean_token)
+        if signed:
+            row = connection.execute(
+                "select * from recruiting_candidate_shares where id=? and token_version=1",
+                (int(signed.group(1)),),
+            ).fetchone()
+            expected = _signed_candidate_share_token(int(row["id"]), str(row["created_at"])) if row else ""
+            if not expected or not secrets.compare_digest(clean_token, expected):
+                row = None
+        else:
+            row = connection.execute(
+                "select * from recruiting_candidate_shares where token_hash=?",
+                (_candidate_share_token_hash(clean_token),),
+            ).fetchone()
     if row is None or str(row["revoked_at"] or ""):
         raise ValueError("分享不存在或已失效")
     expires_at = str(row["expires_at"] or "")
@@ -591,7 +577,7 @@ def list_mail_candidate_shares(limit: int = 30) -> dict[str, Any]:
         connection.row_factory = sqlite3.Row
         _ensure_candidate_share_schema(connection)
         rows = connection.execute(
-            "select id,token_prefix,title,snapshot_json,item_count,created_at,expires_at,revoked_at "
+            "select id,token_prefix,token_version,title,snapshot_json,item_count,created_at,expires_at,revoked_at "
             "from recruiting_candidate_shares order by id desc limit ?",
             (clean_limit,),
         ).fetchall()
@@ -608,6 +594,11 @@ def list_mail_candidate_shares(limit: int = 30) -> dict[str, Any]:
             for item in (snapshot.get("items") or [] if isinstance(snapshot, dict) else [])
             if isinstance(item, dict)
         ]
+        token = (
+            _signed_candidate_share_token(int(row["id"]), str(row["created_at"]))
+            if int(row["token_version"] or 0) == 1
+            else ""
+        )
         items.append({
             "id": int(row["id"]),
             "token_prefix": str(row["token_prefix"] or ""),
@@ -618,8 +609,50 @@ def list_mail_candidate_shares(limit: int = 30) -> dict[str, Any]:
             "revoked_at": str(row["revoked_at"] or ""),
             "status": status,
             "candidate_names": candidate_names,
+            "token": token if status == "active" else "",
+            "link_available": bool(token and status == "active"),
         })
     return {"ok": True, "items": items}
+
+
+def reissue_mail_candidate_share(share_id: int, expires_days: int = 7) -> dict[str, Any]:
+    clean_id = int(share_id)
+    clean_days = int(expires_days)
+    if clean_id <= 0:
+        raise ValueError("无效分享记录")
+    if clean_days not in {0, 1, 7, 30}:
+        raise ValueError("分享有效期仅支持 1 天、7 天、30 天或永久")
+    if _remote_url():
+        return _remote_request(
+            "/shares/reissue",
+            {"share_id": clean_id, "expires_days": clean_days},
+        )
+    db_path = _mail_db_path(_mail_root())
+    with sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_candidate_share_schema(connection)
+        source = connection.execute(
+            "select title,snapshot_json,item_count from recruiting_candidate_shares where id=?",
+            (clean_id,),
+        ).fetchone()
+        if source is None:
+            raise ValueError("分享不存在")
+        try:
+            snapshot = json.loads(str(source["snapshot_json"] or "{}"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("分享内容损坏") from exc
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("items"), list):
+            raise ValueError("分享内容损坏")
+        connection.execute("begin immediate")
+        share = _insert_signed_candidate_share(
+            connection,
+            title=str(source["title"] or "候选人分享"),
+            snapshot=snapshot,
+            item_count=int(source["item_count"] or len(snapshot["items"])),
+            expires_days=clean_days,
+        )
+        connection.commit()
+    return {"ok": True, "source_share_id": clean_id, "share": share}
 
 
 def revoke_mail_candidate_share(share_id: int) -> dict[str, Any]:
@@ -1217,6 +1250,25 @@ def _candidate_share_token_hash(token: str) -> str:
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
+def _candidate_share_signing_secret() -> bytes:
+    value = str(
+        os.environ.get("MAXREAD_MAIL_SHARE_SECRET")
+        or os.environ.get("MAXREAD_MAIL_REMOTE_TOKEN")
+        or ""
+    ).strip()
+    if len(value) < 16:
+        raise RuntimeError("候选人分享签名密钥未配置")
+    return value.encode("utf-8")
+
+
+def _signed_candidate_share_token(share_id: int, created_at: str) -> str:
+    message = f"candidate-share:{int(share_id)}:{created_at}".encode("utf-8")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(_candidate_share_signing_secret(), message, hashlib.sha256).digest()
+    ).decode("ascii").rstrip("=")
+    return f"s1_{int(share_id)}_{signature}"
+
+
 def _candidate_share_item(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": str(item.get("name") or "unknown"),
@@ -1246,6 +1298,52 @@ def _candidate_share_default_title(items: list[dict[str, Any]]) -> str:
     names = [str(item.get("name") or "unknown") for item in items]
     visible = "、".join(names[:3])
     return visible if len(names) <= 3 else f"{visible}等{len(names)}人"
+
+
+def _insert_signed_candidate_share(
+    connection: sqlite3.Connection,
+    *,
+    title: str,
+    snapshot: dict[str, Any],
+    item_count: int,
+    expires_days: int,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    created_at = now.isoformat()
+    expires_at = (now + timedelta(days=expires_days)).isoformat() if expires_days else ""
+    placeholder = secrets.token_urlsafe(32)
+    share_id = int(connection.execute(
+        """
+        insert into recruiting_candidate_shares(
+            token_hash,token_prefix,token_version,title,snapshot_json,item_count,created_at,expires_at,revoked_at
+        ) values(?,?,1,?,?,?,?,?,'')
+        """,
+        (
+            _candidate_share_token_hash(placeholder),
+            placeholder[:8],
+            title,
+            json.dumps(snapshot, ensure_ascii=False),
+            int(item_count),
+            created_at,
+            expires_at,
+        ),
+    ).lastrowid)
+    token = _signed_candidate_share_token(share_id, created_at)
+    connection.execute(
+        "update recruiting_candidate_shares set token_hash=?,token_prefix=? where id=?",
+        (_candidate_share_token_hash(token), token[:8], share_id),
+    )
+    return {
+        "id": share_id,
+        "token": token,
+        "token_prefix": token[:8],
+        "title": title,
+        "item_count": int(item_count),
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "status": "active",
+        "link_available": True,
+    }
 
 
 def _validated_rejection_content(subject: str, body: str) -> tuple[str, str]:
@@ -1344,6 +1442,7 @@ def _ensure_candidate_share_schema(connection: sqlite3.Connection) -> None:
             id integer primary key autoincrement,
             token_hash text not null unique,
             token_prefix text not null,
+            token_version integer not null default 0,
             title text not null,
             snapshot_json text not null,
             item_count integer not null,
@@ -1355,6 +1454,11 @@ def _ensure_candidate_share_schema(connection: sqlite3.Connection) -> None:
         on recruiting_candidate_shares(created_at desc);
         """
     )
+    columns = {str(row[1]) for row in connection.execute("pragma table_info(recruiting_candidate_shares)")}
+    if "token_version" not in columns:
+        connection.execute(
+            "alter table recruiting_candidate_shares add column token_version integer not null default 0"
+        )
     connection.commit()
 
 
