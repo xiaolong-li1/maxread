@@ -1056,6 +1056,8 @@ def _candidate_share_token_hash(token: str) -> str:
 def _candidate_share_item(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": str(item.get("name") or "unknown"),
+        "candidate_address": str(item.get("candidate_address") or ""),
+        "subject": str(item.get("subject") or ""),
         "school": str(item.get("school") or "unknown"),
         "study": str(item.get("study") or "unknown"),
         "major": str(item.get("major") or "unknown"),
@@ -1063,10 +1065,16 @@ def _candidate_share_item(item: dict[str, Any]) -> dict[str, Any]:
         "rank": str(item.get("rank") or "未提供"),
         "rank_evidence": str(item.get("rank_evidence") or "未提供"),
         "projects": [str(value) for value in item.get("projects") or [] if str(value)],
+        "purpose_summary": str(item.get("purpose_summary") or ""),
+        "source_accounts": [str(value) for value in item.get("source_accounts") or [] if str(value)],
         "is_985": str(item.get("is_985") or "未知"),
         "is_c9": str(item.get("is_c9") or "未知"),
         "latest_time": str(item.get("latest_time") or ""),
         "has_replied": bool(item.get("has_replied")),
+        "screening_status": str(item.get("screening_status") or "未筛选"),
+        "screening_label": str(item.get("screening_label") or item.get("screening_status") or "未筛选"),
+        "is_interested": bool(item.get("is_interested")),
+        "doc_url": str(item.get("doc_url") or ""),
     }
 
 

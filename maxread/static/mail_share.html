@@ -23,17 +23,25 @@
     article { padding:16px 18px; background:var(--paper); border:1px solid var(--line); border-radius:7px; }
     .candidate-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
     .candidate-sub { margin-top:3px; color:var(--muted); }
+    .candidate-badges { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:5px; }
     .reply { display:inline-flex; flex:0 0 auto; align-items:center; min-height:25px; padding:0 8px; color:var(--green); background:var(--green-soft); border-radius:12px; font-size:12px; }
     .reply.pending { color:var(--orange); background:var(--orange-soft); }
-    .facts { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:18px; margin-top:14px; padding-top:13px; border-top:1px solid #edf0ed; }
+    .reply.neutral { color:var(--muted); background:#f0f2f0; }
+    .facts { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr); gap:18px; margin-top:14px; padding-top:13px; border-top:1px solid #edf0ed; }
     .fact-label { display:block; margin-bottom:3px; color:var(--muted); font-size:11px; }
     .academic { white-space:pre-wrap; }
+    .email { color:var(--green); text-decoration:none; overflow-wrap:anywhere; }
+    .detail-row { margin-top:12px; padding-top:11px; border-top:1px solid #edf0ed; }
+    .summary { white-space:pre-wrap; overflow-wrap:anywhere; }
     .tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:14px; }
     .tag { display:inline-flex; padding:3px 7px; color:#315f50; background:var(--green-soft); border-radius:4px; font-size:11px; }
+    .candidate-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:13px; padding-top:12px; border-top:1px solid #edf0ed; }
+    .candidate-foot .source { color:var(--muted); font-size:12px; }
+    .material { min-height:32px; display:inline-flex; align-items:center; padding:0 10px; color:var(--green); background:var(--paper); border:1px solid var(--line); border-radius:7px; text-decoration:none; white-space:nowrap; }
     .state { padding:70px 18px; color:var(--muted); text-align:center; }
     .state strong { display:block; margin-bottom:6px; color:var(--text); font-size:18px; }
     footer { margin-top:22px; padding-top:14px; color:var(--muted); border-top:1px solid var(--line); font-size:11px; }
-    @media (max-width:640px) { .wrap{width:calc(100% - 18px);padding-top:16px;} header{align-items:flex-start;} h1{font-size:21px;} article{padding:14px;} .facts{grid-template-columns:1fr;gap:10px;} .count strong{font-size:20px;} }
+    @media (max-width:640px) { .wrap{width:calc(100% - 18px);padding-top:16px;} header{align-items:flex-start;} h1{font-size:21px;} article{padding:14px;} .candidate-head{align-items:flex-start;} .candidate-badges{max-width:120px;} .facts{grid-template-columns:1fr;gap:10px;} .candidate-foot{align-items:flex-start;flex-direction:column;} .count strong{font-size:20px;} }
     @media print { body{background:#fff;} .wrap{width:100%;padding:0;} article{break-inside:avoid;} }
   </style>
 </head>
@@ -73,8 +81,10 @@
       document.getElementById('content').innerHTML=items.map(item=>{
         const projects=(item.projects||[]).map(value=>`<span class="tag">${esc(value)}</span>`).join('');
         const schoolTags=[item.is_c9==='是'?'C9':'',item.is_985==='是'?'985':''].filter(Boolean).map(value=>`<span class="tag">${value}</span>`).join('');
+        const sourceTags=(item.source_accounts||[]).map(value=>`<span class="tag">来源 · ${esc(value)}</span>`).join('');
         const rank=[...new Set([item.rank,item.rank_evidence].filter(value=>value&&value!=='未提供'))].join(' · ')||'未提供';
-        return `<article><div class="candidate-head"><div><h2>${esc(item.name)}</h2><div class="candidate-sub">${esc(item.study)}${item.major&&item.major!=='unknown'?` · ${esc(item.major)}`:''}</div></div><span class="reply ${item.has_replied?'':'pending'}">${item.has_replied?'已回复':'未回复'}</span></div><div class="facts"><div><span class="fact-label">学业表现</span><div class="academic">${esc(item.academic_display||'未提供')}</div></div><div><span class="fact-label">排名</span><div>${esc(rank)}</div></div></div><div class="tags">${projects}${schoolTags}</div></article>`;
+        const material=/^https:\/\//.test(item.doc_url||'')?`<a class="material" href="${esc(item.doc_url)}" target="_blank" rel="noreferrer noopener">打开飞书材料文档 ↗</a>`:'';
+        return `<article><div class="candidate-head"><div><h2>${esc(item.name)}</h2><div class="candidate-sub">${esc(item.study)}${item.major&&item.major!=='unknown'?` · ${esc(item.major)}`:''}</div></div><div class="candidate-badges">${item.is_interested?'<span class="reply">重点关注</span>':''}<span class="reply neutral">${esc(item.screening_label||item.screening_status||'待筛选')}</span><span class="reply ${item.has_replied?'':'pending'}">${item.has_replied?'已回复':'未回复'}</span></div></div><div class="facts"><div><span class="fact-label">联系邮箱</span><a class="email" href="mailto:${esc(item.candidate_address||'')}">${esc(item.candidate_address||'未提供')}</a></div><div><span class="fact-label">学业表现</span><div class="academic">${esc(item.academic_display||'未提供')}</div></div><div><span class="fact-label">排名</span><div>${esc(rank)}</div></div></div><div class="tags">${projects}${schoolTags}${sourceTags}</div><div class="detail-row"><span class="fact-label">来信主题</span><div>${esc(item.subject||'未提供')}</div></div><div class="detail-row"><span class="fact-label">申请与科研摘要</span><div class="summary">${esc(item.purpose_summary||'未提供')}</div></div><div class="candidate-foot"><div class="source">最近来信 ${esc(fmt(item.latest_time))} · ${(item.source_accounts||[]).length?`经 ${esc((item.source_accounts||[]).join('、'))} 收取`:'来源邮箱未标记'}</div>${material}</div></article>`;
       }).join('')||'<div class="state"><strong>没有可展示的候选人</strong></div>';
     }
     function showError(){document.getElementById('title').textContent='分享不可用';document.getElementById('content').className='state';document.getElementById('content').innerHTML='<strong>链接已失效</strong><span>该分享可能已过期、被撤销或地址不完整。</span>';}

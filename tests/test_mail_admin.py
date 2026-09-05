@@ -570,7 +570,7 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     assert focused["items"][0]["name"] == "张三"
 
 
-def test_candidate_share_is_revocable_minimal_snapshot(tmp_path, monkeypatch):
+def test_candidate_share_is_revocable_complete_snapshot(tmp_path, monkeypatch):
     root, db = _record_fixture(tmp_path)
     monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
     monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
@@ -583,9 +583,11 @@ def test_candidate_share_is_revocable_minimal_snapshot(tmp_path, monkeypatch):
     assert shared["item_count"] == 1
     assert shared["items"][0]["name"] == "张三"
     assert shared["items"][0]["projects"] == ["World Model"]
-    assert "candidate_address" not in shared["items"][0]
-    assert "purpose_summary" not in shared["items"][0]
-    assert "doc_url" not in shared["items"][0]
+    assert shared["items"][0]["candidate_address"] == "candidate@example.com"
+    assert shared["items"][0]["source_accounts"] == ["ZIP Lab"]
+    assert shared["items"][0]["purpose_summary"].startswith("申请目的")
+    assert shared["items"][0]["doc_url"] == "https://doc"
+    assert shared["items"][0]["screening_label"] == "待筛选"
     with sqlite3.connect(db) as connection:
         stored = connection.execute(
             "select token_hash,snapshot_json from recruiting_candidate_shares"
@@ -877,14 +879,15 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "一次最多分享 50 位候选人" in html
 
 
-def test_public_candidate_share_page_omits_private_material_fields():
+def test_public_candidate_share_page_renders_complete_candidate_fields():
     html = mail_admin.MAIL_SHARE_HTML
 
     assert "ZIP Lab · 候选人分享" in html
     assert "credentials:'omit'" in html
-    assert "candidate_address" not in html
-    assert "purpose_summary" not in html
-    assert "doc_url" not in html
+    assert "candidate_address" in html
+    assert "purpose_summary" in html
+    assert "source_accounts" in html
+    assert "doc_url" in html
 
 
 def test_nginx_post_allowlist_excludes_rejection_actions():
