@@ -615,46 +615,6 @@ def list_mail_candidate_shares(limit: int = 30) -> dict[str, Any]:
     return {"ok": True, "items": items}
 
 
-def reissue_mail_candidate_share(share_id: int, expires_days: int = 7) -> dict[str, Any]:
-    clean_id = int(share_id)
-    clean_days = int(expires_days)
-    if clean_id <= 0:
-        raise ValueError("无效分享记录")
-    if clean_days not in {0, 1, 7, 30}:
-        raise ValueError("分享有效期仅支持 1 天、7 天、30 天或永久")
-    if _remote_url():
-        return _remote_request(
-            "/shares/reissue",
-            {"share_id": clean_id, "expires_days": clean_days},
-        )
-    db_path = _mail_db_path(_mail_root())
-    with sqlite3.connect(db_path, timeout=10) as connection:
-        connection.row_factory = sqlite3.Row
-        _ensure_candidate_share_schema(connection)
-        source = connection.execute(
-            "select title,snapshot_json,item_count from recruiting_candidate_shares where id=?",
-            (clean_id,),
-        ).fetchone()
-        if source is None:
-            raise ValueError("分享不存在")
-        try:
-            snapshot = json.loads(str(source["snapshot_json"] or "{}"))
-        except json.JSONDecodeError as exc:
-            raise ValueError("分享内容损坏") from exc
-        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("items"), list):
-            raise ValueError("分享内容损坏")
-        connection.execute("begin immediate")
-        share = _insert_signed_candidate_share(
-            connection,
-            title=str(source["title"] or "候选人分享"),
-            snapshot=snapshot,
-            item_count=int(source["item_count"] or len(snapshot["items"])),
-            expires_days=clean_days,
-        )
-        connection.commit()
-    return {"ok": True, "source_share_id": clean_id, "share": share}
-
-
 def revoke_mail_candidate_share(share_id: int) -> dict[str, Any]:
     clean_id = int(share_id)
     if clean_id <= 0:

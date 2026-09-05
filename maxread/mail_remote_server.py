@@ -27,7 +27,6 @@ from .mail_admin import (
     reconcile_mail_admin_actions,
     reconcile_mail_rejections,
     reconcile_mail_rejection_batches,
-    reissue_mail_candidate_share,
     save_mail_rejection_draft,
     save_mail_rejection_template,
     send_mail_rejection,
@@ -131,12 +130,6 @@ class MailRemoteHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/shares/revoke":
                 self._json(revoke_mail_candidate_share(int(payload.get("share_id") or 0)))
-                return
-            if parsed.path == "/shares/reissue":
-                self._json(reissue_mail_candidate_share(
-                    int(payload.get("share_id") or 0),
-                    int(payload.get("expires_days") if payload.get("expires_days") is not None else 7),
-                ))
                 return
             if parsed.path == "/rejection-template":
                 self._json(save_mail_rejection_template(
