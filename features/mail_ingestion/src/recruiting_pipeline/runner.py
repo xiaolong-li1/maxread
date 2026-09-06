@@ -588,8 +588,11 @@ class RecruitingRunner:
                     document_id,
                     [message.id for message in envelope.messages],
                 )
-            attachment_messages = pending_messages if thread.document_id else list(envelope.messages)
-            uploaded_digests = self.store.uploaded_attachment_digests(thread.thread_key)
+            # Check every locally available attachment against the current
+            # document. A previous document token must never suppress upload
+            # after the material document is rebuilt or relinked.
+            attachment_messages = list(envelope.messages)
+            uploaded_digests = self.store.uploaded_attachment_digests(thread.thread_key, document_id)
             uploaded_any = False
             for path in self._attachment_paths(envelope, attachment_messages):
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -604,7 +607,10 @@ class RecruitingRunner:
                 # remove any replayed file cards before the run completes.
                 self.docs.deduplicate_files(document_id)
             if attachment_messages:
-                self.docs.replace_attachment_summary(document_id, self._attachment_summary_lines(envelope))
+                self.docs.replace_attachment_summary(
+                    document_id,
+                    self._attachment_summary_lines(envelope, document_id=document_id),
+                )
             document_updated = document_updated or uploaded_any
         else:
             document_id, document_url = thread.document_id, thread.document_url
@@ -785,12 +791,13 @@ class RecruitingRunner:
         self,
         envelope: ThreadEnvelope,
         messages: list[StoredMessage] | None = None,
+        document_id: str | None = None,
     ) -> list[str]:
         selected = messages or list(envelope.messages)
         paths = self._attachment_paths(envelope, selected)
         inventory = self.store.attachment_inventory(message.id for message in selected)
         lines: list[str] = []
-        uploaded = self.store.uploaded_attachment_digests(envelope.key)
+        uploaded = self.store.uploaded_attachment_digests(envelope.key, document_id) if document_id else set()
         indexed_paths: set[Path] = set()
         for item in inventory:
             name = str(item.get("filename") or "附件")

@@ -123,7 +123,7 @@ class RecruitingPipelineTest(unittest.TestCase):
         runner = RecruitingRunner.__new__(RecruitingRunner)
         runner._attachment_paths = lambda *_args: []
         runner.store = SimpleNamespace(
-            uploaded_attachment_digests=lambda _key: set(),
+            uploaded_attachment_digests=lambda _key, _doc=None: set(),
             attachment_inventory=lambda _ids: [{
                 "filename": "保研材料.pdf",
                 "size_bytes": 29349000,
@@ -356,7 +356,11 @@ class RecruitingPipelineTest(unittest.TestCase):
             store.upsert_message(1, "key-b", "outgoing", "INBOX")
             self.assertEqual(store.message_processing_state()[1], ("key-b", False))
             store.mark_attachment_uploaded("key", "sha", "resume.pdf", "doc")
-            self.assertEqual(store.uploaded_attachment_digests("key"), {"sha"})
+            self.assertEqual(store.uploaded_attachment_digests("key", "doc"), {"sha"})
+            self.assertEqual(store.uploaded_attachment_digests("key", "replacement-doc"), set())
+            store.mark_attachment_uploaded("key", "sha", "resume.pdf", "replacement-doc")
+            self.assertEqual(store.uploaded_attachment_digests("key", "doc"), set())
+            self.assertEqual(store.uploaded_attachment_digests("key", "replacement-doc"), {"sha"})
             store.mark_document_messages_materialized("key", "doc", [1, 2, 2])
             self.assertEqual(store.document_materialized_message_ids("key", "doc"), {1, 2})
             self.assertEqual(store.document_materialized_message_ids("key", "other-doc"), set())
@@ -408,7 +412,7 @@ class RecruitingPipelineTest(unittest.TestCase):
                 message_processing_state=lambda: {},
                 document_materialized_message_ids=lambda _key, _doc: set(),
                 mark_document_messages_materialized=lambda key, doc, ids: materialized.append((key, doc, list(ids))),
-                uploaded_attachment_digests=lambda _key: set(),
+                uploaded_attachment_digests=lambda _key, _doc=None: set(),
                 save_thread=lambda *args, **kwargs: saved.append(kwargs),
             )
             runner.base = SimpleNamespace(
@@ -492,7 +496,7 @@ class RecruitingPipelineTest(unittest.TestCase):
             message_processing_state=lambda: {},
             document_materialized_message_ids=lambda _key, _doc: set(),
             mark_document_messages_materialized=lambda key, doc, ids: materialized.append((key, doc, list(ids))),
-            uploaded_attachment_digests=lambda _key: set(),
+            uploaded_attachment_digests=lambda _key, _doc=None: set(),
             attachment_inventory=lambda _ids: [],
             save_thread=lambda *_args, **_kwargs: None,
             mark_message_processed=lambda _id: None,

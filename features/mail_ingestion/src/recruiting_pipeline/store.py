@@ -380,10 +380,20 @@ class PipelineStore:
             conn.execute("update messages set artifacts_released_at=? where id=?", (now, message_id))
         return True
 
-    def uploaded_attachment_digests(self, thread_key: str) -> set[str]:
+    def uploaded_attachment_digests(self, thread_key: str, doc_id: str | None = None) -> set[str]:
         self.initialize()
         with self.connect() as conn:
-            return {str(row[0]) for row in conn.execute("SELECT digest FROM recruiting_uploaded_attachments WHERE thread_key=?", (thread_key,))}
+            if doc_id:
+                rows = conn.execute(
+                    "SELECT digest FROM recruiting_uploaded_attachments WHERE thread_key=? AND doc_id=?",
+                    (thread_key, doc_id),
+                )
+            else:
+                rows = conn.execute(
+                    "SELECT digest FROM recruiting_uploaded_attachments WHERE thread_key=?",
+                    (thread_key,),
+                )
+            return {str(row[0]) for row in rows}
 
     def attachment_inventory(self, message_ids: Iterable[int]) -> list[dict[str, Any]]:
         ids = [int(value) for value in message_ids]
@@ -401,7 +411,14 @@ class PipelineStore:
     def mark_attachment_uploaded(self, thread_key: str, digest: str, filename: str, doc_id: str) -> None:
         with self.connect() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO recruiting_uploaded_attachments(thread_key,digest,filename,doc_id,uploaded_at) VALUES (?,?,?,?,?)",
+                """
+                INSERT INTO recruiting_uploaded_attachments(thread_key,digest,filename,doc_id,uploaded_at)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(thread_key,digest) DO UPDATE SET
+                    filename=excluded.filename,
+                    doc_id=excluded.doc_id,
+                    uploaded_at=excluded.uploaded_at
+                """,
                 (thread_key, digest, filename, doc_id, datetime.now(UTC).isoformat()),
             )
 
