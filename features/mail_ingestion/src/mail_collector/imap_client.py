@@ -140,6 +140,12 @@ class ImapClient:
         if status != "OK":
             raise RuntimeError("IMAP UID SEARCH failed")
         uids = [int(value) for value in (data[0] or b"").split()]
+        # Outlook can return the mailbox's final UID for a range that starts
+        # beyond it (for example 114:* when the highest UID is 113).  Enforce
+        # the incremental watermark locally so an old large message is never
+        # downloaded again.
+        if last_uid > 0:
+            uids = [uid for uid in uids if uid > last_uid]
         return sorted(uids)[:limit]
 
     def fetch_raw(self, uid: int) -> bytes:

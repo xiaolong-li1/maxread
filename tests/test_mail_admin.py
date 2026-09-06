@@ -85,6 +85,23 @@ def test_mail_status_treats_active_manual_scan_as_expected_takeover(tmp_path, mo
     assert status["control"] == {"active": True, "account": "all"}
 
 
+def test_mail_status_degrades_for_run_level_failure_without_candidate_failures(tmp_path, monkeypatch):
+    root, db = _fixture(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "update recruiting_runs set status='failed',failed_threads=0,error=? where run_id='run'",
+            ("mail-collector timed out after 600 seconds",),
+        )
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.setattr(mail_admin, "_systemd_show", lambda unit: {"ActiveState": "active", "MainPID": "42"})
+
+    status = mail_admin.mail_admin_status()
+
+    assert status["business_state"] == "degraded"
+    assert status["runs"][0]["failed_threads"] == 0
+    assert "timed out" in status["runs"][0]["error"]
+
+
 def test_mail_config_update_is_atomic_and_restarts_units(tmp_path, monkeypatch):
     root, _db = _fixture(tmp_path)
     timer = tmp_path / "systemd/interval.conf"
@@ -297,7 +314,7 @@ def _rejection_fixture(tmp_path: Path):
         bohan_fields = {**zip_fields, "name": "王同学", "source_accounts": ["Bohan"]}
         connection.execute(
             "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("c" * 32, "15836992650@163.com", "测试申请", json.dumps(zip_fields, ensure_ascii=False), "rec-zip", "doc-zip", "https://doc", "2026-09-02 16:18", "", "", "active", "未筛选", 0, 0, "未开始", "", "v1"),
+            ("c" * 32, "test-recipient@example.com", "测试申请", json.dumps(zip_fields, ensure_ascii=False), "rec-zip", "doc-zip", "https://doc", "2026-09-02 16:18", "", "", "active", "未筛选", 0, 0, "未开始", "", "v1"),
         )
         connection.execute(
             "insert into recruiting_threads values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -362,7 +379,7 @@ def test_rejection_context_is_zip_lab_only_and_uses_editable_default(tmp_path, m
 
     context = mail_admin.mail_rejection_context("c" * 32)
 
-    assert context["candidate"]["recipient"] == "15836992650@163.com"
+    assert context["candidate"]["recipient"] == "test-recipient@example.com"
     assert context["sender"] == "zip.lab@outlook.com"
     assert context["application_type"] == "general"
     assert "感谢你关注浙江大学 ZIP Lab" in context["body"]
@@ -409,7 +426,7 @@ def test_rejection_send_is_server_gated_and_cannot_repeat(tmp_path, monkeypatch)
     monkeypatch.setattr(mail_admin, "_smtp_send_zip_lab", lambda row: sent.append(str(row["recipient"])))
 
     with pytest.raises(ValueError, match="尚未启用"):
-        mail_admin.send_mail_rejection(draft["id"], "15836992650@163.com")
+        mail_admin.send_mail_rejection(draft["id"], "test-recipient@example.com")
     assert sent == []
 
     env_path = root / "data/accounts/zip-lab.env"
@@ -421,12 +438,12 @@ def test_rejection_send_is_server_gated_and_cannot_repeat(tmp_path, monkeypatch)
     monkeypatch.setattr(mail_admin, "_smtp_ready", lambda: True)
     with pytest.raises(ValueError, match="完整收件地址"):
         mail_admin.send_mail_rejection(draft["id"], "wrong@example.com")
-    result = mail_admin.send_mail_rejection(draft["id"], "15836992650@163.com")
+    result = mail_admin.send_mail_rejection(draft["id"], "test-recipient@example.com")
 
     assert result["status"] == "sent_sync_pending"
-    assert sent == ["15836992650@163.com"]
+    assert sent == ["test-recipient@example.com"]
     with pytest.raises(ValueError, match="不能重复发送"):
-        mail_admin.send_mail_rejection(draft["id"], "15836992650@163.com")
+        mail_admin.send_mail_rejection(draft["id"], "test-recipient@example.com")
     with sqlite3.connect(db) as connection:
         thread = connection.execute("select screening_status,last_outgoing_time from recruiting_threads where thread_key=?", ("c" * 32,)).fetchone()
         action = json.loads(connection.execute("select new_json from recruiting_admin_actions").fetchone()[0])
@@ -560,8 +577,11 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     assert result["items"][0]["name"] == "张三"
     assert result["items"][0]["has_replied"] is True
     assert result["items"][0]["is_interested"] is True
+    assert result["items"][0]["pipeline_stage"] == "replied"
+    assert result["items"][0]["pipeline_label"] == "已回复"
     assert result["interest_total"] == 1
     assert result["filters"]["screening_statuses"] == ["未筛选", "面试资格", "面试通过", "未通过", "实习生"]
+    assert mail_admin.mail_public_summary()["metrics"]["unreplied"] == 0
 
     ranked = mail_admin.mail_admin_records("mail_type=candidate&tier=c9&rank_percentile=5&days=0&limit=10")
     assert ranked["total"] == 1
@@ -574,6 +594,110 @@ def test_mail_record_query_filters_and_paginates(tmp_path, monkeypatch):
     assert focused["items"][0]["name"] == "张三"
     assert focused["interest_ungrouped"] == 1
     assert focused["interest_groups"] == []
+
+
+def test_candidate_pipeline_stage_is_transactional_audited_and_filterable(tmp_path, monkeypatch):
+    root, db = _record_fixture(tmp_path)
+    monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
+    monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
+    base_calls = []
+    monkeypatch.setattr(mail_admin, "_update_base_workflow", lambda *args: base_calls.append(args))
+
+    result = mail_admin.update_mail_admin_record(
+        "a" * 32,
+        {"pipeline_stage": "interview_invited"},
+        "v1",
+    )
+
+    assert result["state"] == {
+        "pipeline_stage": "interview_invited",
+        "pipeline_label": "已发送面试邀请",
+    }
+    assert result["sync_status"] == "committed"
+    assert result["updated_at"] != "v1"
+    assert base_calls == [
+        (
+            "rec1",
+            {
+                "screening_status": "未筛选",
+                "interview_assigned": True,
+                "interview_result": "未开始",
+                "has_replied": True,
+            },
+        )
+    ]
+    assert mail_admin.mail_admin_records("mail_type=candidate&pipeline_stage=interview_invited&days=0&limit=10")["total"] == 1
+    assert mail_admin.mail_admin_records("mail_type=candidate&pipeline_stage=replied&days=0&limit=10")["total"] == 0
+    assert mail_admin.mail_admin_records("mail_type=candidate&pipeline_stage=not_unreplied&days=0&limit=10")["total"] == 1
+    with sqlite3.connect(db) as connection:
+        assert connection.execute(
+            "select stage from recruiting_candidate_pipeline where thread_key=?",
+            ("a" * 32,),
+        ).fetchone()[0] == "interview_invited"
+        assert connection.execute(
+            "select from_stage,to_stage from recruiting_candidate_pipeline_events where thread_key=?",
+            ("a" * 32,),
+        ).fetchone() == ("replied", "interview_invited")
+        assert connection.execute(
+            "select screening_status,interview_assigned,interview_result from recruiting_threads where thread_key=?",
+            ("a" * 32,),
+        ).fetchone() == ("未筛选", 1, "未开始")
+    with pytest.raises(ValueError, match="其他操作更新"):
+        mail_admin.update_mail_admin_record("a" * 32, {"pipeline_stage": "interview_confirmed"}, "v1")
+    corrected = mail_admin.update_mail_admin_record(
+        "a" * 32,
+        {"pipeline_stage": "unreplied"},
+        result["updated_at"],
+    )
+    assert corrected["state"] == {
+        "pipeline_stage": "unreplied",
+        "pipeline_label": "未回复",
+    }
+    assert base_calls[-1] == (
+        "rec1",
+        {
+            "screening_status": "未筛选",
+            "interview_assigned": False,
+            "interview_result": "未开始",
+            "has_replied": False,
+        },
+    )
+    assert mail_admin.mail_admin_records("mail_type=candidate&pipeline_stage=unreplied&days=0&limit=10")["total"] == 1
+    assert mail_admin.mail_admin_records("mail_type=candidate&pipeline_stage=not_unreplied&days=0&limit=10")["total"] == 0
+    with sqlite3.connect(db) as connection:
+        assert connection.execute(
+            "select from_stage,to_stage from recruiting_candidate_pipeline_events where thread_key=? order by id desc",
+            ("a" * 32,),
+        ).fetchone() == ("interview_invited", "unreplied")
+
+
+@pytest.mark.parametrize(
+    ("stage", "screening_status", "interview_assigned", "interview_result", "has_replied"),
+    (
+        ("unreplied", "未筛选", False, "未开始", False),
+        ("replied", "未筛选", False, "未开始", True),
+        ("interview_invited", "未筛选", True, "未开始", True),
+        ("interview_confirmed", "面试资格", True, "未开始", True),
+        ("interview_passed", "面试通过", True, "通过", True),
+        ("interview_failed", "未通过", True, "不通过", True),
+    ),
+)
+def test_candidate_pipeline_maps_to_existing_base_workflow(
+    stage,
+    screening_status,
+    interview_assigned,
+    interview_result,
+    has_replied,
+):
+    state = mail_admin._pipeline_workflow_state(stage)
+
+    assert state == {
+        "screening_status": screening_status,
+        "interview_assigned": interview_assigned,
+        "interview_result": interview_result,
+        "has_replied": has_replied,
+    }
+    assert mail_admin._effective_candidate_pipeline_stage(state, stage) == stage
 
 
 def test_interest_groups_create_assign_rename_and_delete_to_ungrouped(tmp_path, monkeypatch):
@@ -634,6 +758,8 @@ def test_candidate_share_is_revocable_complete_snapshot(tmp_path, monkeypatch):
     monkeypatch.setenv("MAXREAD_MAIL_ROOT", str(root))
     monkeypatch.delenv("MAXREAD_MAIL_REMOTE_URL", raising=False)
     monkeypatch.setenv("MAXREAD_MAIL_SHARE_SECRET", "test-candidate-share-secret")
+    monkeypatch.setattr(mail_admin, "_update_base_workflow", lambda *_args: None)
+    mail_admin.update_mail_admin_record("a" * 32, {"pipeline_stage": "interview_confirmed"}, "v1")
 
     created = mail_admin.create_mail_candidate_share(["a" * 32], "实验室候选人", 7)
     token = created["share"]["token"]
@@ -647,7 +773,9 @@ def test_candidate_share_is_revocable_complete_snapshot(tmp_path, monkeypatch):
     assert shared["items"][0]["source_accounts"] == ["ZIP Lab"]
     assert shared["items"][0]["purpose_summary"].startswith("申请目的")
     assert shared["items"][0]["doc_url"] == "https://doc"
-    assert shared["items"][0]["screening_label"] == "待筛选"
+    assert shared["items"][0]["screening_label"] == "面试资格"
+    assert shared["items"][0]["pipeline_stage"] == "interview_confirmed"
+    assert shared["items"][0]["pipeline_label"] == "面试邀请确认"
     assert token.startswith("s1_")
     with sqlite3.connect(db) as connection:
         stored = connection.execute(
@@ -941,19 +1069,28 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "recordState={items:[],view:'all',offset:0,limit:20" in html
     assert "候选人资料与来信状态" in html
     assert "<th>摘要</th>" not in html
-    assert "<th>回复</th>" in html
+    assert "<th>进度</th>" in html
+    assert "<th>回复</th>" not in html
     assert "<th>筛选状态</th>" not in html
     assert "<th>面试</th>" not in html
-    assert 'id="record-reply"' in html
+    assert 'id="record-reply"' not in html
+    assert 'class="pipeline-scope-tabs"' in html
+    assert 'id="pipeline-stage-tabs"' in html
     assert 'id="record-account"' in html
     assert 'id="record-type"' not in html
     assert "mail_type:'candidate'" in html
     assert "account:values.account" in html
-    assert '<option value="">回复状态</option>' in html
-    assert "reply:values.reply" in html
+    assert 'data-pipeline-scope="not_unreplied"' in html
+    assert 'data-pipeline-stage=""' in html
+    assert '>全部已推进</button>' in html
+    assert "pipeline_stage:pipelineFilterValue(values)" in html
     assert "updateRecord(" not in html
-    assert "item.has_replied?'已回复':'未回复'" in html
-    assert "['回复状态',item.has_replied?'已回复':'未回复']" in html
+    assert "item.has_replied?'已回复':'未回复'" not in html
+    assert "['回复状态',item.has_replied?'已回复':'未回复']" not in html
+    assert "metric('未回复',metrics.unreplied||0)" in html
+    assert "邮箱扫描超时" in html
+    assert "本轮候选失败" in html
+    assert "runStatusLabel(r)" in html
     assert 'class="ops-details wide"' in html
     assert "height:100dvh" in html
     assert "margin:0 0 0 auto" in html
@@ -977,7 +1114,7 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "重点关注" in html
     assert "setMailView('interest')" in html
     assert "filterSets:{all:" in html
-    assert "interest:{q:'',account:'',reply:'',project:'',tier:'',rank:'0',days:'0'}" in html
+    assert "interest:{q:'',account:'',pipelineScope:'',pipelineStage:'',project:'',tier:'',rank:'0',days:'0'}" in html
     assert "saveRecordFilters()" in html
     assert "applyRecordFilters(recordState.view)" in html
     assert 'id="interest-group-bar"' in html
@@ -989,6 +1126,8 @@ def test_mail_admin_page_uses_compact_master_detail_layout():
     assert "deleteInterestGroup()" in html
     assert "assignSelectedInterestGroup()" in html
     assert "toggleInterested(event" in html
+    assert "updatePipelineStage(event" in html
+    assert "changes:{pipeline_stage:select.value}" in html
     assert "changes:{is_interested:!item.is_interested}" in html
     assert "focus-card" not in html
     assert "rejection" not in html.casefold()
@@ -1017,6 +1156,8 @@ def test_public_candidate_share_page_renders_complete_candidate_fields():
     assert "purpose_summary" in html
     assert "source_accounts" in html
     assert "doc_url" in html
+    assert "pipeline_stage" in html
+    assert "pipeline_label" in html
 
 
 def test_nginx_post_allowlist_excludes_rejection_actions():

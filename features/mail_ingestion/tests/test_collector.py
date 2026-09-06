@@ -35,6 +35,16 @@ class ParserTest(unittest.TestCase):
         self.assertTrue(callable(ImapClient.search_uids))
         self.assertTrue(callable(ImapClient.fetch_raw))
 
+    def test_imap_search_discards_outlook_uid_at_or_below_watermark(self) -> None:
+        class FakeImap:
+            def uid(self, *_args):
+                return "OK", [b"113 115 114"]
+
+        mailbox = object.__new__(ImapClient)
+        mailbox.client = FakeImap()
+
+        self.assertEqual(mailbox.search_uids(113, 100), [114, 115])
+
     def test_parses_candidate_and_pdf(self) -> None:
         parsed = parse_message(sample_message())
         self.assertEqual(parsed.subject, "科研实习申请-浙江大学-林同学")

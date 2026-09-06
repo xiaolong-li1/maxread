@@ -45,6 +45,22 @@ MAIL_PUBLIC_LINKS = (
 SCREENING_STATUSES = ("未筛选", "面试资格", "面试通过", "未通过", "实习生")
 SCREENING_LABELS = {"未筛选": "待筛选", "未通过": "已拒绝"}
 INTERVIEW_RESULTS = ("未开始", "通过", "不通过")
+CANDIDATE_PIPELINE_STAGES = (
+    "unreplied",
+    "replied",
+    "interview_invited",
+    "interview_confirmed",
+    "interview_passed",
+    "interview_failed",
+)
+CANDIDATE_PIPELINE_LABELS = {
+    "unreplied": "未回复",
+    "replied": "已回复",
+    "interview_invited": "已发送面试邀请",
+    "interview_confirmed": "面试邀请确认",
+    "interview_passed": "面试通过",
+    "interview_failed": "面试未通过",
+}
 _ADMIN_ACTION_LOCK = threading.RLock()
 REJECTION_TEMPLATE_KEY = "zip-lab-rejection"
 REJECTION_TYPES = ("internship", "graduate", "general")
@@ -119,7 +135,10 @@ def mail_admin_status() -> dict[str, Any]:
         business_state = "scanning"
     elif str(service.get("ActiveState") or "") != "active":
         business_state = "down"
-    elif latest and int(latest.get("failed_threads") or 0) > 0:
+    elif latest and (
+        str(latest.get("status") or "") in {"failed", "abandoned"}
+        or int(latest.get("failed_threads") or 0) > 0
+    ):
         business_state = "degraded"
     return {
         "ok": True,
@@ -149,13 +168,28 @@ def mail_public_summary() -> dict[str, Any]:
     other_total = 0
     recent_candidates = 0
     statuses: dict[str, int] = {}
+    pipeline_counts: dict[str, int] = {stage: 0 for stage in CANDIDATE_PIPELINE_STAGES}
     latest_time = ""
     if db_path.exists():
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as connection:
             connection.row_factory = sqlite3.Row
+            pipeline_overrides: dict[str, str] = {}
             try:
+                if connection.execute(
+                    "select 1 from sqlite_master where type='table' and name='recruiting_candidate_pipeline'"
+                ).fetchone():
+                    pipeline_overrides = {
+                        str(row["thread_key"]): str(row["stage"])
+                        for row in connection.execute(
+                            "select thread_key,stage from recruiting_candidate_pipeline"
+                        )
+                    }
                 rows = connection.execute(
-                    "select fields_json,latest_time,screening_status,status from recruiting_threads"
+                    """
+                    select thread_key,fields_json,latest_time,last_outgoing_time,
+                           screening_status,interview_assigned,interview_result,status
+                    from recruiting_threads
+                    """
                 ).fetchall()
             except sqlite3.OperationalError:
                 rows = []
@@ -174,6 +208,16 @@ def mail_public_summary() -> dict[str, Any]:
                 candidate_total += 1
                 status = str(row["screening_status"] or "未筛选")
                 statuses[status] = statuses.get(status, 0) + 1
+                pipeline_stage = _effective_candidate_pipeline_stage(
+                    {
+                        "has_replied": bool(str(row["last_outgoing_time"] or "")),
+                        "screening_status": status,
+                        "interview_assigned": bool(row["interview_assigned"]),
+                        "interview_result": str(row["interview_result"] or "未开始"),
+                    },
+                    pipeline_overrides.get(str(row["thread_key"]), ""),
+                )
+                pipeline_counts[pipeline_stage] += 1
                 parsed = _parse_datetime(current_time)
                 if parsed is not None and parsed >= cutoff:
                     recent_candidates += 1
@@ -183,10 +227,12 @@ def mail_public_summary() -> dict[str, Any]:
         "metrics": {
             "candidate_total": candidate_total,
             "unscreened": statuses.get("未筛选", 0),
+            "unreplied": pipeline_counts["unreplied"],
             "recent_candidates": recent_candidates,
             "other_total": other_total,
         },
         "status_counts": statuses,
+        "pipeline_counts": pipeline_counts,
         "links": [
             {"title": title, "description": description, "url": f"{MAIL_BASE_ROOT}&view={view}", "group": group}
             for title, description, view, group in MAIL_PUBLIC_LINKS
@@ -207,6 +253,7 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
     reply = str(query.get("reply", [""])[0] or "").strip().lower()
     interest = str(query.get("interest", [""])[0] or "").strip().lower()
     interest_group = str(query.get("interest_group", ["all"])[0] or "all").strip().lower()
+    pipeline_stage = str(query.get("pipeline_stage", [""])[0] or "").strip().lower()
     tier = str(query.get("tier", [""])[0] or "").strip().lower()
     rank_percentile = _bounded_int(query.get("rank_percentile", ["0"])[0], 0, 0, 100)
     days = _bounded_int(query.get("days", ["30"])[0], 30, 0, 3650)
@@ -224,6 +271,8 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
         raise ValueError("不支持的重点候选人视图")
     if interest_group not in {"all", "ungrouped"} and not re.fullmatch(r"\d+", interest_group):
         raise ValueError("不支持的重点候选人分组")
+    if pipeline_stage and pipeline_stage not in (*CANDIDATE_PIPELINE_STAGES, "not_unreplied"):
+        raise ValueError("不支持的候选人推进阶段")
     account_labels = {"zip-lab": "ZIP Lab", "bohan": "Bohan"}
     if account and account not in account_labels:
         raise ValueError("不支持的来源邮箱")
@@ -238,6 +287,16 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
             connection.row_factory = sqlite3.Row
             group_by_id: dict[int, dict[str, Any]] = {}
             membership: dict[str, int] = {}
+            pipeline_overrides: dict[str, str] = {}
+            if connection.execute(
+                "select 1 from sqlite_master where type='table' and name='recruiting_candidate_pipeline'"
+            ).fetchone():
+                pipeline_overrides = {
+                    str(row["thread_key"]): str(row["stage"])
+                    for row in connection.execute(
+                        "select thread_key,stage from recruiting_candidate_pipeline"
+                    )
+                }
             if connection.execute(
                 "select 1 from sqlite_master where type='table' and name='recruiting_interest_groups'"
             ).fetchone():
@@ -279,6 +338,11 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
             ).fetchall()
             for row in rows:
                 item = _mail_record(row)
+                item["pipeline_stage"] = _effective_candidate_pipeline_stage(
+                    item,
+                    pipeline_overrides.get(item["thread_key"], ""),
+                )
+                item["pipeline_label"] = CANDIDATE_PIPELINE_LABELS[item["pipeline_stage"]]
                 rejection = rejection_by_thread.get(item["thread_key"])
                 item["rejection"] = rejection
                 item["rejection_status"] = str(rejection.get("status") or "") if rejection else ""
@@ -313,6 +377,10 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
                 if interest == "only" and interest_group == "ungrouped" and item["interest_group_id"] is not None:
                     continue
                 if interest == "only" and interest_group.isdigit() and item["interest_group_id"] != int(interest_group):
+                    continue
+                if pipeline_stage == "not_unreplied" and item["pipeline_stage"] == "unreplied":
+                    continue
+                if pipeline_stage and pipeline_stage != "not_unreplied" and item["pipeline_stage"] != pipeline_stage:
                     continue
                 if screening and item["screening_status"] != screening:
                     continue
@@ -354,6 +422,10 @@ def mail_admin_records(query_string: str = "") -> dict[str, Any]:
         "filters": {
             "screening_statuses": list(SCREENING_STATUSES),
             "interview_results": list(INTERVIEW_RESULTS),
+            "pipeline_stages": [
+                {"value": value, "label": CANDIDATE_PIPELINE_LABELS[value]}
+                for value in CANDIDATE_PIPELINE_STAGES
+            ],
             "projects": ["MLSys", "Agentic Infrastructure", "Kernel Efficiency", "World Model"],
             "accounts": account_labels,
         },
@@ -500,6 +572,22 @@ def create_mail_candidate_share(
             clean_keys,
         ).fetchall()
         by_key = {str(row["thread_key"]): _mail_record(row) for row in rows}
+        pipeline_overrides: dict[str, str] = {}
+        if connection.execute(
+            "select 1 from sqlite_master where type='table' and name='recruiting_candidate_pipeline'"
+        ).fetchone():
+            pipeline_overrides = {
+                str(row["thread_key"]): str(row["stage"])
+                for row in connection.execute(
+                    "select thread_key,stage from recruiting_candidate_pipeline"
+                )
+            }
+        for key, item in by_key.items():
+            item["pipeline_stage"] = _effective_candidate_pipeline_stage(
+                item,
+                pipeline_overrides.get(key, ""),
+            )
+            item["pipeline_label"] = CANDIDATE_PIPELINE_LABELS[item["pipeline_stage"]]
         missing = [key for key in clean_keys if key not in by_key]
         if missing:
             raise ValueError("部分候选人记录不存在或已失效")
@@ -1250,6 +1338,8 @@ def _candidate_share_item(item: dict[str, Any]) -> dict[str, Any]:
         "screening_status": str(item.get("screening_status") or "未筛选"),
         "screening_label": str(item.get("screening_label") or item.get("screening_status") or "未筛选"),
         "is_interested": bool(item.get("is_interested")),
+        "pipeline_stage": str(item.get("pipeline_stage") or "unreplied"),
+        "pipeline_label": str(item.get("pipeline_label") or CANDIDATE_PIPELINE_LABELS["unreplied"]),
         "doc_url": str(item.get("doc_url") or ""),
     }
 
@@ -1258,6 +1348,28 @@ def _candidate_share_default_title(items: list[dict[str, Any]]) -> str:
     names = [str(item.get("name") or "unknown") for item in items]
     visible = "、".join(names[:3])
     return visible if len(names) <= 3 else f"{visible}等{len(names)}人"
+
+
+def _effective_candidate_pipeline_stage(item: dict[str, Any], override: str = "") -> str:
+    clean_override = str(override or "")
+    if clean_override in CANDIDATE_PIPELINE_STAGES:
+        return clean_override
+    result = str(item.get("interview_result") or "未开始")
+    screening = str(item.get("screening_status") or "未筛选")
+    assigned = bool(item.get("interview_assigned"))
+    if result == "通过" or screening in {"面试通过", "实习生"}:
+        derived = "interview_passed"
+    elif result == "不通过" or screening == "未通过":
+        derived = "interview_failed"
+    elif assigned and screening == "面试资格":
+        derived = "interview_confirmed"
+    elif assigned:
+        derived = "interview_invited"
+    elif bool(item.get("has_replied")):
+        derived = "replied"
+    else:
+        derived = "unreplied"
+    return derived
 
 
 def _insert_signed_candidate_share(
@@ -1439,6 +1551,30 @@ def _ensure_interest_group_schema(connection: sqlite3.Connection) -> None:
         );
         create index if not exists recruiting_interest_group_members_group_idx
         on recruiting_interest_group_members(group_id,thread_key);
+        """
+    )
+    connection.commit()
+
+
+def _ensure_candidate_pipeline_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        create table if not exists recruiting_candidate_pipeline(
+            thread_key text primary key,
+            stage text not null,
+            updated_at text not null
+        );
+        create table if not exists recruiting_candidate_pipeline_events(
+            id integer primary key autoincrement,
+            thread_key text not null,
+            from_stage text not null,
+            to_stage text not null,
+            created_at text not null
+        );
+        create index if not exists recruiting_candidate_pipeline_stage_idx
+        on recruiting_candidate_pipeline(stage,thread_key);
+        create index if not exists recruiting_candidate_pipeline_events_thread_idx
+        on recruiting_candidate_pipeline_events(thread_key,id);
         """
     )
     connection.commit()
@@ -1976,7 +2112,7 @@ def update_mail_admin_record(thread_key: str, changes: dict[str, Any], expected_
     clean_key = str(thread_key or "").strip()
     if not re.fullmatch(r"[0-9a-f]{32}", clean_key):
         raise ValueError("无效邮件线程")
-    allowed = {"screening_status", "interview_assigned", "interview_result", "is_interested"}
+    allowed = {"screening_status", "interview_assigned", "interview_result", "is_interested", "pipeline_stage"}
     requested = {str(key): value for key, value in dict(changes or {}).items() if key in allowed}
     if not requested:
         raise ValueError("没有可更新字段")
@@ -1998,6 +2134,29 @@ def update_mail_admin_record(thread_key: str, changes: dict[str, Any], expected_
             "sync_status": "local",
             "sync_attempts": 0,
             "sync_error": "",
+        }
+    if "pipeline_stage" in requested:
+        if len(requested) != 1:
+            raise ValueError("推进阶段不能与其他流程字段合并提交")
+        with _ADMIN_ACTION_LOCK:
+            action = _stage_candidate_pipeline_action(
+                db_path,
+                clean_key,
+                str(requested["pipeline_stage"] or ""),
+                expected_updated_at,
+            )
+            if int(action.get("action_id") or 0):
+                delivery = _deliver_mail_admin_action(db_path, int(action["action_id"]))
+            else:
+                delivery = {"status": "committed", "attempts": 0, "last_error": ""}
+        return {
+            "ok": True,
+            "thread_key": clean_key,
+            "state": action["state"],
+            "updated_at": action["updated_at"],
+            "sync_status": delivery["status"],
+            "sync_attempts": delivery["attempts"],
+            "sync_error": delivery["last_error"],
         }
     with _ADMIN_ACTION_LOCK:
         action = _stage_mail_admin_action(
@@ -2073,6 +2232,155 @@ def _update_local_interest(
             )
         connection.commit()
     return {"state": {"is_interested": bool(desired)}, "updated_at": now}
+
+
+def _stage_candidate_pipeline_action(
+    db_path: Path,
+    thread_key: str,
+    stage: str,
+    expected_updated_at: str,
+) -> dict[str, Any]:
+    clean_stage = str(stage or "").strip().lower()
+    if clean_stage not in CANDIDATE_PIPELINE_STAGES:
+        raise ValueError("不支持的候选人推进阶段")
+    now = datetime.now(timezone.utc).isoformat()
+    with _ADMIN_ACTION_LOCK, sqlite3.connect(db_path, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        _ensure_admin_actions_schema(connection)
+        _ensure_candidate_pipeline_schema(connection)
+        connection.execute("begin immediate")
+        row = connection.execute(
+            "select * from recruiting_threads where thread_key=?",
+            (thread_key,),
+        ).fetchone()
+        if row is None or str(row["status"] or "") == "inactive":
+            raise ValueError("邮件记录不存在")
+        if expected_updated_at and str(row["updated_at"] or "") != str(expected_updated_at):
+            raise ValueError("记录已被其他操作更新，请刷新后重试")
+        try:
+            fields = json.loads(str(row["fields_json"] or "{}"))
+        except json.JSONDecodeError:
+            fields = {}
+        if str(fields.get("mail_type") or "other") == "other":
+            raise ValueError("其他邮件不能标记推进状态")
+        record_id = str(row["base_record_id"] or "").strip()
+        if not record_id:
+            raise ValueError("该记录尚未绑定飞书 Base，不能修改")
+        item = _mail_record(row)
+        current_row = connection.execute(
+            "select stage from recruiting_candidate_pipeline where thread_key=?",
+            (thread_key,),
+        ).fetchone()
+        current = _effective_candidate_pipeline_stage(
+            item,
+            str(current_row["stage"] or "") if current_row else "",
+        )
+        if current == clean_stage:
+            connection.rollback()
+            return {
+                "action_id": 0,
+                "state": {"pipeline_stage": current, "pipeline_label": CANDIDATE_PIPELINE_LABELS[current]},
+                "updated_at": str(row["updated_at"] or ""),
+            }
+        old_workflow = _workflow_state(row)
+        old_workflow["has_replied"] = bool(item["has_replied"])
+        new_workflow = _pipeline_workflow_state(clean_stage)
+        cursor = connection.execute(
+            """
+            update recruiting_threads
+            set screening_status=?,interview_assigned=?,interview_result=?,updated_at=?
+            where thread_key=? and updated_at=?
+            """,
+            (
+                new_workflow["screening_status"],
+                int(new_workflow["interview_assigned"]),
+                new_workflow["interview_result"],
+                now,
+                thread_key,
+                str(row["updated_at"] or ""),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("记录在写入期间发生变化")
+        connection.execute(
+            """
+            insert into recruiting_candidate_pipeline(thread_key,stage,updated_at)
+            values(?,?,?) on conflict(thread_key) do update set stage=excluded.stage,updated_at=excluded.updated_at
+            """,
+            (thread_key, clean_stage, now),
+        )
+        connection.execute(
+            """
+            insert into recruiting_candidate_pipeline_events(thread_key,from_stage,to_stage,created_at)
+            values(?,?,?,?)
+            """,
+            (thread_key, current, clean_stage, now),
+        )
+        action_id = connection.execute(
+            """
+            insert into recruiting_admin_actions(
+                operation_id,thread_key,record_id,old_json,new_json,status,
+                attempts,last_error,created_at,updated_at
+            ) values(?,?,?,?,?,'pending',0,'',?,?)
+            """,
+            (
+                uuid.uuid4().hex,
+                thread_key,
+                record_id,
+                json.dumps(old_workflow, ensure_ascii=False),
+                json.dumps(new_workflow, ensure_ascii=False),
+                now,
+                now,
+            ),
+        ).lastrowid
+        connection.commit()
+    return {
+        "action_id": int(action_id),
+        "state": {"pipeline_stage": clean_stage, "pipeline_label": CANDIDATE_PIPELINE_LABELS[clean_stage]},
+        "updated_at": now,
+    }
+
+
+def _pipeline_workflow_state(stage: str) -> dict[str, Any]:
+    states = {
+        "unreplied": {
+            "screening_status": "未筛选",
+            "interview_assigned": False,
+            "interview_result": "未开始",
+            "has_replied": False,
+        },
+        "replied": {
+            "screening_status": "未筛选",
+            "interview_assigned": False,
+            "interview_result": "未开始",
+            "has_replied": True,
+        },
+        "interview_invited": {
+            "screening_status": "未筛选",
+            "interview_assigned": True,
+            "interview_result": "未开始",
+            "has_replied": True,
+        },
+        "interview_confirmed": {
+            "screening_status": "面试资格",
+            "interview_assigned": True,
+            "interview_result": "未开始",
+            "has_replied": True,
+        },
+        "interview_passed": {
+            "screening_status": "面试通过",
+            "interview_assigned": True,
+            "interview_result": "通过",
+            "has_replied": True,
+        },
+        "interview_failed": {
+            "screening_status": "未通过",
+            "interview_assigned": True,
+            "interview_result": "不通过",
+            "has_replied": True,
+        },
+    }
+    return dict(states[stage])
 
 
 def _stage_mail_admin_action(
