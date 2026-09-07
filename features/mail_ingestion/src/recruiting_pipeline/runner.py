@@ -170,8 +170,12 @@ class RecruitingRunner:
     def _load_threads(self) -> tuple[dict[str, ThreadEnvelope], set[str]]:
         messages = self.store.messages()
         processing = self.store.message_processing_state()
+        thread_rows = {str(row["thread_key"]): row for row in self.store.list_threads()}
+        thread_aliases = self.store.thread_aliases()
         grouped: dict[str, list[tuple[StoredMessage, Any]]] = {}
+        candidate_addresses_by_key: dict[str, set[str]] = {}
         changed: set[str] = set()
+        moved_from: set[str] = set()
         message_id_to_key: dict[str, str] = {}
         message_updates: list[tuple[int, str, str, str]] = []
         for message in messages:
@@ -179,14 +183,19 @@ class RecruitingRunner:
                 headers = read_headers(message.raw_path)
             except (OSError, ValueError):
                 continue
-            key = next(
+            parent_key = next(
                 (
                     message_id_to_key[parent]
                     for parent in (headers.message_id, headers.in_reply_to, *headers.references)
                     if parent in message_id_to_key
                 ),
-                thread_key(message, headers, self._participant_addresses),
+                "",
             )
+            default_key = thread_key(message, headers, self._participant_addresses)
+            address = candidate_address(headers, self._participant_addresses, message.body_text).casefold()
+            key = _resolve_thread_alias(parent_key or default_key, thread_aliases)
+            if address and address not in self._participant_addresses:
+                candidate_addresses_by_key.setdefault(key, set()).add(address)
             # Preserve the canonical Message-ID mapping so a reply from a
             # group member's personal address is joined to the candidate's
             # thread instead of becoming a second candidate.
@@ -198,8 +207,11 @@ class RecruitingRunner:
             old = processing.get(message.id)
             if old is None or not old[1] or old[0] != key:
                 changed.add(key)
+            if old is not None and old[0] != key:
+                moved_from.add(old[0])
         self.store.upsert_messages(message_updates)
-        thread_rows = {str(row["thread_key"]): row for row in self.store.list_threads()}
+        for old_key in moved_from:
+            self.store.deactivate_thread_if_empty(old_key)
         # A backfill Base write can fail after durable mail/document state is
         # complete. The explicit pending marker retries only that repair;
         # unrelated historical rows with an intentionally absent mapping stay
@@ -212,7 +224,15 @@ class RecruitingRunner:
                 and str(row["status"] or "") == "base_backfill_pending"
             ):
                 changed.add(key)
-        return {key: build_envelope(items, self._participant_addresses, key=key) for key, items in grouped.items()}, changed
+        return {
+            key: build_envelope(
+                items,
+                self._participant_addresses,
+                key=key,
+                candidate_addresses=candidate_addresses_by_key.get(key, set()),
+            )
+            for key, items in grouped.items()
+        }, changed
 
     def _extract_changed(self, envelopes: dict[str, ThreadEnvelope], changed_keys: set[str]):
         candidates: list[ThreadEnvelope] = []
@@ -877,6 +897,15 @@ def _other_fields(envelope: ThreadEnvelope, summary: str | None = None) -> Candi
 
 
 _MISSING_CANDIDATE_NAMES = {"", "unknown", "未知", "未提供", "none", "n/a", "-", "—"}
+
+
+def _resolve_thread_alias(key: str, aliases: dict[str, str]) -> str:
+    current = key
+    visited: set[str] = set()
+    while current in aliases and current not in visited:
+        visited.add(current)
+        current = aliases[current]
+    return current
 
 
 def _restore_candidate_name(fields: CandidateFields, envelope: ThreadEnvelope) -> CandidateFields:

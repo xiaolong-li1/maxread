@@ -95,7 +95,12 @@ def thread_key(message: StoredMessage, headers: HeaderInfo, mailbox_address: str
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
 
 
-def build_envelope(messages: list[tuple[StoredMessage, HeaderInfo]], mailbox_address: str | Iterable[str], key: str | None = None) -> ThreadEnvelope:
+def build_envelope(
+    messages: list[tuple[StoredMessage, HeaderInfo]],
+    mailbox_address: str | Iterable[str],
+    key: str | None = None,
+    candidate_addresses: Iterable[str] | None = None,
+) -> ThreadEnvelope:
     if not messages:
         raise ValueError("cannot build an empty thread")
     source_accounts = frozenset(item.source_account for item, _headers in messages if item.source_account)
@@ -110,6 +115,10 @@ def build_envelope(messages: list[tuple[StoredMessage, HeaderInfo]], mailbox_add
     first_message, first_headers = unique_messages[0]
     key = key or thread_key(first_message, first_headers, mailbox_address)
     candidate = candidate_address(first_headers, mailbox_address, first_message.body_text)
+    candidate_aliases = {
+        candidate,
+        *(str(value).strip().casefold() for value in candidate_addresses or () if str(value).strip()),
+    }
     ordered = tuple(sorted((item[0] for item in unique_messages), key=lambda item: item.received_at or ""))
     # A group member may reply directly from a personal address (e.g. Bohan)
     # while CC'ing the shared mailbox.  Treat only the candidate address as an
@@ -117,14 +126,14 @@ def build_envelope(messages: list[tuple[StoredMessage, HeaderInfo]], mailbox_add
     incoming = tuple(
         item
         for item, headers in unique_messages
-        if headers.sender == candidate
+        if headers.sender in candidate_aliases
         or (
             headers.subject.casefold().startswith(("fwd", "fw", "转发"))
             and _FORWARDED_MARKER.search(item.body_text)
             and candidate in item.body_text.casefold()
         )
     )
-    outgoing = tuple(item for item, headers in unique_messages if headers.sender != candidate)
+    outgoing = tuple(item for item, _headers in unique_messages if item not in incoming)
     folders = frozenset(item.mailbox for item, _ in unique_messages)
     return ThreadEnvelope(
         key=key,

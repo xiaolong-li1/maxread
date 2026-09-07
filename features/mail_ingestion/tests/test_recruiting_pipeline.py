@@ -18,7 +18,7 @@ from recruiting_pipeline.cli import build_parser
 from recruiting_pipeline.base_sync import BASE_RECORD_FIELDS, BaseSync, _cell_url, merge_base_profile
 from recruiting_pipeline.attachment_text import extract_attachment_text
 from recruiting_pipeline.models import ProcessedThread, StoredMessage, ThreadEnvelope
-from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _needs_material_document, _other_fields, _restore_candidate_name, _within_days
+from recruiting_pipeline.runner import RecruitingRunner, _merge_status, _needs_material_document, _other_fields, _resolve_thread_alias, _restore_candidate_name, _within_days
 from recruiting_pipeline.llm import _fields_from_json, _strip_json_fence
 from recruiting_pipeline.institution_tags import C9, PROJECT_985, classify_institution
 from recruiting_pipeline.models import CandidateFields
@@ -59,6 +59,42 @@ class RecruitingPipelineTest(unittest.TestCase):
         fields = CandidateFields(name="李四", mail_type="candidate").normalized()
 
         assert _restore_candidate_name(fields, envelope).name == "李四"
+
+    def test_explicit_thread_alias_resolves_to_canonical_without_guessing(self) -> None:
+        self.assertEqual(_resolve_thread_alias("followup", {"followup": "canonical"}), "canonical")
+        self.assertEqual(
+            _resolve_thread_alias("second", {"second": "first", "first": "canonical"}),
+            "canonical",
+        )
+        self.assertEqual(_resolve_thread_alias("first", {"first": "second", "second": "first"}), "first")
+
+    def test_candidate_alias_is_classified_as_incoming_in_one_envelope(self) -> None:
+        first = StoredMessage(1, "1", "INBOX", "申请", "张三", "old@example.com", "2026-09-04", "申请", Path("/tmp/1"))
+        second = StoredMessage(2, "2", "INBOX", "询问", "张三", "new@example.com", "2026-09-07", "询问进展", Path("/tmp/2"))
+        first_headers = HeaderInfo("<first>", "", (), "申请", "old@example.com", ("lab@example.com",))
+        second_headers = HeaderInfo("<second>", "", (), "询问", "new@example.com", ("lab@example.com",))
+
+        envelope = build_envelope(
+            [(first, first_headers), (second, second_headers)],
+            "lab@example.com",
+            key="canonical",
+            candidate_addresses={"old@example.com", "new@example.com"},
+        )
+
+        self.assertEqual(envelope.incoming, (first, second))
+        self.assertEqual(envelope.outgoing, ())
+
+    def test_list_purpose_summary_is_normalized_to_lines(self) -> None:
+        fields = _fields_from_json(
+            {
+                "name": "张三",
+                "mail_type": "candidate",
+                "purpose_summary": ["申请目的：加入实验室", "科研经历：系统优化"],
+            },
+            None,
+        )
+
+        self.assertEqual(fields.purpose_summary, "申请目的：加入实验室\n科研经历：系统优化")
 
     def test_docs_sync_accepts_cloud_attachment_outside_project_root(self) -> None:
         settings = SimpleNamespace(
@@ -303,7 +339,7 @@ class RecruitingPipelineTest(unittest.TestCase):
 
     def test_ai_can_explicitly_report_rank_missing(self) -> None:
         fields = _fields_from_json({
-            "name": "李奕博",
+            "name": "张三",
             "mail_type": "candidate",
             "academic_display": "均分 93.38/100 · GPA 4.02/4.3",
             "rank": "未提供",
@@ -364,6 +400,20 @@ class RecruitingPipelineTest(unittest.TestCase):
             store.mark_document_messages_materialized("key", "doc", [1, 2, 2])
             self.assertEqual(store.document_materialized_message_ids("key", "doc"), {1, 2})
             self.assertEqual(store.document_materialized_message_ids("key", "other-doc"), set())
+
+    def test_pipeline_store_persists_explicit_thread_alias_and_deactivates_empty_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = PipelineStore(Path(temp) / "mail.sqlite3")
+            store.initialize()
+            fields = CandidateFields(name="张三", mail_type="candidate", projects=["World Model"]).normalized()
+            store.save_thread("canonical", "candidate@example.com", "initial", fields)
+            store.save_thread("followup", "candidate@example.com", "followup", fields)
+
+            store.set_thread_alias("followup", "canonical", "confirmed same candidate")
+
+            self.assertEqual(store.thread_aliases(), {"followup": "canonical"})
+            self.assertTrue(store.deactivate_thread_if_empty("followup"))
+            self.assertEqual(store.get_thread("followup")["status"], "inactive")
 
     def test_document_token_is_checkpointed_before_media_upload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

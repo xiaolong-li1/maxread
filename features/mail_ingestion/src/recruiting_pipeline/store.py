@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS recruiting_document_messages (
     materialized_at TEXT NOT NULL,
     PRIMARY KEY(thread_key, document_id, message_record_id)
 );
+CREATE TABLE IF NOT EXISTS recruiting_thread_aliases (
+    alias_key TEXT PRIMARY KEY,
+    canonical_key TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS recruiting_mail_templates (
     template_key TEXT PRIMARY KEY,
     subject_text TEXT NOT NULL,
@@ -247,6 +254,55 @@ class PipelineStore:
         self.initialize()
         with self.connect() as conn:
             return {int(row["message_record_id"]): str(row["thread_key"]) for row in conn.execute("SELECT message_record_id,thread_key FROM recruiting_messages")}
+
+    def thread_aliases(self) -> dict[str, str]:
+        self.initialize()
+        with self.connect() as conn:
+            return {
+                str(row["alias_key"]): str(row["canonical_key"])
+                for row in conn.execute("select alias_key,canonical_key from recruiting_thread_aliases")
+            }
+
+    def set_thread_alias(self, alias_key: str, canonical_key: str, reason: str = "manual") -> None:
+        if not alias_key or not canonical_key or alias_key == canonical_key:
+            raise ValueError("thread alias requires two distinct keys")
+        now = datetime.now(UTC).isoformat()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "select thread_key,status from recruiting_threads where thread_key in (?,?)",
+                (alias_key, canonical_key),
+            ).fetchall()
+            states = {str(row["thread_key"]): str(row["status"] or "") for row in rows}
+            if alias_key not in states or canonical_key not in states:
+                raise ValueError("thread alias target does not exist")
+            if states[canonical_key] == "inactive":
+                raise ValueError("canonical thread is inactive")
+            conn.execute(
+                """
+                insert into recruiting_thread_aliases(alias_key,canonical_key,reason,created_at,updated_at)
+                values(?,?,?,?,?)
+                on conflict(alias_key) do update set
+                    canonical_key=excluded.canonical_key,
+                    reason=excluded.reason,
+                    updated_at=excluded.updated_at
+                """,
+                (alias_key, canonical_key, reason, now, now),
+            )
+
+    def deactivate_thread_if_empty(self, thread_key: str) -> bool:
+        now = datetime.now(UTC).isoformat()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                update recruiting_threads set status='inactive',updated_at=?
+                where thread_key=? and status<>'inactive'
+                  and not exists (
+                    select 1 from recruiting_messages where thread_key=recruiting_threads.thread_key
+                  )
+                """,
+                (now, thread_key),
+            )
+        return bool(cursor.rowcount)
 
     def message_processing_state(self) -> dict[int, tuple[str, bool]]:
         self.initialize()

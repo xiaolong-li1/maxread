@@ -155,7 +155,14 @@ def _fields_from_json(payload: dict[str, Any], previous: CandidateFields | None)
         academic_display=str(payload.get("academic_display") or old.academic_display),
         rank=str(payload.get("rank") or old.rank),
         rank_evidence=str(payload.get("rank_evidence") or old.rank_evidence),
-        purpose_summary=str(payload.get("purpose_summary") or old.purpose_summary),
+        purpose_summary=_summary_text(payload.get("purpose_summary"), old.purpose_summary),
         rejection_recommendation=str(payload.get("rejection_recommendation") or old.rejection_recommendation),
     )
     return fields.normalized()
+
+
+def _summary_text(value: Any, fallback: str) -> str:
+    selected = fallback if value is None or value == "" else value
+    if isinstance(selected, (list, tuple)):
+        return "\n".join(str(item).strip() for item in selected if str(item).strip()) or fallback
+    return str(selected)
