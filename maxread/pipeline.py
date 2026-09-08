@@ -127,6 +127,7 @@ class MaxReadPipeline:
                     bundle = self.document_client.fetch(ref)
                 else:
                     bundle = self.arxiv.fetch(ref.paper_id)
+                    bundle = _recover_pdf_only_arxiv_bundle(ref, bundle)
             except Exception as exc:
                 bundle = (
                     _limited_document_bundle(ref, str(exc))
@@ -831,6 +832,38 @@ def _paper_macro_kwargs(bundle: PaperBundle) -> dict:
         "latex_macros": bundle.source_latex_macros,
         "latex_arg_macros": bundle.source_latex_arg_macros,
     }
+
+
+def _recover_pdf_only_arxiv_bundle(ref: PaperRef, bundle: PaperBundle) -> PaperBundle:
+    if str(bundle.source_text or "").strip() or bundle.pdf_path is None or bundle.source_path is None:
+        return bundle
+    try:
+        with bundle.source_path.open("rb") as handle:
+            pdf_only = handle.read(5) == b"%PDF-"
+    except OSError:
+        return bundle
+    if not pdf_only:
+        return bundle
+    try:
+        from .document_source import _pdf_bundle
+
+        recovered = _pdf_bundle(
+            ref,
+            bundle.metadata.pdf_url or ref.url,
+            bundle.pdf_path,
+            list(bundle.parse_warnings),
+        )
+    except Exception as exc:
+        bundle.parse_warnings.append(f"PDF-only arXiv layout recovery failed: {exc}")
+        return bundle
+    recovered.metadata = bundle.metadata
+    recovered.metadata.source_label = "arXiv PDF-only submission"
+    recovered.pdf_text = bundle.pdf_text
+    recovered.parse_warnings = list(dict.fromkeys([
+        *recovered.parse_warnings,
+        "arXiv source endpoint returned a PDF-only submission; used PDF layout evidence",
+    ]))
+    return recovered
 
 
 def _require_renderable_source_figures(bundle: PaperBundle, figures) -> None:
@@ -1874,10 +1907,9 @@ def _source_required_message(paper_id: str, warnings) -> str:
         details = "TeX source unavailable"
     return (
         f"这篇我先不生成完整文档：{paper_id}\n"
-        f"原因：需要 TeX source 才能稳定解析公式、图片和图文对应；当前没有拿到 source。\n"
+        f"原因：arXiv 没有返回可解析的 TeX，PDF 版面解析也未形成足够的正文证据。\n"
         f"细节：{details}\n"
-        f"你可以在 arXiv 网页点 Download source 下载源码包，然后本地执行：\n"
-        f"cd /Users/xiaolong/projects/maxread && python3 -m maxread.cli import-source {paper_id} /path/to/source.tar"
+        "如果 arXiv 页面提供 Download source，可在管理端上传源码包后重试；页面没有该入口时无需寻找不存在的源码。"
     )
 
 

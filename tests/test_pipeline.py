@@ -4,7 +4,7 @@ from pathlib import Path
 
 from maxread.db import Store
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure, PaperRef
-from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_generated_paper_title, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _load_successful_section_outputs, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _published_document_title_from_payload, _replace_paper_method_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _sectional_material_assignments, _write_paper_artifact, _write_section_generation_attempt
+from maxread.pipeline import IncompleteGenerationError, MaxReadPipeline, _describe_figures_for_prompt, _deterministic_editorial_validation, _duplicate_markdown_table_sections, _extract_generated_paper_title, _extract_project_summary, _extract_section_output, _generate_complete_paper_markdown, _generate_sectional_paper_markdown, _global_sectional_uniqueness_errors, _load_retry_context, _load_successful_section_outputs, _paper_method_markdown, _paper_method_source_context, _paper_review_source_context, _post_publish_failure_message, _published_document_title_from_payload, _recover_pdf_only_arxiv_bundle, _replace_paper_method_markdown, _require_renderable_source_figures, _sanitize_repository_markdown, _section_output_errors, _sectional_material_assignments, _write_paper_artifact, _write_section_generation_attempt
 from maxread.quality import PrePublishQualityError
 from maxread.visual_qa import VisualQAController
 from maxread.workflow import WorkflowEvent, WorkflowState
@@ -961,11 +961,40 @@ def test_pipeline_requires_source(tmp_path):
     pipeline = MaxReadPipeline(store, FakeArxivNoSource(), feishu, FakeLLM(), require_source=True)
     result = pipeline.process_ref(PaperRef("2604.12946", "https://arxiv.org/abs/2604.12946"))
     assert result.doc_url == ""
-    assert "需要 TeX source" in result.error
+    assert "PDF 版面解析" in result.error
     assert feishu.published == []
     record = store.get_paper("2604.12946")
     assert record.status == "needs_source"
     store.close()
+
+
+def test_pdf_only_arxiv_source_recovers_layout_evidence(tmp_path):
+    import fitz
+
+    pdf_path = tmp_path / "2608.03214.pdf"
+    document = fitz.open()
+    page = document.new_page(width=595, height=842)
+    page.insert_text((60, 70), "Agent Operating Architecture", fontsize=22)
+    page.insert_text((60, 120), "3 Runtime and Coordination Plane", fontsize=16)
+    page.draw_rect(fitz.Rect(90, 220, 500, 470), color=(0, 0, 0), fill=(0.9, 0.95, 1.0))
+    page.insert_text((140, 340), "intent -> scheduler -> runtime", fontsize=13)
+    page.insert_text((60, 500), "Figure 1: Runtime coordination architecture.", fontsize=10)
+    document.save(pdf_path)
+    document.close()
+    bundle = FakeArxivNoSource().fetch("2608.03214")
+    bundle.pdf_path = pdf_path
+    bundle.source_path = pdf_path
+
+    recovered = _recover_pdf_only_arxiv_bundle(
+        PaperRef("2608.03214", "https://arxiv.org/abs/2608.03214"),
+        bundle,
+    )
+
+    assert recovered.metadata.source_kind == "arxiv"
+    assert recovered.metadata.source_label == "arXiv PDF-only submission"
+    assert "Runtime and Coordination Plane" in recovered.source_text
+    assert recovered.source_figures
+    assert any("PDF-only submission" in item for item in recovered.parse_warnings)
 
 
 def test_describe_figures_for_prompt_uses_image_reader(tmp_path):

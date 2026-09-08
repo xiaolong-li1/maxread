@@ -255,6 +255,7 @@ def _pdf_bundle(ref: PaperRef, url: str, pdf_path: Path, warnings: list[str]) ->
         figure_dir = source_dir / "pdf_figures"
         figure_dir.mkdir(parents=True, exist_ok=True)
         source_text, headings, title = _structured_pdf_text(document)
+        source_text = _clip_pdf_layout_text(source_text)
         figures = _pdf_figures(document, headings, source_dir, figure_dir, warnings)
         tables = _pdf_tables(document, warnings)
         metadata_title = str(document.metadata.get("title") or "").strip()
@@ -295,6 +296,14 @@ def _pdf_bundle(ref: PaperRef, url: str, pdf_path: Path, warnings: list[str]) ->
             f"Recovered {len(figures)} figures and {len(tables)} tables from the PDF layout",
         ],
     )
+
+
+def _clip_pdf_layout_text(text: str, limit: int = 120_000) -> str:
+    if len(text) <= limit:
+        return text
+    head = int(limit * 0.75)
+    tail = limit - head
+    return text[:head] + "\n\n[... PDF layout middle omitted ...]\n\n" + text[-tail:]
 
 
 def _structured_pdf_text(document) -> tuple[str, list[tuple[int, float, str]], str]:
