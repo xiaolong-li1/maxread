@@ -247,6 +247,18 @@ class FeishuClient:
         width: int = 720,
         height: int = 0,
     ) -> Dict[str, Any]:
+        source = Path(image_path).expanduser().resolve()
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        upload_cwd = None
+        try:
+            source.relative_to(Path.cwd().resolve())
+            upload_path = _safe_relative_path(str(source))
+        except ValueError:
+            # Scope only this CLI process to the source directory so images
+            # on another filesystem do not need a second upload-cache copy.
+            upload_cwd = source.parent
+            upload_path = "./" + source.name
         args = [
             self.cli,
             "docs",
@@ -258,7 +270,7 @@ class FeishuClient:
             "--type",
             "image",
             "--file",
-            _safe_relative_path(image_path),
+            upload_path,
             "--align",
             "center",
             "--width",
@@ -268,6 +280,8 @@ class FeishuClient:
             args += ["--height", str(height)]
         if caption:
             args += ["--caption", caption]
+        if upload_cwd is not None:
+            return self._json(args, cwd=upload_cwd).data
         return self._json(args).data
 
     def find_text_block_id(self, doc_url: str, text: str) -> str:
@@ -568,11 +582,17 @@ class FeishuClient:
                     _terminate_process(proc)
             time.sleep(2)
 
-    def _json(self, args: List[str]) -> CommandResult:
+    def _json(self, args: List[str], *, cwd: Path | None = None) -> CommandResult:
+        command = list(args)
+        run_options = {}
+        if cwd is not None:
+            run_options["cwd"] = str(cwd)
+            if "/" in command[0] and not Path(command[0]).is_absolute():
+                command[0] = str(Path(command[0]).resolve())
         attempts = _retry_attempts(args)
         last_error = ""
         for attempt in range(1, attempts + 1):
-            result = subprocess.run(args, text=True, capture_output=True, check=False)
+            result = subprocess.run(command, text=True, capture_output=True, check=False, **run_options)
             if result.returncode == 0:
                 try:
                     return CommandResult(data=json.loads(result.stdout), stdout=result.stdout)

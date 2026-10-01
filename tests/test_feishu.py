@@ -419,6 +419,59 @@ def test_insert_image_passes_dimensions_and_caption_without_removed_selection_fl
     assert "--selection-with-ellipsis" not in client.args
 
 
+def test_external_image_upload_uses_source_cwd_when_project_disk_is_full(tmp_path, monkeypatch):
+    import errno
+    from types import SimpleNamespace
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = tmp_path / "nas" / "figure.png"
+    source.parent.mkdir()
+    source.write_bytes(b"image-data")
+    monkeypatch.chdir(repo)
+    calls = []
+
+    def no_copy(*_args):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"data":{"block_id":"image_1"}}', stderr="")
+
+    monkeypatch.setattr("maxread.feishu.shutil.copyfile", no_copy)
+    monkeypatch.setattr("maxread.feishu.subprocess.run", run)
+    result = FeishuClient().insert_image("https://tenant.feishu.cn/docx/doc", str(source))
+
+    assert result["data"]["block_id"] == "image_1"
+    args, options = calls[0]
+    assert options["cwd"] == str(source.parent)
+    assert args[args.index("--file") + 1] == "./figure.png"
+    assert Path.cwd() == repo
+    assert not (repo / "var" / "feishu_uploads").exists()
+
+
+def test_external_image_upload_preserves_relative_cli_executable(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    image = tmp_path / "nas" / "figure.png"
+    image.parent.mkdir()
+    image.write_bytes(b"image-data")
+    monkeypatch.chdir(repo)
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr("maxread.feishu.subprocess.run", run)
+    FeishuClient(cli="./bin/lark-cli").insert_image("https://tenant.feishu.cn/docx/doc", str(image))
+
+    assert calls[0][0][0] == str(repo / "bin" / "lark-cli")
+    assert calls[0][1]["cwd"] == str(image.parent)
+
+
 def test_find_text_block_id_uses_keyword_fetch_and_exact_text_match():
     client = MarkerFeishu('<fragment><p id="before">prefix [Marker]</p><p id="target">[Marker]</p></fragment>')
 
