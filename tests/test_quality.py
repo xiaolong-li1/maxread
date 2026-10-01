@@ -167,6 +167,26 @@ def test_quality_formula_agent_flags_joined_spacing_commands():
     assert "quality:formula:markdown:high:joined-spacing-command" in warnings
 
 
+def test_quality_detects_code_and_lost_word_spacing_in_formulas():
+    markdown = (
+        r"<latex>echo READY_FOR_NEXT_OP</latex> "
+        r"<latex>/tmp/ctx_offload/</latex> "
+        r"<latex>\frac{\mathrm{total input tokens pushed by the environment}}{32768}</latex>"
+    )
+    warnings = quality_warnings(markdown, f"<p>{markdown}</p>")
+
+    for stage in ("markdown", "xml"):
+        assert f"quality:formula:{stage}:high:program-literal-in-formula" in warnings
+        assert f"quality:formula:{stage}:high:unprotected-word-spaces" in warnings
+    polished = polish_markdown(markdown)
+    assert blocking_quality_warnings(quality_warnings(polished, markdown_to_docx_xml(polished))) == []
+
+
+def test_program_literal_checks_do_not_flag_mathematical_subscripts_or_roman_symbols():
+    markdown = r"<latex>x_i+\alpha_t+h_{kv}+p(x_i)+\mathrm{AR}</latex>"
+    assert blocking_quality_warnings(quality_warnings(markdown, markdown_to_docx_xml(markdown))) == []
+
+
 def test_quality_flags_and_renderer_repairs_fused_greek_variable():
     warnings = quality_warnings(r"<latex>\DeltaS+\SigmaK</latex>")
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import re
+import shlex
 from dataclasses import dataclass
 from enum import Enum
 from typing import List
@@ -83,6 +84,53 @@ _KNOWN_LATEX_COMMANDS = frozenset(
         "top", "triangleq", "varphi", "vartheta", "vec", "xi", "zeta",
     }
 )
+
+_SHELL_COMMANDS = frozenset({
+    "awk", "bash", "cat", "cd", "curl", "echo", "find", "git", "grep",
+    "head", "ls", "mkdir", "node", "npm", "npx", "pip", "pip3", "printf",
+    "python", "python3", "rm", "sed", "sh", "tail", "uv", "wget", "zsh",
+})
+_MATH_FUNCTION_NAMES = {
+    "argmax", "argmin", "cos", "det", "exp", "f", "g", "h", "log",
+    "max", "mean", "min", "p", "q", "relu", "sigmoid", "sin", "softmax",
+    "sqrt", "sum", "tanh", "var",
+}
+_MATH_SNAKE_PREFIXES = {
+    "alpha", "beta", "chi", "delta", "eta", "gamma", "kappa", "lambda",
+    "mu", "nu", "omega", "phi", "psi", "rho", "sigma", "tau", "theta",
+}
+
+
+def is_program_literal(text: str) -> bool:
+    """Recognize unambiguous code before underscores become math subscripts."""
+    value = html.unescape(str(text or "")).strip()
+    if not value or "\n" in value:
+        return False
+    if re.fullmatch(r"(?:/|\./|\.\./|~/)[A-Za-z0-9_./-]+", value):
+        return True
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        words = []
+    if len(words) >= 2 and words[0] in _SHELL_COMMANDS:
+        return True
+    if re.search(r"\\|[{}=+*/^<>≤≥]", value):
+        return False
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_.]*)(?:\(([A-Za-z0-9_.,='\"\s-]*)\))?", value)
+    if not match:
+        return False
+    name, arguments = match.groups()
+    root = name.split("_", 1)[0].lower()
+    if root in _MATH_SNAKE_PREFIXES or name.lower() in _MATH_FUNCTION_NAMES:
+        return False
+    segments = name.split("_")
+    descriptive_snake_case = (
+        len(segments) >= 2
+        and sum(len(segment) >= 2 for segment in segments) >= 2
+        and all(segment.isalnum() for segment in segments)
+    )
+    call_with_code_argument = arguments is not None and "_" in arguments and len(name) >= 3
+    return descriptive_snake_case or call_with_code_argument
 
 
 def compile_formula_markup(markdown: str) -> FormulaCompilation:

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .models import PaperBundle, PaperFigure
-from .formula_compiler import compile_formula_markup
+from .formula_compiler import compile_formula_markup, is_program_literal
 
 
 PREFERRED_FIGURE_NAMES = [
@@ -114,7 +114,7 @@ def _normalize_backticked_math(
         raw = match.group(1).strip()
         if _looks_like_currency_code(raw):
             return match.group(0)
-        if _looks_like_code_identifier(raw):
+        if is_program_literal(raw):
             return match.group(0)
         text_flow = _normalize_backticked_text_flow(raw)
         if text_flow:
@@ -167,50 +167,16 @@ def _normalize_backticked_text_flow(value: str) -> str:
     return text if "\\" not in text else ""
 
 
-_MATH_FUNCTION_NAMES = {
-    "argmax", "argmin", "cos", "det", "exp", "f", "g", "h", "log",
-    "max", "mean", "min", "p", "q", "relu", "sigmoid", "sin", "softmax",
-    "sqrt", "sum", "tanh", "var",
-}
-_MATH_SNAKE_PREFIXES = {
-    "alpha", "beta", "chi", "delta", "eta", "gamma", "kappa", "lambda",
-    "mu", "nu", "omega", "phi", "psi", "rho", "sigma", "tau", "theta",
-}
-
-
 def _restore_code_like_latex(markdown: str) -> str:
     """Undo reviewer mistakes that turn program identifiers into formulas."""
 
     def repl(match: re.Match[str]) -> str:
         body = html.unescape(match.group(1)).strip()
-        if _looks_like_code_identifier(body):
+        if is_program_literal(body):
             return f"`{body}`"
         return match.group(0)
 
     return re.sub(r"<latex>(.*?)</latex>", repl, str(markdown or ""), flags=re.S | re.I)
-
-
-def _looks_like_code_identifier(text: str) -> bool:
-    value = html.unescape(str(text or "")).strip()
-    if not value or "\n" in value or re.search(r"\\|[{}=+*/^<>≤≥]", value):
-        return False
-    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_.]*)(?:\(([A-Za-z0-9_.,='\"\s-]*)\))?", value)
-    if not match:
-        return False
-    name = match.group(1)
-    arguments = match.group(2)
-    root = name.split("_", 1)[0].lower()
-    if root in _MATH_SNAKE_PREFIXES or name.lower() in _MATH_FUNCTION_NAMES:
-        return False
-    segments = name.split("_")
-    descriptive_segments = sum(len(segment) >= 2 for segment in segments)
-    descriptive_snake_case = (
-        len(segments) >= 2
-        and descriptive_segments >= 2
-        and all(segment.isalnum() for segment in segments)
-    )
-    call_with_code_argument = arguments is not None and "_" in arguments and len(name) >= 3
-    return descriptive_snake_case or call_with_code_argument
 
 
 def _looks_like_math_code(text: str) -> bool:
@@ -1064,6 +1030,8 @@ def _sanitize_latex_blocks(
     latex_arg_macros: Optional[Dict[str, str]] = None,
 ) -> str:
     def repl(match: re.Match[str]) -> str:
+        if is_program_literal(match.group(1)):
+            return f"`{html.unescape(match.group(1)).strip()}`"
         body = _normalize_latex_body(match.group(1).strip(), latex_macros=latex_macros, latex_arg_macros=latex_arg_macros)
         if not _is_valid_latex_body(body):
             return f"`{_strip_latex_for_text(body)}`"
@@ -1363,7 +1331,9 @@ def _normalize_mathrm_content(content: str) -> str:
     text = str(content or "").strip()
     text = re.sub(r"\\\s+", " ", text)
     text = re.sub(r"\s+", " ", text)
-    return text
+    # Ordinary whitespace is ignored in math mode, including inside \mathrm.
+    # Use a persistent spacing command, not control spaces that Feishu strips.
+    return text.replace(" ", r"\;")
 
 
 def _repair_cases_missing_row_breaks(body: str) -> str:
@@ -1410,7 +1380,7 @@ def _repair_internal_display_delimiters(body: str) -> str:
 
 
 def _normalize_latex_control_spaces(body: str) -> str:
-    return re.sub(r"(?<!\\)\\(?!\\)\s+", " ", body)
+    return re.sub(r"(?<!\\)\\(?!\\)\s+", lambda _m: r"\;", body)
 
 
 def _normalize_boldsymbol(body: str) -> str:

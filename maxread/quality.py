@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import time
 from typing import Any, Iterable, List
 
-from .formula_compiler import compile_formula_markup
+from .formula_compiler import compile_formula_markup, is_program_literal
 
 
 @dataclass(frozen=True)
@@ -415,6 +415,11 @@ def _fetch_content(payload: Any) -> str:
 def _inspect_latex_body(stage: str, body: str) -> List[QualityIssue]:
     text = str(body or "")
     issues: List[QualityIssue] = []
+    if is_program_literal(text):
+        issues.append(QualityIssue("formula", stage, "high", "program-literal-in-formula"))
+    if any(re.search(r"[A-Za-z]{2,}\s+[A-Za-z]{2,}", content)
+           for content in re.findall(r"\\mathrm\{([^{}]*)\}", text)):
+        issues.append(QualityIssue("formula", stage, "high", "unprotected-word-spaces"))
     unsupported_patterns = [
         # \bmod and \bmatrix share the \bm prefix but are standard LaTeX
         # commands. Keep flagging the paper macro forms \bmX and \bm{...}.

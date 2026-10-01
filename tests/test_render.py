@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 from maxread.models import ArxivMetadata, PaperBundle, PaperFigure
 from maxread.render import compiled_figure_captions, compose_related_figure_groups, constrain_rendered_image, display_caption, enforce_figure_owner_sections, ensure_figure_markers, ensure_priority_figure_markers, ensure_referenced_figure_markers, figure_placeholders, markdown_to_docx_xml, native_image_caption, normalize_figure_captions, polish_markdown, prepare_key_figures, prepare_key_figures_with_owners, remove_false_material_warning, _figure_section_target, _pretty_grid_label, _render_asset
@@ -499,12 +500,46 @@ def test_polish_markdown_preserves_rightarrow_and_text_spaces():
     out = polish_markdown(text)
     xml = markdown_to_docx_xml(out)
     assert r"\rightarrow" in out
-    assert r"\mathrm{with causal mask}" in out
-    assert r"\mathrm{with bidirectional mask}" in out
+    assert r"\mathrm{with\;causal\;mask}" in out
+    assert r"\mathrm{with\;bidirectional\;mask}" in out
     assert r"\ causal" not in out
     assert r"\ bidirectional" not in out
     assert "<code>" not in xml
     assert xml.count("<latex>") == 2
+
+
+@pytest.mark.parametrize("literal", [
+    "echo READY_FOR_NEXT_OP", "grep -c", "python3 read_context.py",
+    "/tmp/ctx_offload/", "./source_tree/paper.tex", "~/context_notes.txt",
+    "manage_context", "publish(req_id)",
+])
+@pytest.mark.parametrize("wrapper", ["`{}`", "<latex>{}</latex>", "${}$"])
+def test_program_literals_stay_code_through_publication(literal, wrapper):
+    source = wrapper.format(literal)
+    polished = polish_markdown(source)
+    xml = markdown_to_docx_xml(polished)
+
+    assert polished.strip() == f"`{literal}`"
+    assert xml == f"<p><code>{literal}</code></p>"
+    assert polish_markdown(polished) == polished
+    if not source.startswith("$"):
+        assert markdown_to_docx_xml(source) == xml
+
+
+@pytest.mark.parametrize("body", [
+    r"\mathrm{pressure}=\frac{\mathrm{total\ input\ tokens\ pushed\ by\ the\ environment}}{32768}",
+    r"\mathrm{pressure}=\frac{\text{total input tokens pushed by the environment}}{32768}",
+])
+def test_contextbench_text_formula_preserves_visible_word_spacing(body):
+    polished = polish_markdown(f"<latex>{body}</latex>")
+    xml = markdown_to_docx_xml(polished)
+
+    numerator = r"\mathrm{total\;input\;tokens\;pushed\;by\;the\;environment}"
+    assert numerator in polished
+    assert numerator in xml
+    assert "<code>" not in xml
+    assert polish_markdown(polished) == polished
+    assert markdown_to_docx_xml(polished) == markdown_to_docx_xml(f"<latex>{body}</latex>")
 
 
 def test_markdown_to_docx_xml_sanitizes_latex_before_publishing():
