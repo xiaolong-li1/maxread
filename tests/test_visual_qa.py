@@ -193,6 +193,28 @@ def test_repair_structural_blocks_normalizes_joined_spacing_command():
     assert "\\quad{}w" in feishu.replacements[0][2]
 
 
+def test_post_publish_repair_recovers_program_literals_and_word_spacing():
+    feishu = FakeVisualFeishu(
+        '<title>T</title><p id="command"><latex>echo READY_FOR_NEXT_OP</latex></p>'
+        '<p id="path"><latex>/tmp/ctx_offload/</latex></p>'
+        r'<p id="pressure"><latex>\frac{\mathrm{total input tokens}}{32768}</latex></p>'
+        r'<p id="math"><latex>x_i+\alpha_t</latex></p>'
+    )
+    changed, _warnings, blocks = repair_structural_blocks(
+        feishu, "doc", [
+            "post-publish:quality:formula:xml:high:program-literal-in-formula",
+            "post-publish:quality:formula:xml:high:unprotected-word-spaces",
+        ], max_repairs=3,
+    )
+
+    assert changed is True
+    assert blocks == ["command", "path", "pressure"]
+    replacements = {block_id: xml for _doc, block_id, xml in feishu.replacements}
+    assert replacements["command"] == "<p><code>echo READY_FOR_NEXT_OP</code></p>"
+    assert replacements["path"] == "<p><code>/tmp/ctx_offload/</code></p>"
+    assert r"\mathrm{total\;input\;tokens}" in replacements["pressure"]
+
+
 def test_repair_structural_blocks_strips_fused_raw_tex_but_preserves_latex():
     feishu = FakeVisualFeishu(
         '<title>T</title><p id="caption">图：\\textbfThe algorithm pipeline</p>'

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 from .feishu import normalize_doc_url
+from .formula_compiler import is_program_literal
 from .openai_client import OpenAIClient
 from .render import _is_valid_latex_body, _normalize_latex_body, _strip_latex_for_text
 from .workflow import WorkflowEvent
@@ -905,6 +906,8 @@ def _repair_formula_xml_block(serialized: str) -> str:
         raw = html.unescape(encoded)
         raw = re.sub(r"<br\s*/?>", " ", raw, flags=re.I)
         raw = re.sub(r"<[^>]+>", "", raw)
+        if is_program_literal(raw):
+            return f"<code>{html.escape(raw.strip(), quote=False)}</code>"
         body = _normalize_latex_body(raw.strip())
         if not has_nested_markup and body == raw.strip() and _is_valid_latex_body(body):
             return match.group(0)
@@ -979,6 +982,8 @@ def _structural_warning_is_repairable(warning: str) -> bool:
             "unsupported-position-macro",
             "internal-display-delimiter",
             "raw-table-math",
+            "program-literal-in-formula",
+            "unprotected-word-spaces",
             "visual-qa:repairable-structural",
         )
     )
