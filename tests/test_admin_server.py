@@ -1,7 +1,10 @@
 import hashlib
 import http.client
 import json
+import shutil
+import subprocess
 import threading
+import pytest
 from types import SimpleNamespace
 
 import maxread.admin_server as admin_server
@@ -9,6 +12,65 @@ from maxread.admin_architecture import architecture_html, architecture_spec
 from maxread.admin_server import ADMIN_SESSION_SECONDS, AdminHandler, AdminServer, INDEX_HTML, _admin_summary, _attach_user_names, _limit, _record_filters, _resolved_web_accounts
 from maxread.db import Store
 from maxread.workflow import transition
+
+
+def test_dashboard_user_filter_recovers_after_login_and_refresh(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for dashboard lifecycle test")
+    script = INDEX_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    harness = r'''
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const elements = new Map();
+const element = id => {
+  if (!elements.has(id)) elements.set(id, {innerHTML:'', value:'', textContent:'',
+    addEventListener(){}, close(){}, classList:{add(){},remove(){}}});
+  return elements.get(id);
+};
+let authenticated = false;
+let userFailure = false;
+let userRequests = 0;
+const context = vm.createContext({console:{warn(){},error(){}}, AbortController, URLSearchParams,
+  document:{getElementById:element,querySelectorAll:()=>[]},
+  window:{location:{pathname:'/maxread/admin',search:''},setTimeout,clearTimeout},
+  fetch:async url => {
+    let payload = {};
+    let status = 200;
+    if (url.endsWith('/api/admin/login')) authenticated = true;
+    if (url.endsWith('/api/admin/logout')) authenticated = false;
+    if (/\/api\/admin\/(status|login)$/.test(url)) payload = {authenticated};
+    if (url.includes('/api/users?')) {
+      userRequests++;
+      status = userFailure ? 503 : authenticated ? 200 : 401;
+      payload = status === 200 ? [{sender_id:'ou_test',sender_name:'Test User',event_count:2}] : {error:'upstream unavailable'};
+    }
+    return {ok:status===200,status,json:async()=>payload};
+  }
+});
+vm.runInContext(SOURCE, context);
+(async()=>{
+  await vm.runInContext('refreshDashboard()',context);
+  assert.equal(userRequests,0);
+  assert.equal(element('filter-user').disabled,true);
+  await vm.runInContext('loginAdmin({preventDefault(){}})',context);
+  assert.match(element('filter-user').innerHTML,/Test User/);
+  assert.equal(element('filter-user').disabled,false);
+  userFailure = true;
+  await vm.runInContext('refreshDashboard()',context);
+  assert.match(element('filter-user').innerHTML,/upstream unavailable/);
+  userFailure = false;
+  await vm.runInContext('refreshDashboard()',context);
+  assert.match(element('filter-user').innerHTML,/Test User/);
+  await vm.runInContext('logoutAdmin()',context);
+  assert.equal(element('filter-user').disabled,true);
+  assert.doesNotMatch(element('filter-user').innerHTML,/Test User/);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+    path = tmp_path / "dashboard-users.cjs"
+    path.write_text("const SOURCE = " + json.dumps(script) + ";\n" + harness)
+    result = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_admin_summary_uses_existing_records(tmp_path):
@@ -251,7 +313,7 @@ def test_architecture_html_is_self_contained_and_uses_workflow_api():
 
 
 def test_admin_html_recovers_from_transient_api_failure():
-    assert "Promise.all([loadUsers(), loadAdminStatus()]).finally(refreshAll)" in INDEX_HTML
+    assert "refreshDashboard();" in INDEX_HTML
     assert "数据加载失败" in INDEX_HTML
     assert "AbortController" in INDEX_HTML
 

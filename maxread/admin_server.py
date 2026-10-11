@@ -1141,7 +1141,7 @@ INDEX_HTML = r'''
         <a class="architecture-link" href="architecture"><svg viewBox="0 0 24 24"><path d="M4 6h6v6H4zM14 3h6v6h-6zM14 15h6v6h-6zM10 9l4-3M10 11l4 6"/></svg>Pipeline 架构</a>
         <a class="architecture-link" href="mail"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="m4 7 8 6 8-6"/></svg>邮件机器人</a>
         <button id="admin-auth-button" onclick="toggleAdminSession()">管理员登录</button>
-        <button class="primary" onclick="refreshAll()">刷新</button>
+        <button class="primary" onclick="refreshDashboard()">刷新</button>
       </div>
     </header>
 
@@ -1204,15 +1204,39 @@ $('filter-days').addEventListener('change', async (event) => { state.days = even
 $('filter-user').addEventListener('change', (event) => { state.senderId = event.target.value; refreshAll(); });
 
 async function loadUsers() {
+  const select = $('filter-user');
+  if (!state.adminAuthenticated) {
+    state.senderId = '';
+    select.innerHTML = '<option value="">管理员登录后可筛选用户</option>';
+    select.disabled = true;
+    select.title = '';
+    return;
+  }
   const selected = state.senderId;
   try {
     const rows = await api(`/api/users?days=${encodeURIComponent(state.days)}`);
-    $('filter-user').innerHTML = '<option value="">全部用户</option>' + rows.map(r => `<option value="${esc(r.sender_id)}">${esc(r.sender_name || r.sender_id)} · ${esc(r.event_count)}</option>`).join('');
-    if (rows.some(r => r.sender_id === selected)) { $('filter-user').value = selected; } else { state.senderId = ''; }
+    select.innerHTML = '<option value="">全部用户</option>' + rows.map(r => `<option value="${esc(r.sender_id)}">${esc(r.sender_name || r.sender_id)} · ${esc(r.event_count)}</option>`).join('');
+    select.disabled = false;
+    select.title = '';
+    if (rows.some(r => r.sender_id === selected)) { select.value = selected; } else { state.senderId = ''; }
   } catch (error) {
-    $('filter-user').innerHTML = '<option value="">用户列表暂不可用</option>';
+    if (error.status === 401) {
+      state.adminAuthenticated = false;
+      updateAdminButton();
+      return loadUsers();
+    }
+    const reason = error.name === 'AbortError' ? '请求超时' : error.message;
+    select.innerHTML = `<option value="">用户列表加载失败：${esc(reason)}</option>`;
+    select.disabled = true;
+    select.title = reason;
     console.warn('user filter unavailable', error);
   }
+}
+
+async function refreshDashboard() {
+  await loadAdminStatus();
+  await loadUsers();
+  await refreshAll();
 }
 
 async function loadAdminStatus() {
@@ -1244,6 +1268,7 @@ async function loginAdmin(event) {
     closeAdminDialog();
     updateAdminButton();
     if (state.adminAuthenticated && adminNextPage) { window.location.replace(adminNextPage); return; }
+    await loadUsers();
     refreshAll();
   } catch (error) {
     $('admin-login-error').textContent = error.message || '登录失败';
@@ -1253,6 +1278,7 @@ async function logoutAdmin() {
   await api('/api/admin/logout', {method:'POST', body:'{}'}).catch(() => null);
   state.adminAuthenticated = false;
   updateAdminButton();
+  await loadUsers();
   refreshAll();
 }
 function adminExpired(error) {
@@ -1426,7 +1452,7 @@ function table(headers, rows, className='') {
 }
 function userCell(r) { const name = r.sender_name || '飞书用户'; const id = r.sender_id || ''; return `<strong>${esc(name)}</strong><br><span class="mono muted">${esc(id)}</span>`; }
 function small(v) { return `<span class="mono">${esc(v)}</span>`; }
-Promise.all([loadUsers(), loadAdminStatus()]).finally(refreshAll);
+refreshDashboard();
 </script>
 </body>
 </html>
