@@ -244,9 +244,9 @@ class VisualQAController:
                 error=remote.error,
             )
             result.rounds.append(audit_round)
-            if remote.status == "infrastructure_pending":
+            if remote.status in {"infrastructure_pending", "runner_pending"}:
                 result.warnings.append(
-                    f"visual-qa:infrastructure:export-pending:{_clip(remote.error or 'Feishu PDF export is still processing')}"
+                    f"visual-qa:infrastructure:runner-pending:{_clip(remote.error or '视觉验收运行器尚未完成')}"
                 )
                 break
             if remote.error:

@@ -144,20 +144,19 @@ The durable state machine keeps those internal states for audit, but the archite
 
 Retries are durable across queue jobs. MaxRead reloads the latest failed draft plus the generation, pre-publish quality, and visual QA ledgers from `pipeline_artifacts`; the repair prompt treats those diagnostics as a no-regression checklist. In a Feishu topic, a user can reply `重试` to the failure message (or `重试 2608.10416`) without reposting the original link or mentioning the bot again. Queue acknowledgements estimate start and completion time from the median duration of recent successful jobs of the same source kind instead of a fixed per-batch constant.
 
-An optional delivery worker can inspect the final Feishu rendering for invalid formulas, leaked formatting commands, abnormal blank pages, and other visible failures. The preferred production path exports the Docx through Feishu's server-side PDF renderer and inspects every selected PDF page with Poppler; Playwright remains a fallback. Enable it only after the bot has `drive:export:readonly` and `docs:document:export` and a smoke test passes:
+An optional delivery worker can inspect the final Feishu rendering for invalid formulas, leaked formatting commands, abnormal blank pages, and other visible failures. The production path opens the live Feishu page with Playwright/CDP, samples its real viewports, and does not depend on asynchronous Docx-to-PDF export:
 
 ```bash
 MAXREAD_VISUAL_QA_ENABLED=true
 MAXREAD_VISUAL_QA_HOST=localhost
 MAXREAD_VISUAL_QA_RUNNER=/opt/maxread/deploy/visual_qa/run_visual_qa.sh
 MAXREAD_VISUAL_QA_REMOTE_ROOT=/opt/maxread-browser
-MAXREAD_VISUAL_QA_EXPORT_PDF=true
 MAXREAD_VISUAL_QA_RUNNER_TIMEOUT=120
 MAXREAD_VISUAL_QA_INSPECT_RETRIES=2
 MAXREAD_VISUAL_QA_REPAIR_ROUNDS=2
 ```
 
-The delivery worker is isolated; the coordinator changes only explicitly identified Feishu blocks. Formula/image/table counts are telemetry, not acceptance thresholds: delivery is blocked only by concrete visible failures in the exported rendering. After a successful inspection, MaxRead performs at most two inspect -> targeted repair -> inspect cycles. Each attempt and finding is saved as `09-visual-qa.json`; successful runs delete exported PDFs and page PNGs, while failures retain evidence for diagnosis.
+The delivery worker is isolated; the coordinator changes only explicitly identified Feishu blocks. Formula/image/table counts are telemetry, not acceptance thresholds: delivery is blocked only by concrete visible failures in the live page. After a successful inspection, MaxRead performs at most two inspect -> targeted repair -> inspect cycles. Each attempt and finding is saved as `09-visual-qa.json`; successful runs remove only browser screenshots, while failures retain evidence for diagnosis.
 
 Set `MAXREAD_OPENAI_API_MODE=chat` for OpenAI-compatible gateways whose
 `/chat/completions` implementation follows instructions more reliably than

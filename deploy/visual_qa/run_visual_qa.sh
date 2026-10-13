@@ -14,7 +14,7 @@ if ! [[ "$SLOTS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 run_qa() {
-  local output_file output_dir qa_script report_file status
+  local output_file output_dir report_file status
   output_file="$(mktemp)"
   output_dir=""
   local previous=""
@@ -25,12 +25,10 @@ run_qa() {
     fi
     previous="$argument"
   done
-  qa_script="$ROOT/maxread_visual_qa.py"
-  if [[ "${MAXREAD_VISUAL_QA_EXPORT_PDF:-false}" =~ ^(1|true|yes|on)$ && -f "$ROOT/maxread_pdf_qa.py" ]]; then
-    qa_script="$ROOT/maxread_pdf_qa.py"
-  fi
   set +e
-  timeout --kill-after=5 "${MAXREAD_VISUAL_QA_RUNNER_TIMEOUT:-220}" "$PYTHON_BIN" "$qa_script" "$@" >"$output_file"
+  # Production acceptance always inspects the live Feishu page with
+  # Playwright/CDP. Do not switch to asynchronous Feishu PDF export here.
+  timeout --kill-after=5 "${MAXREAD_VISUAL_QA_RUNNER_TIMEOUT:-220}" "$PYTHON_BIN" "$ROOT/maxread_visual_qa.py" "$@" >"$output_file"
   status=$?
   set -e
   cat "$output_file"

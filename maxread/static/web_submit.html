@@ -612,7 +612,7 @@
     }
     function friendlyError(project) {
       const error = String(project.error || '');
-      if (error.includes('飞书 PDF 导出超时')) return '飞书 PDF 导出仍在等待，项目可继续重试验收';
+      if (error.includes('飞书 PDF 导出超时') || error.includes('visual-qa:infrastructure:')) return '真实页面视觉验收暂未完成，项目可继续重试验收';
       return error || '这次没有完成，可以从当前卡片重新尝试';
     }
 

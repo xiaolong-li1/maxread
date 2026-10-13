@@ -83,11 +83,11 @@ class StubVisualQA(VisualQAController):
         return self.results.pop(0)
 
 
-def test_export_pending_is_reported_as_infrastructure_not_visual_finding():
+def test_runner_pending_is_reported_as_infrastructure_not_visual_finding():
     controller = StubVisualQA([
         RemoteVisualResult(
             status="infrastructure_pending",
-            error="Feishu PDF export is still processing; ticket=123",
+            error="visual runner is still processing",
         )
     ])
 
@@ -95,7 +95,7 @@ def test_export_pending_is_reported_as_infrastructure_not_visual_finding():
 
     assert result.passed is False
     assert result.remote.status == "infrastructure_pending"
-    assert any(item.startswith("visual-qa:infrastructure:export-pending:") for item in result.warnings)
+    assert any(item.startswith("visual-qa:infrastructure:runner-pending:") for item in result.warnings)
 
 
 class FormulaRepairLLM:

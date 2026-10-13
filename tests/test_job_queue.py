@@ -376,7 +376,7 @@ def test_visual_auto_retry_uses_latest_published_checkpoint_after_many_manual_at
     assert manager._auto_retry(
         store,
         claimed,
-        "visual-qa:infrastructure:export-pending:ticket=123",
+        "visual-qa:infrastructure:runner-pending:runner=browser",
         "worker-a",
     ) is True
 

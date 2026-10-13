@@ -511,8 +511,8 @@ def project_status_answer(project: dict, question: str) -> str:
 def _friendly_error(error: str) -> str:
     text = str(error or "")
     reasons = []
-    if any(token in text for token in ("Feishu PDF export failed", "visual-qa:remote-error", "export-pending", "飞书 PDF 导出")):
-        reasons.append("飞书 PDF 导出超时，尚未完成视觉验收")
+    if any(token in text for token in ("visual-qa:infrastructure:", "visual-qa:remote-error", "export-pending", "Feishu PDF export")):
+        reasons.append("真实页面视觉验收暂未完成，系统会继续重试")
     if "html-tag-in-formula" in text:
         reasons.append("发布后公式检查发现异常格式")
     if "missing-formula" in text or "invalid-formula" in text:

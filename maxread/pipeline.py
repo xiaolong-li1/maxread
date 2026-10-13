@@ -1929,14 +1929,14 @@ def _post_publish_failure_message(warnings) -> str:
     quality = [item for item in items if item not in infrastructure]
     if infrastructure and not quality:
         return (
-            "文档已生成，但飞书 PDF 导出仍在处理中，视觉验收尚未完成；"
-            "这是可恢复的基础设施状态，系统会继续重试：" + "; ".join(infrastructure)
+            "文档已生成，但真实页面视觉验收尚未完成；"
+            "这是可恢复的验收基础设施状态，系统会继续重试：" + "; ".join(infrastructure)
         )
     if infrastructure:
         return (
             "文档已生成，但发布后验收尚未完成："
             + "; ".join(quality)
-            + "；飞书导出仍在处理中："
+            + "；视觉验收运行器仍在处理中："
             + "; ".join(infrastructure)
         )
     return "文档已生成，但发布后质检发现明确问题，暂不交付：" + "; ".join(items)

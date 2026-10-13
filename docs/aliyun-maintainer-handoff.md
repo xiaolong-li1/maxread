@@ -47,7 +47,7 @@ Main files:
 - `/opt/maxread/maxread.sqlite3`: authoritative SQLite database.
 - `/opt/maxread/.env`: runtime configuration and model credentials, mode 600.
 - `/opt/maxread/var/maxread/`: source bundles and pipeline artifacts.
-- `/opt/maxread-browser/`: Feishu PDF export and visual-QA runner state.
+- `/opt/maxread-browser/`: Playwright/CDP visual-QA runner state.
 - `/root/.lark-cli/`: bot identity and Feishu authorization.
 
 Request flow:
@@ -90,7 +90,6 @@ MAXREAD_FIGURE_RENDER_WORKERS=2
 MAXREAD_FIGURE_VISION_WORKERS=2
 MAXREAD_FEISHU_CONCURRENCY=1
 MAXREAD_VISUAL_QA_ENABLED=true
-MAXREAD_VISUAL_QA_EXPORT_PDF=true
 MAXREAD_VISUAL_QA_CONCURRENCY=1
 MAXREAD_MAX_RENDERED_IMAGE_BYTES=10485760
 MAXREAD_MAX_RENDERED_IMAGE_PIXELS=16000000

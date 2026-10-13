@@ -107,32 +107,31 @@ and can introduce formatting regressions. Store every finding and the previous
 attempt so a repair prompt receives exact feedback rather than repeating a
 generic instruction.
 
-## PDF and visual QA policy
+## Live-page visual QA policy
 
-1. Publish a durable checkpoint before PDF inspection.
-2. Verify the live Docx XML first; then export the Feishu document to PDF.
-3. Persist the Feishu export ticket and poll it for 65 seconds. Never create a
-   new export ticket on every inspection attempt.
-4. Inspect visible failures, not raw object counts. Formula/image/table counts
+1. Publish a durable checkpoint before visual inspection.
+2. Verify the live Docx XML first; then inspect the published Feishu page with
+   Playwright/CDP. Production QA does not use asynchronous PDF export.
+3. Inspect visible failures, not raw object counts. Formula/image/table counts
    are diagnostics only.
-5. Allow two inspect retries. A concrete visual issue can receive at most two
-   bounded repairs, each followed by a real PDF recheck.
-6. Formula/raw-format findings are repaired as scoped XML patches, never by
+4. Allow two inspect retries. A concrete visual issue can receive at most two
+   bounded repairs, each followed by a fresh live-page recheck.
+5. Formula/raw-format findings are repaired as scoped XML patches, never by
    regenerating a section. The multimodal repair call receives the failing
    screenshot, current Feishu Docx XML, allowed block XML and SHA-256 hashes.
    A patch must name an allowed block, match its current hash, and replace one
    exact formula/text fragment. Unrelated XML is preserved by code.
-7. A visual finding without a block ID may use deterministic repair only when
+6. A visual finding without a block ID may use deterministic repair only when
    the fresh document has exactly one repairable candidate. Ambiguous cases go
    through screenshot + XML patch selection; do not scan-and-edit the first
    suspicious block.
-8. Treat `export-pending`, browser transport, and remote-runner errors as
-   infrastructure failures. The queue may retry infrastructure once.
-9. An infrastructure retry reloads the latest queue row and resumes the
+7. Treat browser transport and remote-runner errors as infrastructure failures.
+   The queue may retry infrastructure once.
+8. An infrastructure retry reloads the latest queue row and resumes the
    published checkpoint. It must not regenerate the paper.
-10. If the retry budget is exhausted, retain and return the published document
+9. If the retry budget is exhausted, retain and return the published document
    URL with an explicit manual-review status. Never discard an already useful
-   document because PDF export was slow.
+   document because the browser runner was slow.
 
 ## Production settings
 

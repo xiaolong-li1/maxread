@@ -12,12 +12,14 @@ on-demand subprocess. It does not start or depend on the MaxRead listener.
 - Mutation: none. The local MaxRead process owns authenticated Feishu writes.
 - Retention: the latest 60 run directories are kept.
 
-With `MAXREAD_VISUAL_QA_EXPORT_PDF=true`, the runner uses Feishu's server-side
-Docx-to-PDF export and renders the PDF pages with Poppler. It blocks only on
-concrete visible failures such as invalid-formula labels, raw formatting text,
-or abnormal blank pages. Persisted image/formula/table counts are telemetry,
-not acceptance thresholds. Successful pipeline runs remove the exported PDF
-and page images; failed runs retain them for diagnosis.
+The production runner always opens the live Feishu page with Playwright/CDP.
+It does not call Feishu's asynchronous Docx-to-PDF export or wait for an export
+ticket. It blocks only on concrete visible failures such as invalid-formula
+labels, raw formatting text, block overlap, broken images, or abnormal blank
+viewports. Persisted image/formula/table counts are telemetry, not acceptance
+thresholds. Successful pipeline runs remove browser screenshots; failed runs
+retain them for diagnosis. `maxread_pdf_qa.py` is retained only as a manual,
+offline diagnostic utility and is not selected by `run_visual_qa.sh`.
 
 The local coordinator applies at most two deterministic block patches per
 document. Supported patches are malformed formula/raw-format blocks and image

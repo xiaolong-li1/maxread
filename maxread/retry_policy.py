@@ -12,10 +12,6 @@ _DELIVERY_INFRASTRUCTURE_MARKERS = (
     "browser timed out",
     "browser crashed",
     "login.feishu.cn/accounts/trap",
-    "feishu pdf export failed",
-    "pdf export timeout",
-    "pdf export timed out",
-    "export-pending",
 )
 
 _DETERMINISTIC_QUALITY_MARKERS = (

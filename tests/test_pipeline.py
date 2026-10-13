@@ -88,7 +88,7 @@ def test_published_document_title_prefers_embedded_english_title():
     )
 
 
-def test_post_publish_message_distinguishes_export_infrastructure_from_visual_failure():
+def test_post_publish_message_distinguishes_visual_infrastructure_from_visual_failure():
     infrastructure = _post_publish_failure_message([
         "visual-qa:infrastructure:export-pending:ticket=123"
     ])
@@ -96,8 +96,9 @@ def test_post_publish_message_distinguishes_export_infrastructure_from_visual_fa
         "visual-qa:high:invalid-formula:page 2"
     ])
 
-    assert "飞书 PDF 导出仍在处理中" in infrastructure
-    assert "可恢复的基础设施状态" in infrastructure
+    assert "真实页面视觉验收尚未完成" in infrastructure
+    assert "验收基础设施状态" in infrastructure
+    assert "PDF" not in infrastructure
     assert "质检发现明确问题" in quality
 
 
