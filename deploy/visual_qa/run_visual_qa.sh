@@ -6,7 +6,18 @@ PYTHON_BIN="${MAXREAD_VISUAL_QA_PYTHON:-python3}"
 export FONTCONFIG_FILE="${FONTCONFIG_FILE:-$ROOT/fonts.conf}"
 export LD_LIBRARY_PATH="$ROOT/libs/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
-export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$ROOT/browsers}"
+if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
+  if [[ -d "$ROOT/browsers" ]]; then
+    PLAYWRIGHT_BROWSERS_PATH="$ROOT/browsers"
+  elif [[ -d "${HOME:-}/.cache/ms-playwright" ]]; then
+    # The browser bundle may be installed by Playwright's normal cache
+    # instead of the MaxRead resource bundle.
+    PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
+  else
+    PLAYWRIGHT_BROWSERS_PATH="$ROOT/browsers"
+  fi
+fi
+export PLAYWRIGHT_BROWSERS_PATH
 
 SLOTS="${MAXREAD_VISUAL_QA_CONCURRENCY:-1}"
 if ! [[ "$SLOTS" =~ ^[1-9][0-9]*$ ]]; then

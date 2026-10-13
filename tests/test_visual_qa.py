@@ -52,6 +52,20 @@ def test_visual_qa_concurrency_defaults_to_one_and_validates_env(monkeypatch):
     assert _visual_qa_concurrency() == 1
 
 
+def test_production_runner_uses_live_page_and_not_pdf_export():
+    runner = (visual_qa_module.Path(__file__).parents[1] / "deploy" / "visual_qa" / "run_visual_qa.sh").read_text()
+
+    assert "MAXREAD_VISUAL_QA_EXPORT_PDF" not in runner
+    assert '"$ROOT/maxread_visual_qa.py"' in runner
+
+
+def test_browser_runner_uses_bounded_commit_navigation():
+    source = (visual_qa_module.Path(__file__).parents[1] / "deploy" / "visual_qa" / "maxread_visual_qa.py").read_text()
+
+    assert 'wait_until="commit"' in source
+    assert "set_default_navigation_timeout(30_000)" in source
+
+
 def test_pdf_export_ticket_and_doc_token_are_recoverable_from_cli_output():
     output = "Created export task: 7679279762142366688 Export task is still in progress. Continue with: lark-cli drive +task_result --scenario export --ticket 7679279762142366688"
 

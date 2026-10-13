@@ -69,11 +69,16 @@ def main() -> int:
                     locale="zh-CN",
                     device_scale_factor=1,
                 )
+                context.set_default_navigation_timeout(30_000)
                 page = context.new_page()
                 page.set_default_timeout(5_000)
                 _phase("navigate")
-                page.goto(args.url, wait_until="domcontentloaded", timeout=60_000)
-                page.wait_for_timeout(3_000)
+                # Feishu keeps background resources open for a long time.
+                # Waiting for DOMContentLoaded made a slow network look like
+                # a hung QA job. A committed document is enough to begin the
+                # bounded viewport inspection after a short stabilization.
+                page.goto(args.url, wait_until="commit", timeout=30_000)
+                page.wait_for_timeout(2_000)
                 try:
                     page.locator(EDITOR_SELECTORS).first.wait_for(state="attached", timeout=20_000)
                 except Exception:
